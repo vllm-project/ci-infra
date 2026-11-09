@@ -125,12 +125,14 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         if aiter_nightly:
+            nightly_keys = aiter_nightly_step_keys(steps)
+            # A rerun (VLLM_CI_ONLY_STEP_KEYS) runs only the jobs it names.
+            run_keys = global_config["only_step_keys"] or nightly_keys
             try:
-                global_config["only_step_keys"] = aiter_nightly_step_keys(
-                    steps, global_config["only_step_keys"]
-                )
+                check_runs_in_aiter_nightly(steps, run_keys, nightly_keys)
             except ValueError as error:
                 _fail_generation(str(error))
+            global_config["only_step_keys"] = run_keys
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )
@@ -520,14 +522,9 @@ def select_steps_and_dependencies(
     return selected, frozenset(selected_step_keys)
 
 
-def aiter_nightly_step_keys(
-    steps: List[Step], only_step_keys: Optional[FrozenSet[str]]
-) -> FrozenSet[str]:
+def aiter_nightly_step_keys(steps: List[Step]) -> FrozenSet[str]:
     """The steps the AITER nightly runs: the AMD build steps and the AMD GPU
-    jobs on gfx942/gfx950, or `only_step_keys` (VLLM_CI_ONLY_STEP_KEYS) if set.
-
-    Raises ValueError if those, or their prerequisites, include any other step.
-    """
+    jobs on gfx942/gfx950."""
     nightly_keys = set()
     for step in steps:
         key = step.key or _generate_step_key(step.label)
@@ -541,7 +538,14 @@ def aiter_nightly_step_keys(
             and runs_in_aiter_nightly(amd_mirror.get("device"))
         ):
             nightly_keys.add(f"amd-{key}")
-    run_keys = frozenset(nightly_keys) if only_step_keys is None else only_step_keys
+    return frozenset(nightly_keys)
+
+
+def check_runs_in_aiter_nightly(
+    steps: List[Step], run_keys: FrozenSet[str], nightly_keys: FrozenSet[str]
+) -> None:
+    """Raises ValueError if `run_keys`, or their prerequisites, include a step
+    outside `nightly_keys`."""
     _, needed_keys = select_steps_and_dependencies(steps, run_keys)
     non_nightly_keys = needed_keys - nightly_keys
     if non_nightly_keys:
@@ -549,7 +553,6 @@ def aiter_nightly_step_keys(
             "AITER nightly runs only the AMD build steps and AMD GPU jobs on "
             "gfx942/gfx950, but needs: " + ", ".join(sorted(non_nightly_keys))
         )
-    return run_keys
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:

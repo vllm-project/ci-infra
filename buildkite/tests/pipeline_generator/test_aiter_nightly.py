@@ -1,3 +1,4 @@
+import json
 import subprocess
 
 import pytest
@@ -91,32 +92,46 @@ def _jobs(pipeline):
 
 
 class AiterNightlyBuild:
-    """A scheduled AITER nightly build of vllm-project/vllm main, on a
-    checkout with build.sh. Adjust `config`, `steps` or the environment, then
-    call `generate()`. Nothing leaves the process: what the generator would
-    send out is recorded on the attributes below."""
+    """A scheduled AITER nightly of vllm-project/vllm main, on a checkout with
+    build.sh. Change `config`, `steps` or the environment, then `generate()`.
+    Commands are recorded in `calls`, not run."""
 
     def __init__(self, config, checkout):
-        self.config = config  # the global config the generator reads
-        self.steps = _steps()  # what every job dir yields
-        self.checkout = checkout  # the vLLM checkout, also the cwd
+        self.config = config
+        self.steps = _steps()
+        self.checkout = checkout
         self.pipeline_file = checkout / "out" / "pipeline.yaml"
-        self.agent_calls = []  # every subprocess.run command
-        self.early_jobs = {}  # jobs uploaded before the pipeline, by key
-        self.annotations = []  # (text, kwargs) of each build annotation
-        self.sharded_keys = []  # steps runtime sharding planned
-        self.selector_records = []  # the selector's decision records
+        self.calls = []
+        self.early_jobs = {}  # uploaded ahead of the pipeline
+        self.sharded_keys = []
 
     def generate(self):
-        """Run the generator; returns the uploaded pipeline's jobs, by key."""
+        """Returns the pipeline's jobs, by key."""
         generator = object.__new__(pipeline_generator.PipelineGenerator)
         generator.output_file_path = str(self.pipeline_file)
         generator.generate()
         return _jobs(yaml.safe_load(self.pipeline_file.read_text()))
 
+    @property
+    def uploads(self):
+        return [cmd for cmd in self.calls if "upload" in cmd]
+
+    @property
+    def error_annotations(self):
+        return [
+            cmd[2]
+            for cmd in self.calls
+            if cmd[1] == "annotate" and cmd[-2:] == ["--style", "error"]
+        ]
+
+    @property
+    def selector_record(self):
+        path = self.pipeline_file.parent / selector_gate.DECISION_FILE
+        return json.loads(path.read_text())
+
     def _run(self, cmd, *args, **kwargs):
-        self.agent_calls.append(cmd)
-        if cmd[:3] == ["buildkite-agent", "pipeline", "upload"]:
+        self.calls.append(cmd)
+        if cmd[1:3] == ["pipeline", "upload"]:
             with open(cmd[3]) as f:
                 self.early_jobs.update(_jobs(yaml.safe_load(f)))
         return subprocess.CompletedProcess(cmd, 0)
@@ -128,20 +143,18 @@ class AiterNightlyBuild:
 
 @pytest.fixture
 def build(fake_global_config, monkeypatch, tmp_path):
-    (tmp_path / ".buildkite/scripts/rocm").mkdir(parents=True)
-    (tmp_path / ".buildkite/scripts/rocm/build.sh").touch()
+    build_sh = tmp_path / ".buildkite/scripts/rocm/build.sh"
+    build_sh.parent.mkdir(parents=True)
+    build_sh.touch()
     (tmp_path / "out").mkdir()
     monkeypatch.chdir(tmp_path)
-    for name, value in {
-        "BUILDKITE_REPO": "https://github.com/vllm-project/vllm.git",
-        "BUILDKITE_PULL_REQUEST": "false",
-        "BUILDKITE_BRANCH": "main",
-        "BUILDKITE_JOB_ID": "job-1",  # so the early image upload applies
-        "AITER_NIGHTLY": "1",
-    }.items():
-        monkeypatch.setenv(name, value)
-    for name in ("NOAUTO", "VLLM_CI_RUNTIME_SHARD"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BUILDKITE_REPO", "https://github.com/vllm-project/vllm.git")
+    monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
+    monkeypatch.setenv("BUILDKITE_BRANCH", "main")
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "job-1")  # enables the early upload
+    monkeypatch.setenv("AITER_NIGHTLY", "1")
+    monkeypatch.delenv("NOAUTO", raising=False)
+    monkeypatch.delenv("VLLM_CI_RUNTIME_SHARD", raising=False)
     fake_global_config.update(job_dirs=["jobs"], aiter_nightly="1")
 
     build = AiterNightlyBuild(fake_global_config, tmp_path)
@@ -149,20 +162,9 @@ def build(fake_global_config, monkeypatch, tmp_path):
     monkeypatch.setattr(
         pipeline_generator, "read_steps_from_job_dir", lambda _: build.steps
     )
-    monkeypatch.setattr(pipeline_generator.subprocess, "run", build._run)
-    monkeypatch.setattr(
-        pipeline_generator,
-        "_annotate_best_effort",
-        lambda text, **kwargs: build.annotations.append((text, kwargs)),
-    )
+    monkeypatch.setattr(subprocess, "run", build._run)
+    # Would fetch test timings from Buildkite.
     monkeypatch.setattr(buildkite_step.runtime_shard, "plan_step", build._plan_step)
-    monkeypatch.setattr(buildkite_step.runtime_shard, "annotate", lambda *a: None)
-    monkeypatch.setattr(
-        selector_gate,
-        "write_and_upload",
-        lambda record, _: build.selector_records.append(record),
-    )
-    monkeypatch.setattr(selector_gate, "annotate", lambda record: None)
     return build
 
 
@@ -184,46 +186,52 @@ def test_runs_in_aiter_nightly(device, expected):
     assert amd.runs_in_aiter_nightly(device) is expected
 
 
-@pytest.mark.parametrize("noauto", [False, True])
-def test_nightly_runs_only_the_amd_lane(build, monkeypatch, noauto):
-    if noauto:
-        monkeypatch.setenv("NOAUTO", "1")
-    # Ignored: its records would mislead the test selector.
-    for recorder in ("VLLM_CI_KERNREC", "VLLM_CI_KERNREC_AMD", "VLLM_CI_FNREC"):
-        monkeypatch.setenv(recorder, "1")
-    monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "on")
-    # A docs-only last commit does not skip it.
-    build.config.update(list_file_diff=["docs/index.md"], docs_only_disable="0")
-
+def test_runs_the_amd_build_steps_and_gfx942_gfx950_jobs(build):
     jobs = build.generate()
 
-    # Nothing gated or deferred: no block, no "Run more jobs", no early upload,
-    # no recording or collect step.
     assert set(jobs) == NIGHTLY_JOBS
-    uploaded = build.pipeline_file.read_text()
-    for marker in ("kernrec", "fnrec", "VLLM_KERNEL_SYMBOL_MAP"):
-        assert marker not in uploaded
-    assert build.early_jobs == {}
-    assert not any("artifact" in cmd for cmd in build.agent_calls)
     for job in jobs.values():
-        for dependency in job.get("depends_on") or []:
-            assert dependency in jobs, (job["key"], dependency)
-    # vLLM's build steps, unchanged, into rocm/vllm-dev.
+        assert set(job.get("depends_on") or []) <= set(jobs), job["key"]
+    assert jobs["native-on-image-build"]["depends_on"] == ["image-build-amd"]
+    assert build.early_jobs == {}  # everything goes up in one upload
+
+
+def test_builds_into_vllm_dev_with_vllms_build_sh(build):
+    jobs = build.generate()
+
     base, image = jobs["refresh-rocm-base-amd"], jobs["image-build-amd"]
     assert image["depends_on"] == ["refresh-rocm-base-amd"]
     assert image["commands"][-1] == "bash .buildkite/scripts/rocm/build.sh rocm ci"
-    assert (
-        base["env"]["ROCM_CI_REPO"] == image["env"]["ROCM_CI_REPO"] == "rocm/vllm-dev"
-    )
+    assert base["env"]["ROCM_CI_REPO"] == "rocm/vllm-dev"
+    assert image["env"]["ROCM_CI_REPO"] == "rocm/vllm-dev"
     assert base["concurrency_group"] == "vllm/rocm/base/rocm/vllm-dev"
     pod = jobs["amd-mi355"]["plugins"][0]["kubernetes"]["podSpecPatch"]
     assert pod["containers"][0]["image"] == "rocm/vllm-dev:build-$BUILDKITE_BUILD_ID"
-    assert jobs["native-on-image-build"]["depends_on"] == ["image-build-amd"]
-    # Runtime sharding plans only the jobs it keeps.
+
+
+def test_ignores_noauto_docs_only_and_the_recorders(build, monkeypatch):
+    monkeypatch.setenv("NOAUTO", "1")  # nobody would unblock a scheduled build
+    build.config.update(list_file_diff=["docs/index.md"], docs_only_disable="0")
+    # Its records would mislead the test selector.
+    for recorder in ("VLLM_CI_KERNREC", "VLLM_CI_KERNREC_AMD", "VLLM_CI_FNREC"):
+        monkeypatch.setenv(recorder, "1")
+
+    jobs = build.generate()
+
+    assert set(jobs) == NIGHTLY_JOBS  # no block steps, not skipped
+    pipeline = build.pipeline_file.read_text()
+    for marker in ("kernrec", "fnrec", "VLLM_KERNEL_SYMBOL_MAP"):
+        assert marker not in pipeline
+
+
+def test_shards_and_records_only_its_own_jobs(build, monkeypatch):
+    monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "on")
+
+    jobs = build.generate()
+
     assert build.sharded_keys == ["direct-mi355"]
     assert jobs["direct-mi355"]["parallelism"] == 3
-    # The selector is skipped, and its record names only these jobs.
-    (record,) = build.selector_records
+    record = build.selector_record
     assert record["skipped"].startswith("AITER nightly")
     assert set(record["legacy_keys"]) == set(record["scheduled_keys"]) == set(jobs)
 
@@ -242,7 +250,7 @@ def test_flag_off_runs_the_stock_pipeline(build, monkeypatch, value):
     assert early["image-build-amd"]["env"]["ROCM_CI_REPO"] == "rocm/vllm-ci"
 
 
-def test_retry_build_runs_the_named_job_and_its_build_steps(build, monkeypatch):
+def test_rerun_runs_the_named_job_and_its_build_steps(build, monkeypatch):
     monkeypatch.setenv("NOAUTO", "1")
     build.config["only_step_keys"] = frozenset({"native-on-image-build"})
 
@@ -268,7 +276,7 @@ def _no_build_sh(build):
     (build.checkout / ".buildkite/scripts/rocm/build.sh").unlink()
 
 
-def _retry(*keys):
+def _rerun(*keys):
     return lambda build: build.config.update(only_step_keys=frozenset(keys))
 
 
@@ -278,9 +286,9 @@ def _retry(*keys):
         (_depends_on_cuda, "cuda-only"),
         (_torch_nightly, "TORCH_NIGHTLY and AITER_NIGHTLY"),
         (_no_build_sh, "build.sh"),
-        (_retry("cuda-only"), "cuda-only"),
-        (_retry("amd-mi250"), "amd-mi250"),
-        (_retry("amd-native-with-mirror"), "amd-native-with-mirror"),
+        (_rerun("cuda-only"), "cuda-only"),
+        (_rerun("amd-mi250"), "amd-mi250"),
+        (_rerun("amd-native-with-mirror"), "amd-native-with-mirror"),
     ],
 )
 def test_fails_before_uploading_anything(build, setup, error):
@@ -289,14 +297,15 @@ def test_fails_before_uploading_anything(build, setup, error):
     with pytest.raises(ValueError, match=error):
         build.generate()
 
-    errors = [kw for text, kw in build.annotations if error in text]
-    assert errors == [{"style": "error"}]
-    assert build.agent_calls == []
+    (annotation,) = build.error_annotations
+    assert error in annotation
+    assert build.uploads == []
     assert not build.pipeline_file.exists()
 
 
-def test_retry_of_an_amd_job_pulls_in_the_amd_image_build():
-    # Any retry build: the job is uploaded waiting for image-build-amd.
+def test_rerun_of_an_amd_job_pulls_in_the_amd_image_build():
+    # Any rerun, not only the AITER nightly's: the job is uploaded waiting for
+    # image-build-amd.
     _, selected = select_steps_and_dependencies(
         _steps(), frozenset({"native-on-image-build"})
     )
