@@ -521,10 +521,10 @@ def select_steps_and_dependencies(
 
 
 def aiter_nightly_step_keys(
-    steps: List[Step], requested: Optional[FrozenSet[str]]
+    steps: List[Step], only_step_keys: Optional[FrozenSet[str]]
 ) -> FrozenSet[str]:
     """The steps the AITER nightly runs: the AMD build steps and the AMD GPU
-    jobs on gfx942/gfx950, or in a retry build the requested ones.
+    jobs on gfx942/gfx950, or `only_step_keys` (VLLM_CI_ONLY_STEP_KEYS) if set.
 
     Raises ValueError if those, or their prerequisites, include any other step.
     """
@@ -541,7 +541,7 @@ def aiter_nightly_step_keys(
             and runs_in_aiter_nightly(amd_mirror.get("device"))
         ):
             nightly_keys.add(f"amd-{key}")
-    run_keys = frozenset(nightly_keys) if requested is None else requested
+    run_keys = frozenset(nightly_keys) if only_step_keys is None else only_step_keys
     _, needed_keys = select_steps_and_dependencies(steps, run_keys)
     non_nightly_keys = needed_keys - nightly_keys
     if non_nightly_keys:
