@@ -464,7 +464,8 @@ def select_steps_and_dependencies(
         if step.key in steps_by_key:
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
-        # As the converter emits them: AMD GPU jobs wait for image-build-amd.
+        # Use the depends_on that gets uploaded, not the YAML's: for an AMD GPU
+        # job, amd.py swaps image-build for image-build-amd, adding it if absent.
         dependencies_by_key[step.key] = (
             normalize_amd_depends_on(step.depends_on)
             if is_amd_gpu_device(step.device)
