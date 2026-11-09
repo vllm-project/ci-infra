@@ -945,7 +945,11 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "files": {"tests/a.py": 2},
         "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
     }
-    applied = f'echo RAN && touch "$${rs.APPLIED_ENV}"'
+    # Stands in for the plugin, which creates the marker's directory itself.
+    applied = (
+        f'echo RAN && mkdir -p "$$(dirname "$${rs.APPLIED_ENV}")"'
+        f' && touch "$${rs.APPLIED_ENV}"'
+    )
     script = rs.guard(applied, planned, 3).replace("$$", "$")
     ran = {}
     for job in range(3):
