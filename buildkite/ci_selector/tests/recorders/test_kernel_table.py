@@ -390,6 +390,7 @@ def test_native_health_requires_complete_error_free_recording(
 IDLE = (
     "# kernrec v1 backend=rocm recorder=rocprofiler-sdk activity=1 pid=7 ppid=1 exe=py"
 )
+CUDA_IDLE = "# kernrec v1 backend=cuda recorder=cupti activity=1 pid=7 ppid=1 exe=py"
 
 
 @pytest.mark.parametrize(
@@ -401,20 +402,30 @@ IDLE = (
         (f"{IDLE}\n# dropped=1\n", False),
         (f"{IDLE}\n# error=flush_failed\n", False),
         (IDLE.replace(" activity=1", "") + "\n", False),
-        (
-            IDLE.replace(
-                "backend=rocm recorder=rocprofiler-sdk", "backend=cuda recorder=cupti"
-            )
-            + "\n",
-            False,
-        ),
+        (f"{CUDA_IDLE}\n", True),
+        (f"{CUDA_IDLE}\n# gpu_active\n", False),
+        (f"{CUDA_IDLE}\n# gpu_active\nk\n", False),
+        (CUDA_IDLE.replace(" activity=1", "") + "\n", False),
     ],
-    ids=["idle", "active", "names", "dropped", "error", "no-activity", "cuda"],
+    ids=[
+        "idle",
+        "active",
+        "names",
+        "dropped",
+        "error",
+        "no-activity",
+        "cuda-idle",
+        "cuda-active",
+        "cuda-names",
+        "cuda-before-marker",
+    ],
 )
-def test_footerless_rocm_process_is_clean_only_if_it_never_loaded_gpu_code(
+def test_footerless_process_is_clean_only_if_it_never_went_active(
     tmp_path, text, clean
 ):
-    """A killed process that never loaded GPU code cannot have lost kernels."""
+    """A killed process that never went active (ROCm: loaded GPU code; CUDA:
+    created a context) cannot have lost kernels. A CUDA header without
+    activity=1 comes from a recorder that wrote no marker, so it stays strict."""
     path = tmp_path / "kern.7.txt"
     path.write_text(text)
     assert kernel_table.read_recording(path)[2] is clean

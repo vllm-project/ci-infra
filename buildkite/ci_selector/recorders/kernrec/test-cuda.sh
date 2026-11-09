@@ -10,6 +10,7 @@ trap 'rm -rf -- "$TEST_DIR"' EXIT
 "${CC:-gcc}" -std=gnu11 -O2 -Wall -Wextra -Werror -pthread \
   -I"$CUPTI_INCLUDE" -I"$CUDA_INCLUDE" "$SOURCE_DIR/test_cuda_callbacks.c" \
   -o "$TEST_DIR/check"
-for mode in register enable names drops read dropped-query flush write release released-pid; do
+for mode in register enable names drops read dropped-query flush write release released-pid \
+    marker-idle marker-active marker-release marker-subscribe-fails; do
   "$TEST_DIR/check" "$TEST_DIR/$mode" "$mode"
 done
