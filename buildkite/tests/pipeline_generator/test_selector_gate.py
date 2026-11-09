@@ -176,6 +176,63 @@ def test_an_unknown_key_keeps_todays_rules(pr_config, monkeypatch):
     assert pr_config.get("selector_step_keys") is None
 
 
+def test_a_run_all_decline_runs_every_step(pr_config, monkeypatch):
+    """The selector's fail-open means "run everything". Today's rules would
+    run only test-a here (vllm/ matched), as vllm/ci #96609 ran 145 of ~360
+    steps on a file no rule claimed."""
+    monkeypatch.setattr(
+        selector_gate,
+        "run_ci_select",
+        _emission([], omit=True, reason="run-all: fail-open: vllm/new.py is unclaimed"),
+    )
+    record = pg._selector_decision(_steps())
+    assert record["applied"] is True and record["fallback"] is None
+    assert record["selector_run_all"] == "fail-open: vllm/new.py is unclaimed"
+    assert pr_config.get("selector_step_keys") == frozenset(
+        {"image-build", "test-a", "test-b"}
+    )
+
+
+def test_a_run_all_decline_leaves_optional_and_amd_steps_alone(pr_config, monkeypatch):
+    steps = _steps_with_mirrors() + [
+        Step(label="Nightly", key="test-nightly", optional=True, commands=["n"]),
+    ]
+    monkeypatch.setattr(
+        selector_gate,
+        "run_ci_select",
+        _emission([], omit=True, reason="run-all: fail-open: x"),
+    )
+    pg._selector_decision(steps)
+    keys = pr_config.get("selector_step_keys")
+    assert "test-nightly" not in keys, "optional stays optional"
+    assert not {k for k in keys if k.startswith("amd-") or k == "native-amd"}, (
+        "AMD keeps today's rules"
+    )
+
+
+def test_any_other_decline_still_keeps_todays_rules(pr_config, monkeypatch):
+    monkeypatch.setattr(
+        selector_gate,
+        "run_ci_select",
+        _emission(
+            [], omit=True, reason="nothing selected; refusing to emit an empty list"
+        ),
+    )
+    record = pg._selector_decision(_steps())
+    assert record["applied"] is False and record["fallback"]
+    assert pr_config.get("selector_step_keys") is None
+
+
+def test_a_run_all_decline_in_shadow_changes_nothing(pr_config, monkeypatch):
+    monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "shadow")
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission([], omit=True, reason="run-all: x")
+    )
+    record = pg._selector_decision(_steps())
+    assert record["applied"] is False
+    assert pr_config.get("selector_step_keys") is None
+
+
 def test_the_gate_is_inert_when_off(pr_config, monkeypatch):
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "off")
     assert pg._selector_decision(_steps()) is None

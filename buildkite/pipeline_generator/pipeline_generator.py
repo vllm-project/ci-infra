@@ -352,6 +352,11 @@ def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
     return keys
 
 
+# How selector_gate records the selector declining because it cannot narrow
+# the diff at all ("run-all: fail-open: <file> is unclaimed ...").
+RUN_ALL_DECLINE = "selector declined: run-all:"
+
+
 def _selector_decision(steps: List[Step]) -> Optional[dict]:
     """Ask the test selector for this build's steps (selector_gate.py).
 
@@ -376,6 +381,25 @@ def _selector_decision(steps: List[Step]) -> Optional[dict]:
         legacy = _legacy_keys(steps, diff)
         record = selector_gate.decide(global_config, legacy)
         keys = record["selector_keys"]
+        declined = record.get("fallback") or ""
+        if not keys and declined.startswith(RUN_ALL_DECLINE) and gate == "on":
+            # The selector's own fail-open: it cannot narrow this diff, so
+            # every step runs, as a run_all_patterns match would. Falling back
+            # to today's rules instead ran only what the hand-written lists
+            # name: vllm/ci #96609 ran 145 of ~360 steps on an unclaimed file.
+            # Optional steps stay optional and AMD keeps today's rules, as on
+            # any run-all PR build.
+            keys = sorted(
+                selector_gate.known_keys(steps)
+                - selector_gate.amd_keys(steps)
+                - selector_gate.optional_keys(steps)
+            )
+            record["selector_run_all"] = declined[len(RUN_ALL_DECLINE) :].strip()
+            record["selector_keys"] = keys
+            record["fallback"] = None
+            global_config["selector_step_keys"] = frozenset(keys)
+            record["applied"] = True
+            return record
         if keys:
             # Steps whose own definition the diff changed or added run, even
             # optional ones: the change is to them, and otherwise it would go
