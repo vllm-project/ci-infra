@@ -54,6 +54,19 @@ def fetch_table(path: Path | None = None) -> Table:
     return load(target)
 
 
+def coverage_table(path: Path | None = None) -> Table:
+    """The table `path` or CI_SELECTOR_TABLE names, read as it is. With
+    neither, the latest published one, downloaded and parsed once here: what
+    CI wants, with no separate fetch step parsing the ~1 GB file to check it.
+    Raises FetchError when that download fails or is refused."""
+    if path is not None or os.environ.get(TABLE_ENV):
+        return fetch_table(path)
+    # Imported here: the fetch script imports this module for its paths.
+    from ..scripts.fetch_functions import fetch_latest
+
+    return fetch_latest()
+
+
 def kernel_paths() -> tuple[Path, Path]:
     """Where the kernel table and symbol map are expected. The two environment
     variables override them one at a time."""

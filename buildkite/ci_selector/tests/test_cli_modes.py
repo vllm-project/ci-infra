@@ -113,7 +113,7 @@ def _no_download(monkeypatch):
 def test_a_named_table_is_read_as_it_is(tmp_path, monkeypatch):
     """Replays and tests pin a table with --table; it must never be swapped
     for the latest one."""
-    from ci_selector.cli import coverage_table
+    from ci_selector.coverage.source import coverage_table
 
     _no_download(monkeypatch)
     monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
@@ -123,7 +123,7 @@ def test_a_named_table_is_read_as_it_is(tmp_path, monkeypatch):
 
 
 def test_a_table_named_by_the_environment_is_read_as_it_is(tmp_path, monkeypatch):
-    from ci_selector.cli import coverage_table
+    from ci_selector.coverage.source import coverage_table
 
     _no_download(monkeypatch)
     pinned = tmp_path / "pinned.json"
@@ -135,7 +135,7 @@ def test_a_table_named_by_the_environment_is_read_as_it_is(tmp_path, monkeypatch
 def test_with_no_table_named_the_latest_is_fetched_and_parsed_once(monkeypatch):
     """What CI does: no separate fetch step, one parse, here."""
     import ci_selector.scripts.fetch_functions as fetch_functions
-    from ci_selector.cli import coverage_table
+    from ci_selector.coverage.source import coverage_table
 
     monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
     sentinel = object()
@@ -150,7 +150,7 @@ def test_with_no_table_named_the_latest_is_fetched_and_parsed_once(monkeypatch):
 def test_a_refused_download_reaches_the_caller(monkeypatch):
     """main() turns it into exit 1, which sends CI back to today's rules."""
     import ci_selector.scripts.fetch_functions as fetch_functions
-    from ci_selector.cli import coverage_table
+    from ci_selector.coverage.source import coverage_table
 
     monkeypatch.delenv("CI_SELECTOR_TABLE", raising=False)
 

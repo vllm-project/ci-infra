@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..codemap.state import PipelineData
 from ..handwritten import TESTS_SCOPE
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, ran_changed_lines, row_shows_use
@@ -106,7 +107,6 @@ class RowKeys:
             load_pipeline_configs,
             load_steps,
         )
-        from ci_selector.codemap.state import PipelineData
         from ci_selector.codemap.worktree import worktree_at
 
         tree = worktree_at(repo, ref)
@@ -117,7 +117,9 @@ class RowKeys:
         return cls.resolve_from_pipelines(set(table._rows), pipelines)
 
     @classmethod
-    def resolve_from_pipelines(cls, rows: set[str], pipelines) -> RowKeys:
+    def resolve_from_pipelines(
+        cls, rows: set[str], pipelines: list[PipelineData]
+    ) -> RowKeys:
         """`resolve` against pipelines the caller already holds.
 
         The kernel and library records resolve at the PR's base, whose state

@@ -5,10 +5,8 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from .codemap.classify import select
 from .codemap.state import RepoState
@@ -17,9 +15,6 @@ from .handwritten import (
     PR_PIPELINE,
 )
 from .report import render_json
-
-if TYPE_CHECKING:
-    from .coverage.table import Table
 
 # Every flag defined once, so `--repo X codemap` and `codemap --repo X` agree.
 # SUPPRESS is load-bearing: with `parents=`, a subparser re-applies its parents'
@@ -171,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import fetch_kernel_records
+        from .coverage.source import coverage_table, fetch_kernel_records
         from .decide import decide
         from .scripts.fetch_functions import FetchError
 
@@ -226,20 +221,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     print(render_json(sel))
     return 0
-
-
-def coverage_table(table_path: Path | None) -> Table:
-    """The table `--table` or CI_SELECTOR_TABLE names, read as it is. With
-    neither, the latest published one, downloaded and parsed once here, which
-    is what CI wants: no separate fetch step parsing the ~1 GB file to check
-    it. Raises FetchError when that download cannot be had or is refused."""
-    from .coverage.source import TABLE_ENV, fetch_table
-
-    if table_path is not None or os.environ.get(TABLE_ENV):
-        return fetch_table(table_path)
-    from .scripts.fetch_functions import fetch_latest
-
-    return fetch_latest()
 
 
 def _restrict(sel, d):
