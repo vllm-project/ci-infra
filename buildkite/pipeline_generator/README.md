@@ -80,7 +80,8 @@ repositories:
 
 A step runs when its `source_file_dependencies` match the change (or on
 nightly / `RUN_ALL` builds); optional steps never run on their own, except
-that a `docker/Dockerfile.rocm_base` change runs every AMD step. Every
+that a change to the ROCm stack image (`docker/Dockerfile.rocm_base` or
+`tools/vllm-rocm/therock_wheels.py`) runs every AMD step. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
 jobs**, near the top of the build lists them all as checkboxes under their
 group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite
