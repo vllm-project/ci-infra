@@ -793,7 +793,9 @@ def guard(command: str, planned: Dict, shards: int) -> str:
     applied = f"{PLUGIN_DIR}/applied-{position}"
     command = (
         f"export {COMMAND_ENV}={position} {APPLIED_ENV}={applied}"
-        f" && rm -f {applied} && {command}"
+        # `|| exit`: followed by `&&`, a failed command no longer stops a
+        # `set -e` job, which would go on to its next line and pass.
+        f" && rm -f {applied} && {{ {command} || exit $$?; }}"
         f' && {{ [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
         " applying the shard plan (the plugin didn't load, or didn't match the"
         ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'

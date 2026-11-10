@@ -12,6 +12,7 @@ import pytest
 
 import buildkite_step
 import runtime_shard as rs
+import runtime_shard_plugin
 from constants import AgentQueue
 from step import Step
 
@@ -911,11 +912,11 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     tagged = [job for job, own in zip(jobs, plain.commands) if job != own]
     assert len(tagged) == 2
     assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 {rs.APPLIED_ENV}=")
-    assert "&& pytest -v -s model_executor" in tagged[0]
+    assert "&& { pytest -v -s model_executor" in tagged[0]
     assert TESTS[1] in tagged[1]  # the one-file command
     assert tagged[1].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
     assert f"export {rs.COMMAND_ENV}=3 {rs.APPLIED_ENV}=" in tagged[1]
-    assert "&& pytest -v -s entrypoints" in tagged[1]
+    assert "&& { pytest -v -s entrypoints" in tagged[1]
     assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -958,7 +959,7 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "split": {},
     }
     assert rs.guard("echo RAN", everywhere, 3).startswith(
-        f"export {rs.COMMAND_ENV}=1 {rs.APPLIED_ENV}="
+        f"export {rs.COMMAND_ENV}=1 {rs.APPLIED_ENV}={rs.PLUGIN_DIR}/applied-1 "
     )
 
 
@@ -977,9 +978,17 @@ def test_a_command_that_passes_without_the_plan_applied_fails():
     assert "pytest ran without applying the shard plan" in run.stderr
 
 
-def test_a_failing_command_fails_as_itself():
-    run = _guarded("exit 3")
-    assert run.returncode == 3 and run.stderr == ""
+@pytest.mark.parametrize("shards", [1, 2])
+def test_a_failing_command_stops_the_job_with_its_own_status(shards):
+    # A job runs its commands as lines under `set -e`, and the generator adds
+    # lines after each command. A failing pytest must still stop the job,
+    # whether or not the command is wrapped to run in only some shards.
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    script = rs.guard("(exit 3)", planned, shards).replace("$$", "$")
+    run = subprocess.run(
+        ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
+    )
+    assert run.returncode == 3 and run.stdout == "" and run.stderr == ""
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -1413,6 +1422,40 @@ def test_a_command_setting_its_own_pythonpath_still_finds_the_plugin(tmp_path):
         [found] = run.stdout.split()
         assert found.startswith(str(tmp_path / "venv" / "lib")), (command, found)
         assert found.endswith("/site-packages/runtime_shard_plugin.py")
+
+
+# What pip writes after `#!/bin/sh` when the python's path is too long for a
+# shebang line.
+PIP_EXEC_LINES = "'''exec' /no/python3 \"$0\" \"$@\"\n' '''\n"
+
+
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        ("#!{bin}/python3\n", "{bin}/python3"),
+        ("#!/usr/bin/env python3\n", "{bin}/python3"),
+        # pip's form for a long path; the python needn't be on PATH.
+        ("#!/bin/sh\n" + PIP_EXEC_LINES, "/no/python3"),
+        ("#!/usr/bin/sh\n" + PIP_EXEC_LINES, "/no/python3"),
+        ("#!/bin/bash\n", None),
+        ("", None),
+    ],
+)
+def test_the_python_pytest_runs_comes_from_its_shebang(
+    tmp_path, monkeypatch, script, expected
+):
+    (tmp_path / "python3").symlink_to(sys.executable)
+    pytest_script = tmp_path / "pytest"
+    pytest_script.write_text(script.format(bin=tmp_path))
+    pytest_script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    found = runtime_shard_plugin._pytest_python()
+    assert found == (expected and expected.format(bin=tmp_path))
+
+
+def test_no_pytest_on_path_means_no_second_python(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert runtime_shard_plugin._pytest_python() is None
 
 
 def test_shard_job_setup_installs_the_plugin_for_pytests_own_python(tmp_path):
