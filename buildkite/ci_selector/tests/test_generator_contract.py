@@ -347,9 +347,17 @@ def test_our_replica_behaves_like_the_generators_own_rule():
             AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
         ),
         "is_amd_gpu_device": lambda d: family_of_device(d) == "amd",
+        "is_amd_device": lambda d: family_of_device(d) == "amd",
         "_source_file_dependencies_match": (
             buildkite_step._source_file_dependencies_match
         ),
+        # No diff below edits a yaml, so both reduce to today's rule.
+        "_amd_dependencies_match": lambda step, diff: (
+            buildkite_step._source_file_dependencies_match(
+                step.source_file_dependencies, diff
+            )
+        ),
+        "_amd_step_redefined": lambda step, diff: False,
     }
     source = textwrap.dedent(inspect.getsource(buildkite_step._step_should_run))
     exec(source, namespace)  # noqa: S102

@@ -68,7 +68,18 @@ repositories:
 ## Jobs that are not selected
 
 A step runs when its `source_file_dependencies` match the change (or on
-nightly / `RUN_ALL` builds); optional steps never run on their own. Every
+nightly / `RUN_ALL` builds); optional steps never run on their own. In a file
+with a group-level `depends_on`, every step also depends on that yaml file.
+For AMD steps, native and `amd-` mirrors, an edit to the file counts only
+when it changes the step's own entry (its key's fields, or its `mirror.amd`
+block for the mirror); an edit outside `steps`, a new or unparsable file, or a
+step without a unique `key` counts for every step in the file, and so does any
+edit for a step that lists the file in its own dependencies. An optional AMD
+step whose own entry the edit changes or adds runs too, rather than waiting
+for the nightly, but only when the edit is pinned to steps: a new file or an
+edit outside `steps` leaves the file's optional steps to the nightly.
+ci-selector and its gate treat such edits the same way for the steps they
+choose. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
 jobs**, near the top of the build lists them all as checkboxes under their
 group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite

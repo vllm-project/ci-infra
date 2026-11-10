@@ -38,6 +38,7 @@ from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_amd_enabled, kernrec_enabled
 import runtime_shard
+import step_definitions
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -1631,7 +1632,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     if global_config["nightly"] == "1":
         return True
     if step.optional:
-        return False
+        # As the selector gate does: an edited optional step runs on its PR.
+        return is_amd_device(step.device) and _amd_step_redefined(step, list_file_diff)
     if (
         is_amd_gpu_device(step.device)
         and not step.dind
@@ -1646,9 +1648,48 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     # AMD may be narrowed on CUDA (csrc/, which ROCm compiles through HIPify).
     if global_config.get("amd_run_all") and is_amd_device(step.device):
         return True
+    if is_amd_device(step.device):
+        return _amd_dependencies_match(step, list_file_diff)
     return _source_file_dependencies_match(
         step.source_file_dependencies, list_file_diff
     )
+
+
+def _amd_dependencies_match(step: Step, list_file_diff: List[str]) -> bool:
+    """Dependency match where an edit to the step's own yaml counts only if it
+    redefines the step or can't be pinned to steps."""
+    dependencies = step.source_file_dependencies or []
+    own_file = step.source_file
+    if not own_file or step.source_file_declared or own_file not in dependencies:
+        return _source_file_dependencies_match(dependencies, list_file_diff)
+    others = [dependency for dependency in dependencies if dependency != own_file]
+    if _source_file_dependencies_match(others, list_file_diff):
+        return True
+    if own_file not in list_file_diff:
+        return False
+    changed = step_definitions.changed_step_keys_in_file(
+        own_file, _definition_base_ref()
+    )
+    return changed is None or step.key in changed
+
+
+def _amd_step_redefined(step: Step, list_file_diff: List[str]) -> bool:
+    """Whether the diff changes or adds the step's own yaml entry."""
+    own_file = step.source_file
+    if not own_file or own_file not in list_file_diff:
+        return False
+    changed = step_definitions.changed_step_keys_in_file(
+        own_file, _definition_base_ref()
+    )
+    return changed is not None and step.key in changed
+
+
+def _definition_base_ref() -> Optional[str]:
+    """The commit list_file_diff is taken against."""
+    global_config = get_global_config()
+    if global_config.get("branch") == "main":
+        return "HEAD~1"
+    return global_config.get("merge_base_commit")
 
 
 def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
@@ -1666,6 +1707,8 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
             "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
+            "source_file_declared": step.source_file_declared
+            or step.source_file in (amd.get("source_file_dependencies") or []),
         }
     )
 
