@@ -30,8 +30,11 @@ class GlobalConfig(TypedDict):
     run_all: bool = False
     # AMD steps only: AMD is not selected by ci-selector, so a pattern can stop
     # running everything on CUDA (the selector narrows it there) and still run
-    # every AMD step. Same exclude list as run_all_patterns.
+    # every AMD step. Its own exclude list: run_all_exclude_patterns names files
+    # that do not affect CUDA (csrc/rocm/, docker/Dockerfile.*), which are the
+    # ones most likely to affect AMD.
     amd_run_all_patterns: Optional[List[str]] = None
+    amd_run_all_exclude_patterns: Optional[List[str]] = None
     amd_run_all: bool = False
     docs_only_disable: Optional[str] = "0"
     merge_base_commit: Optional[str] = None
@@ -88,10 +91,13 @@ def init_global_config(pipeline_config_path: str):
             pipeline_config.get("run_all_exclude_patterns", None),
         ),
         amd_run_all_patterns=pipeline_config.get("amd_run_all_patterns", None),
+        amd_run_all_exclude_patterns=pipeline_config.get(
+            "amd_run_all_exclude_patterns", None
+        ),
         amd_run_all=_matches_run_all_patterns(
             list_file_diff,
             pipeline_config.get("amd_run_all_patterns", None),
-            pipeline_config.get("run_all_exclude_patterns", None),
+            pipeline_config.get("amd_run_all_exclude_patterns", None),
         ),
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
