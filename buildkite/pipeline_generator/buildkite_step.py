@@ -10,8 +10,8 @@ import shlex
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
+    AMD_ROCM_BASE_DOCKERFILE,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
-    _amd_mirror_should_run,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -1179,13 +1179,7 @@ def _runtime_shard_mode(
     on = _automatic_shard_on(step, amd)
     if not by_default and not on:
         return None
-    if amd:
-        should_run = _amd_mirror_should_run(
-            _step_should_run(step, list_file_diff), list_file_diff
-        )
-    else:
-        should_run = _step_should_run(step, list_file_diff)
-    if not should_run:
+    if not _step_should_run(step, list_file_diff):
         return None
     if by_default and step.parallelism:
         # A fixed split, the step's own or the one its mirror inherits, runs
@@ -1606,11 +1600,8 @@ def convert_group_step_to_buildkite_step(
                     ),
                     recorded_step=amd_command_step,
                 )
-                amd_step.deferred = not _amd_mirror_should_run(
-                    _step_should_run(
-                        _get_amd_mirror_effective_step(step, amd),
-                        list_file_diff,
-                    ),
+                amd_step.deferred = not _step_should_run(
+                    _get_amd_mirror_effective_step(step, amd),
                     list_file_diff,
                 )
                 amd_hardware_steps.append(amd_step)
@@ -1651,6 +1642,10 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     ):
         return True
     if global_config["nightly"] == "1":
+        return True
+    # Every AMD step runs in the image built from Dockerfile.rocm_base, so a
+    # change to it runs them all, optional ones included.
+    if is_amd_device(step.device) and AMD_ROCM_BASE_DOCKERFILE in list_file_diff:
         return True
     if step.optional:
         return False
