@@ -13,7 +13,6 @@ from buildkite_step import (
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
     BuildkiteGroupStep,
-    _amd_mirror_should_run,
     _generate_step_key,
     _get_amd_mirror_effective_step,
     _step_should_run,
@@ -345,9 +344,7 @@ def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
         if _step_should_run(step, diff):
             keys.append(step.key)
         amd = (step.mirror or {}).get("amd")
-        if amd and _amd_mirror_should_run(
-            _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
-        ):
+        if amd and _step_should_run(_get_amd_mirror_effective_step(step, amd), diff):
             keys.append(f"amd-{step.key}")
     return keys
 

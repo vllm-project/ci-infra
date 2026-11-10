@@ -4,6 +4,7 @@ import pytest
 
 import amd
 import buildkite_step
+import pipeline_generator
 from amd import is_amd_device
 from constants import AgentQueue
 from step import Step
@@ -412,6 +413,69 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     assert len(amd_group.steps) == 1
     assert not amd_group.steps[0].deferred
     assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
+
+
+@pytest.mark.parametrize("optional", [False, True])
+@pytest.mark.parametrize("dind", [False, True])
+def test_rocm_base_change_runs_standalone_amd_steps(fake_global_config, optional, dind):
+    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    amd_step = Step(
+        label="AMD test",
+        group="Direct AMD",
+        key="amd-test",
+        device="mi300_1",
+        dind=dind,
+        optional=optional,
+        commands=["pytest tests/foo.py"],
+        source_file_dependencies=["vllm/"],
+    )
+    cuda_step = Step(
+        label="CUDA test",
+        group="Direct AMD",
+        key="cuda-test",
+        optional=optional,
+        commands=["pytest tests/foo.py"],
+        source_file_dependencies=["vllm/"],
+    )
+
+    assert buildkite_step._step_should_run(amd_step, [amd.AMD_ROCM_BASE_DOCKERFILE])
+    assert not buildkite_step._step_should_run(
+        cuda_step, [amd.AMD_ROCM_BASE_DOCKERFILE]
+    )
+    assert not buildkite_step._step_should_run(amd_step, ["docker/Dockerfile.rocm"])
+
+
+def test_rocm_base_change_respects_noauto_and_only_step_keys(
+    fake_global_config, monkeypatch
+):
+    diff = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    steps = [
+        Step(
+            label="AMD test",
+            key="amd-test",
+            device="mi300_1",
+            optional=True,
+            commands=["pytest tests/foo.py"],
+        ),
+        Step(
+            label="Mirrored test",
+            key="mirrored-test",
+            optional=True,
+            commands=["pytest tests/foo.py"],
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+    ]
+    assert pipeline_generator._legacy_keys(steps, diff) == [
+        "amd-test",
+        "amd-mirrored-test",
+    ]
+
+    fake_global_config["only_step_keys"] = frozenset({"amd-test"})
+    assert pipeline_generator._legacy_keys(steps, diff) == ["amd-test"]
+
+    fake_global_config["only_step_keys"] = None
+    monkeypatch.setenv("NOAUTO", "1")
+    assert pipeline_generator._legacy_keys(steps, diff) == []
 
 
 @pytest.mark.parametrize(

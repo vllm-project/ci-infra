@@ -137,12 +137,6 @@ def get_rocm_base_refresh_timeout() -> int:
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
 
-def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
-    return default_should_run or (
-        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
-    )
-
-
 def get_rocm_base_refresh_env() -> Dict[str, str]:
     """Bind the refresh script controls to the timeout decision."""
     if rocm_build_layout():
