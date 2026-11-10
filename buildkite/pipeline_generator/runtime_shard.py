@@ -791,12 +791,14 @@ def guard(command: str, planned: Dict, shards: int) -> str:
     none of them, and passed."""
     position = planned["position"]
     applied = f"{PLUGIN_DIR}/applied-{position}"
+    # Each step exits on failure itself: a job runs its lines under `set -e`,
+    # which ignores a failure inside a `&&` chain and goes on to the next line.
+    # The command sits on its own line, so a trailing comment ends there. The
+    # outer braces keep it one command in AMD's `&&`-joined list.
     command = (
-        f"export {COMMAND_ENV}={position} {APPLIED_ENV}={applied}"
-        # `|| exit`: followed by `&&`, a failed command no longer stops a
-        # `set -e` job, which would go on to its next line and pass.
-        f" && rm -f {applied} && {{ {command} || exit $$?; }}"
-        f' && {{ [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
+        f"{{ export {COMMAND_ENV}={position} {APPLIED_ENV}={applied};"
+        f" rm -f {applied} || exit $$?; {{\n{command}\n}} || exit $$?;"
+        f' [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
         " applying the shard plan (the plugin didn't load, or didn't match the"
         ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
     )

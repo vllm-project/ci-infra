@@ -911,12 +911,12 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     assert len(jobs) == len(plain.commands)
     tagged = [job for job, own in zip(jobs, plain.commands) if job != own]
     assert len(tagged) == 2
-    assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 {rs.APPLIED_ENV}=")
-    assert "&& { pytest -v -s model_executor" in tagged[0]
+    assert tagged[0].startswith(f"{{ export {rs.COMMAND_ENV}=2 {rs.APPLIED_ENV}=")
+    assert "{\npytest -v -s model_executor" in tagged[0]
     assert TESTS[1] in tagged[1]  # the one-file command
     assert tagged[1].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
-    assert f"export {rs.COMMAND_ENV}=3 {rs.APPLIED_ENV}=" in tagged[1]
-    assert "&& { pytest -v -s entrypoints" in tagged[1]
+    assert f"{{ export {rs.COMMAND_ENV}=3 {rs.APPLIED_ENV}=" in tagged[1]
+    assert "{\npytest -v -s entrypoints" in tagged[1]
     assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -959,7 +959,7 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "split": {},
     }
     assert rs.guard("echo RAN", everywhere, 3).startswith(
-        f"export {rs.COMMAND_ENV}=1 {rs.APPLIED_ENV}={rs.PLUGIN_DIR}/applied-1 "
+        f"{{ export {rs.COMMAND_ENV}=1 {rs.APPLIED_ENV}={rs.PLUGIN_DIR}/applied-1;"
     )
 
 
@@ -989,6 +989,38 @@ def test_a_failing_command_stops_the_job_with_its_own_status(shards):
         ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
     )
     assert run.returncode == 3 and run.stdout == "" and run.stderr == ""
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the mode"
+)
+def test_a_marker_that_cannot_be_cleared_stops_the_job(tmp_path, monkeypatch):
+    # Otherwise the command and the check are skipped, and the job passes.
+    monkeypatch.setattr(rs, "PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "applied-0").touch()
+    tmp_path.chmod(0o555)
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    script = rs.guard("echo RAN", planned, 1).replace("$$", "$")
+    try:
+        run = subprocess.run(
+            ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
+        )
+    finally:
+        tmp_path.chmod(0o755)
+    assert run.returncode != 0 and run.stdout == ""
+
+
+def test_a_command_ending_in_a_comment_still_runs_guarded():
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    command = (
+        f'mkdir -p "$$(dirname "$${rs.APPLIED_ENV}")" && touch "$${rs.APPLIED_ENV}"'
+        " # a note"
+    )
+    script = rs.guard(command, planned, 1).replace("$$", "$")
+    run = subprocess.run(
+        ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
+    )
+    assert run.returncode == 0 and run.stdout == "NEXT\n", run.stderr
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -1363,7 +1395,7 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     # The same commands, each tagged with its position, the one-file command
     # run only by the shard with it.
     changed = [new for new, old in zip(jobs, plain.commands) if new != old]
-    assert len(changed) == 2 and changed[0].startswith(f"export {rs.COMMAND_ENV}=")
+    assert len(changed) == 2 and changed[0].startswith(f"{{ export {rs.COMMAND_ENV}=")
     assert changed[1].startswith("case ")
 
 
