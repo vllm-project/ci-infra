@@ -389,9 +389,12 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
 @pytest.mark.parametrize("optional", [False, True])
-def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+def test_rocm_stack_change_runs_only_amd_mirror(
+    fake_global_config, optional, stack_file
+):
+    fake_global_config["list_file_diff"] = [stack_file]
     step = Step(
         label="ROCm base mirrored test",
         group="Mirrors",
@@ -415,10 +418,13 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
 
 
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
 @pytest.mark.parametrize("optional", [False, True])
 @pytest.mark.parametrize("dind", [False, True])
-def test_rocm_base_change_runs_standalone_amd_steps(fake_global_config, optional, dind):
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+def test_rocm_stack_change_runs_standalone_amd_steps(
+    fake_global_config, optional, dind, stack_file
+):
+    fake_global_config["list_file_diff"] = [stack_file]
     amd_step = Step(
         label="AMD test",
         group="Direct AMD",
@@ -438,17 +444,16 @@ def test_rocm_base_change_runs_standalone_amd_steps(fake_global_config, optional
         source_file_dependencies=["vllm/"],
     )
 
-    assert buildkite_step._step_should_run(amd_step, [amd.AMD_ROCM_BASE_DOCKERFILE])
-    assert not buildkite_step._step_should_run(
-        cuda_step, [amd.AMD_ROCM_BASE_DOCKERFILE]
-    )
+    assert buildkite_step._step_should_run(amd_step, [stack_file])
+    assert not buildkite_step._step_should_run(cuda_step, [stack_file])
     assert not buildkite_step._step_should_run(amd_step, ["docker/Dockerfile.rocm"])
 
 
-def test_rocm_base_change_respects_noauto_and_only_step_keys(
-    fake_global_config, monkeypatch
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
+def test_rocm_stack_change_respects_noauto_and_only_step_keys(
+    fake_global_config, monkeypatch, stack_file
 ):
-    diff = [amd.AMD_ROCM_BASE_DOCKERFILE]
+    diff = [stack_file]
     steps = [
         Step(
             label="AMD test",

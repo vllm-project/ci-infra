@@ -35,7 +35,12 @@ AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
 )
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
-AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
+# What vLLM's .buildkite/scripts/rocm/build.sh keys the ROCm stack image on,
+# the image every AMD step runs in: a change to either file rebuilds it.
+AMD_ROCM_STACK_FILES = (
+    "docker/Dockerfile.rocm_base",
+    "tools/vllm-rocm/therock_wheels.py",
+)
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(

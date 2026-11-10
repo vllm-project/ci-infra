@@ -10,8 +10,8 @@ import shlex
 from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
-    AMD_ROCM_BASE_DOCKERFILE,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
+    AMD_ROCM_STACK_FILES,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -1495,9 +1495,11 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if global_config["nightly"] == "1":
         return True
-    # Every AMD step runs in the image built from Dockerfile.rocm_base, so a
-    # change to it runs them all, optional ones included.
-    if is_amd_device(step.device) and AMD_ROCM_BASE_DOCKERFILE in list_file_diff:
+    # Every AMD step runs in the ROCm stack image, so a change to what it is
+    # built from runs them all, optional ones included.
+    if is_amd_device(step.device) and any(
+        path in list_file_diff for path in AMD_ROCM_STACK_FILES
+    ):
         return True
     if step.optional:
         return False

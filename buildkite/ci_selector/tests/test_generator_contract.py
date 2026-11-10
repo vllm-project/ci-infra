@@ -334,7 +334,7 @@ def test_our_replica_behaves_like_the_generators_own_rule():
     from ci_selector.handwritten import (
         AMD_ALWAYS_RUN_STEP_KEYS,
         AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
-        AMD_ROCM_BASE_DOCKERFILE,
+        AMD_ROCM_STACK_FILES,
         IMAGE_BUILD_KEY_PREFIX,
     )
     from ci_selector.validate.generator_replica import step_should_run
@@ -349,7 +349,7 @@ def test_our_replica_behaves_like_the_generators_own_rule():
         "AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES": list(
             AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
         ),
-        "AMD_ROCM_BASE_DOCKERFILE": AMD_ROCM_BASE_DOCKERFILE,
+        "AMD_ROCM_STACK_FILES": AMD_ROCM_STACK_FILES,
         "is_amd_gpu_device": lambda d: family_of_device(d) == "amd",
         "is_amd_device": amd_mod.is_amd_device,
         "_source_file_dependencies_match": (
@@ -369,7 +369,7 @@ def test_our_replica_behaves_like_the_generators_own_rule():
         ["tests/t.py"],
         [amd_script],
         ["docs/a.md"],
-        [AMD_ROCM_BASE_DOCKERFILE],
+        *([path] for path in AMD_ROCM_STACK_FILES),
     ]
     checked = 0
     for key, device, dind, optional, deps, diff, run_all in itertools.product(
