@@ -75,6 +75,9 @@ PLAN_ENV = "RUNTIME_SHARD_PLAN"
 # The position of the step command a job is running, for the plugin to tell
 # apart commands whose pytest args differ only in env vars.
 COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
+# The file the plugin writes once it has applied the plan, which the guard
+# checks after the command.
+APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
@@ -780,8 +783,25 @@ def owners(planned: Dict) -> List[int]:
 
 def guard(command: str, planned: Dict, shards: int) -> str:
     """A job's command, run only by the shards that have its tests. The others
-    say where they run instead of starting pytest to deselect everything."""
-    command = f"export {COMMAND_ENV}={planned['position']} && {command}"
+    say where they run instead of starting pytest to deselect everything.
+
+    The command fails if it passed without the plugin applying the plan: a
+    pytest that didn't load the plugin, or whose args didn't match the planned
+    command's, would have run all of the command's tests in every shard, or
+    none of them, and passed."""
+    position = planned["position"]
+    applied = f"{PLUGIN_DIR}/applied-{position}"
+    # Each step exits on failure itself: a job runs its lines under `set -e`,
+    # which ignores a failure inside a `&&` chain and goes on to the next line.
+    # The command sits on its own line, so a trailing comment ends there. The
+    # outer braces keep it one command in AMD's `&&`-joined list.
+    command = (
+        f"{{ export {COMMAND_ENV}={position} {APPLIED_ENV}={applied};"
+        f" rm -f {applied} || exit $$?; {{\n{command}\n}} || exit $$?;"
+        f' [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
+        " applying the shard plan (the plugin didn't load, or didn't match the"
+        ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
+    )
     runs = owners(planned)
     if len(runs) == shards:
         return command
@@ -816,6 +836,10 @@ def shard_job_setup() -> List[str]:
         f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
         # On the path of whichever python runs pytest (a venv's included).
         f'export PYTHONPATH="{PLUGIN_DIR}$${{PYTHONPATH:+:$$PYTHONPATH}}"',
+        # And in the site-packages of python3 and of pytest's python, which a
+        # command that sets its own PYTHONPATH (PYTHONPATH=/vllm-workspace
+        # pytest ...) doesn't replace. It exits 0: a failed copy only warns.
+        f"python3 {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
     ]
 
 
