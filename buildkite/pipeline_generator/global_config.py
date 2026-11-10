@@ -28,10 +28,9 @@ class GlobalConfig(TypedDict):
     nightly: Optional[str] = "0"
     torch_nightly: Optional[str] = "0"
     run_all: bool = False
-    # Runs every AMD step, on top of run_all. For files run_all does not cover:
-    # AMD-only ones (docker/Dockerfile.rocm_base) and ones left to ci-selector
-    # on CUDA (csrc/), since the selector does not pick AMD steps. Its excludes
-    # are separate: run_all_exclude_patterns skips AMD-only files.
+    # Like run_all, but runs only the AMD steps. For files that do not trigger
+    # run_all but still need all of AMD, e.g. docker/Dockerfile.rocm_base.
+    # Has its own excludes; run_all_exclude_patterns does not apply.
     amd_run_all_patterns: Optional[List[str]] = None
     amd_run_all_exclude_patterns: Optional[List[str]] = None
     amd_run_all: bool = False
