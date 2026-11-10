@@ -56,19 +56,16 @@ run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
 
-# Optional. Regex patterns that run every non-optional AMD step (native or
-# mirrored) but leave CUDA steps to their usual rules. AMD steps are not
-# chosen by ci-selector, so a file can be left to the selector on CUDA and
-# still run all of AMD.
+# Optional. List of regex patterns to trigger all AMD tests, on top of
+# run_all_patterns (which already triggers AMD too). For files that matter to
+# AMD but are excluded or left out above, e.g. docker/Dockerfile.rocm_base.
 amd_run_all_patterns:
-  - "csrc/"
-  - "docker/Dockerfile.rocm_base"
+  - "docker/Dockerfile.rocm"
 
-# Optional. Excludes for amd_run_all_patterns only; run_all_exclude_patterns
-# does not apply to them, since it names files that do not affect CUDA
-# (csrc/rocm/, docker/Dockerfile.*), and those can affect AMD.
+# Optional. List of regex patterns to exclude from amd_run_all_patterns checks.
+# run_all_exclude_patterns does not apply here.
 amd_run_all_exclude_patterns:
-  - "csrc/cpu/"
+  - "docker/Dockerfile.rocm.*_gfx1250"
 
 # Container registry to store images
 registries: public.ecr.aws/q9t5s3a7
