@@ -312,8 +312,11 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     """
     global _timings_failures
     if _timings_failures >= MAX_TIMINGS_FAILURES:
-        print(f"runtime-shard: no timings for {step_key} (endpoint skipped after "
-              f"{_timings_failures} failed steps)", file=sys.stderr)
+        print(
+            f"runtime-shard: no timings for {step_key} (endpoint skipped after "
+            f"{_timings_failures} failed steps)",
+            file=sys.stderr,
+        )
         return None
     query = {
         "stepKey": step_key,
@@ -330,7 +333,10 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
         except urllib.error.HTTPError as error:
             if error.code < 500:  # 404: no passing main build, so no plan
                 _timings_failures = 0  # the endpoint answered
-                print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
+                print(
+                    f"runtime-shard: no timings for {step_key} ({error})",
+                    file=sys.stderr,
+                )
                 return None
             last_error = error
         except Exception as error:  # timeout, connection refused
@@ -468,8 +474,7 @@ def plan(
     # share, is still an estimate.
     labels = [command_preview(entry["command"]) for entry in commands]
     exact = {
-        (index, file): len(set(labels)) == len(labels)
-        and key == (labels[index], file)
+        (index, file): len(set(labels)) == len(labels) and key == (labels[index], file)
         for (index, file), key in keys.items()
     }
 
@@ -634,9 +639,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     estimates = ", ".join(f"{s / 60:.1f}" for s in result["estimates"])
     source = result["timingSource"]
     builds = len(source.get("buildNumbers") or [source.get("buildNumber")])
-    allocation = (
-        "one job" if result["shards"] == 1 else f"{result['shards']} shards"
-    )
+    allocation = "one job" if result["shards"] == 1 else f"{result['shards']} shards"
     text = (
         f"**Runtime sharding for `{step_key}`:** {allocation} for "
         f"{result['files']} file{'s' if result['files'] != 1 else ''}; "
@@ -679,8 +682,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             )
             if len(result["commands"]) > 1:
                 text += (
-                    " and any shard running several commands within "
-                    f"{budget:.1f} min"
+                    f" and any shard running several commands within {budget:.1f} min"
                 )
             text += "."
     elif result["overBudget"]:

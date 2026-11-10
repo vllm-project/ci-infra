@@ -161,9 +161,12 @@ def test_plan_charges_setup_up_to_the_limit_and_flags_more():
     assert rs.setup_too_long(slow)
     assert "Setup takes 10.0 min per job" in rs.summary("k", slow)
     # A step without setupMs (an older endpoint) charges none.
-    assert rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))[
-        "setupSeconds"
-    ] == 0
+    assert (
+        rs.plan(_commands(TESTS[0], seconds), _timings(TESTS[0], seconds))[
+            "setupSeconds"
+        ]
+        == 0
+    )
 
 
 def test_a_one_job_plan_flags_a_long_setup_too():
@@ -421,7 +424,9 @@ def test_plan_cuts_a_file_into_parts_that_each_fit():
     )
     result = rs.plan(_commands(TESTS[0], ["big.py", "mm.py", *small]), timings)
     split = result["commands"][0]["split"]["tests/big.py"]
-    assert len(set(split["assign"].values())) == len(split["shards"]) == 4  # a part per case
+    assert (
+        len(set(split["assign"].values())) == len(split["shards"]) == 4
+    )  # a part per case
     assert not result["overBudget"] and result["shards"] == 5
 
 
@@ -528,7 +533,6 @@ def test_plan_keeps_budget_sized_parts_when_they_balance_better():
     assert result["estimates"] == [2100.0] * 10
 
 
-
 # Trimming shards one long test makes useless. Each step here has 1 min of
 # setup: 18 min of tests per shard.
 
@@ -546,7 +550,10 @@ def test_one_job_over_the_budget_says_so():
     assert "fit in one job" not in text and "one job for 1 file;" in text
     assert "`tests/a.py` takes 20.0 min on its own, over the 18.0 min" in text
     assert "The planner cannot split it further" in text
-    assert "1 shard is the fewest the planner finds that keep every shard within 20.0 min." in text
+    assert (
+        "1 shard is the fewest the planner finds that keep every shard within 20.0 min."
+        in text
+    )
 
 
 def test_a_one_job_plan_without_a_long_test_says_it_is_over():
@@ -664,7 +671,9 @@ def test_plan_of_one_long_test_holds_steady_across_twice_the_budget(rest):
     third shard that the long test kept from finishing any sooner."""
     tests = {"test_slow": 1230, "test_a": rest, "test_b": rest}
     timings = _timed(
-        _with_tests(_timings(TESTS[0], {"big.py": sum(tests.values())}), "big.py", tests)
+        _with_tests(
+            _timings(TESTS[0], {"big.py": sum(tests.values())}), "big.py", tests
+        )
     )
     result = rs.plan(_commands(TESTS[0], ["big.py"]), timings)
     assert result["shards"] == 2 and result["estimates"] == [1230, 2 * rest]
@@ -677,7 +686,10 @@ def test_plan_at_the_most_shards_drops_one_that_does_not_help():
     assert result["shards"] == 9 and max(result["estimates"]) == 3000
     text = rs.summary("k", result)
     assert "its shard needs at least 50.0 min" in text
-    assert "9 shards is the fewest the planner finds that keep every shard within 50.0 min." in text
+    assert (
+        "9 shards is the fewest the planner finds that keep every shard within 50.0 min."
+        in text
+    )
     assert sorted(result["commands"][0]["files"]) == sorted(f"tests/{f}" for f in files)
 
 
@@ -1224,7 +1236,9 @@ def test_fetch_timings_starts_with_no_failed_steps():
 
 
 def test_fetch_timings_retries_a_timeout_with_a_longer_limit(monkeypatch):
-    urlopen, timeouts = _urlopen_answering(TimeoutError("read timed out"), {"files": []})
+    urlopen, timeouts = _urlopen_answering(
+        TimeoutError("read timed out"), {"files": []}
+    )
     monkeypatch.setattr(rs, "_timings_failures", 0)
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
@@ -1249,7 +1263,8 @@ def test_fetch_timings_counts_a_step_whose_reads_both_fail(monkeypatch, capsys):
     assert len(timeouts) == 2
     assert rs._timings_failures == 1
     assert capsys.readouterr().err == (
-        "runtime-shard: no timings for k (HTTP Error 502: bad gateway)\n")
+        "runtime-shard: no timings for k (HTTP Error 502: bad gateway)\n"
+    )
 
 
 def test_fetch_timings_does_not_retry_a_404(monkeypatch, capsys):
@@ -1264,7 +1279,8 @@ def test_fetch_timings_does_not_retry_a_404(monkeypatch, capsys):
     # The endpoint answered, so it is up: earlier failures stop counting.
     assert rs._timings_failures == 0
     assert capsys.readouterr().err == (
-        "runtime-shard: no timings for k (HTTP Error 404: not found)\n")
+        "runtime-shard: no timings for k (HTTP Error 404: not found)\n"
+    )
 
 
 def test_fetch_timings_skips_the_endpoint_after_three_failed_steps(monkeypatch, capsys):
@@ -1293,8 +1309,16 @@ def test_fetch_timings_404s_between_failures_keep_the_endpoint_in_use(monkeypatc
     missing = urllib.error.HTTPError("u", 404, "not found", {}, None)
     # Steps a, c, e time out on both reads; b and d have no passing main build.
     urlopen, timeouts = _urlopen_answering(
-        timeout, timeout, missing, timeout, timeout, missing, timeout, timeout,
-        {"files": []})
+        timeout,
+        timeout,
+        missing,
+        timeout,
+        timeout,
+        missing,
+        timeout,
+        timeout,
+        {"files": []},
+    )
     monkeypatch.setattr(rs, "_timings_failures", 0)
     monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
     for key in ("a", "b", "c", "d", "e"):
@@ -1499,7 +1523,9 @@ def test_commands_that_differ_only_in_env_each_run_their_own_tests(tmp_path):
     # by env vars alone, so the commands' pytest args are identical.
     _project(
         tmp_path,
-        {"test_model.py": "import os\ndef test_model(): print('MODEL=' + os.environ['MODEL'])\n"},
+        {
+            "test_model.py": "import os\ndef test_model(): print('MODEL=' + os.environ['MODEL'])\n"
+        },
     )
     command = "pytest -v -s test_model.py"
     plan = {"shards": 2, "commands": []}
@@ -1534,7 +1560,10 @@ def test_commands_that_differ_only_in_env_each_run_their_own_tests(tmp_path):
 
 
 def test_a_job_without_a_parallel_index_runs_the_first_shards_tests(tmp_path):
-    _project(tmp_path, {"test_a.py": "def test_a(): pass\n", "test_b.py": "def test_b(): pass\n"})
+    _project(
+        tmp_path,
+        {"test_a.py": "def test_a(): pass\n", "test_b.py": "def test_b(): pass\n"},
+    )
     command = "pytest -v test_a.py test_b.py"
     files = {"tests/test_a.py": 0, "tests/test_b.py": 1}
     plan = {"shards": 2, "commands": [_command_plan(command, "Command (1/1)", files)]}
