@@ -9,9 +9,10 @@ On by default. `VLLM_CI_SELECTOR` overrides it for one build:
   off     the selector does not run; today's rules, and no record
 
 PR, branch and main builds are selected; a main build diffs against its
-parent commit, as today's rules do there. Release-branch, nightly, run-all
-(the scheduled full CI runs), docs-only and AMD-only (`VLLM_CI_PLATFORM=amd`)
-builds, and builds that already name their steps (`VLLM_CI_ONLY_STEP_KEYS`),
+parent commit, as today's rules do there. Release-branch, nightly, AITER
+nightly, run-all (the scheduled full CI runs), docs-only and AMD-only
+(`VLLM_CI_PLATFORM=amd`) builds, and builds that already name their steps
+(`VLLM_CI_ONLY_STEP_KEYS`),
 keep today's rules. Any failure keeps them too: the selector cannot be fetched or run, it
 times out, it declines to name steps for another reason, or it names a step
 this generator does not know. When it declines because it cannot narrow the
@@ -74,6 +75,8 @@ def skip_reason(
         return "release branch build"
     if global_config.get("nightly") == "1":
         return "nightly build (runs every step)"
+    if global_config.get("aiter_nightly") == "1":
+        return "AITER nightly build (runs every AMD step)"
     if global_config.get("run_all"):
         return "run-all build (label or run_all_patterns)"
     if global_config.get("only_step_keys") is not None:

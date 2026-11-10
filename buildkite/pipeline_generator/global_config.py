@@ -27,6 +27,7 @@ class GlobalConfig(TypedDict):
     run_all_exclude_patterns: Optional[List[str]] = None
     nightly: Optional[str] = "0"
     torch_nightly: Optional[str] = "0"
+    aiter_nightly: Optional[str] = "0"
     run_all: bool = False
     # AMD steps only: AMD is not selected by ci-selector, so a pattern can stop
     # running everything on CUDA (the selector narrows it there) and still run
@@ -81,6 +82,7 @@ def init_global_config(pipeline_config_path: str):
         run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
         nightly=os.getenv("NIGHTLY", "0"),
         torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
+        aiter_nightly=os.getenv("AITER_NIGHTLY", "0"),
         run_all=_should_run_all(
             pr_labels,
             list_file_diff,

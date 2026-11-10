@@ -1485,9 +1485,12 @@ def convert_group_step_to_buildkite_step(
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    global_config = get_global_config()
+    if global_config["aiter_nightly"] == "1":
+        # Scheduled: nobody would unblock its steps, so NOAUTO does not apply.
+        return step.key in global_config["only_step_keys"]
     if os.getenv("NOAUTO") == "1":
         return False
-    global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
     # The test selector's choice (selector_gate.py), prerequisites included.
