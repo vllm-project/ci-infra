@@ -443,6 +443,7 @@ MIRROR_DEFAULT_DEPENDS_ON = (AMD_ARTIFACT_STEP,)
 # keep importing every one of these facts from the same place.
 AMD_ALWAYS_RUN_STEP_KEYS = _amd.AMD_ALWAYS_RUN_STEP_KEYS
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = _amd.AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
+AMD_ROCM_BASE_DOCKERFILE = _amd.AMD_ROCM_BASE_DOCKERFILE
 
 # Step fields we model. Anything else lands in Step.extra, fails a drift test,
 # and is force-selected at run time, so a new generator feature cannot pass
