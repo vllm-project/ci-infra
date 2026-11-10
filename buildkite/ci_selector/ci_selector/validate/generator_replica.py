@@ -23,10 +23,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import regex as re
+from amd import is_amd_device
 
 from ..codemap.claim import deps_match, docs_only
 from ..codemap.pipeline.step import PipelineConfig, Step
-from ..handwritten import AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
+from ..handwritten import (
+    AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
+    AMD_ROCM_BASE_DOCKERFILE,
+)
 
 
 def should_run_all(config: PipelineConfig, paths: list[str]) -> bool:
@@ -43,6 +47,10 @@ def step_should_run(step: Step, paths: list[str], run_all: bool) -> bool:
     from ..codemap.hardware import family_of_device
 
     if step.always_runs:
+        return True
+    # The generator's own AMD test, not `family_of_device`: this rule also
+    # covers the amd_cpu build lane, which our family table files under cpu.
+    if is_amd_device(step.device) and AMD_ROCM_BASE_DOCKERFILE in paths:
         return True
     if step.optional:
         return False
