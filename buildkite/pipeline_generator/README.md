@@ -47,7 +47,6 @@ run_all_patterns:
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "setup.py"
-  - "csrc/"
 
 # List of regex patterns to exclude from run_all_patterns checks.
 # If a file matches run_all_patterns but ALSO matches one of these,
@@ -60,12 +59,13 @@ run_all_exclude_patterns:
 # run_all_patterns (which already triggers AMD too). For files that matter to
 # AMD but are excluded or left out above, e.g. docker/Dockerfile.rocm_base.
 amd_run_all_patterns:
-  - "docker/Dockerfile.rocm"
+  - "csrc/"
+  - "docker/Dockerfile.rocm_base"
 
 # Optional. List of regex patterns to exclude from amd_run_all_patterns checks.
 # run_all_exclude_patterns does not apply here.
 amd_run_all_exclude_patterns:
-  - "docker/Dockerfile.rocm.*_gfx1250"
+  - "csrc/cpu/"
 
 # Container registry to store images
 registries: public.ecr.aws/q9t5s3a7
