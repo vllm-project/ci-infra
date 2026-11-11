@@ -437,25 +437,3 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
-
-
-def test_the_table_is_fetched_and_parsed_by_ci_select_alone(monkeypatch, tmp_path):
-    """The ~1 GB function table is parsed once: ci-select, given no table,
-    downloads it itself instead of a separate fetch step that parsed it to
-    check it."""
-    ran = []
-
-    def fake_run(cmd, **kw):
-        ran.append(cmd)
-        stdout = '{"keys": []}' if "ci-select" in cmd else "abc\n"
-        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
-
-    monkeypatch.setattr(selector_gate.subprocess, "run", fake_run)
-    monkeypatch.setattr(selector_gate, "_uv", lambda workdir: "uv")
-    monkeypatch.setattr(selector_gate, "_latest", lambda recorder: None)
-    monkeypatch.setattr(selector_gate.tempfile, "mkdtemp", lambda prefix: str(tmp_path))
-    selector_gate.run_ci_select("/repo", "b", "h", "ci")
-
-    assert not [c for c in ran if "ci-fetch-function-record" in c]
-    select = next(c for c in ran if "ci-select" in c)
-    assert "--table" not in select

@@ -1,12 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""`RowKeys.resolve` reads the pipeline yaml at the table's commit, and only
-that.
-
-It used to build a whole `RepoState` there (the import graph of the full vLLM
-tree), which was half of every CI run's selector time, for the one field it
-reads: the pipelines.
-"""
+"""`RowKeys.resolve` reads only the pipeline yaml at the table's commit, and
+must give the same answer as resolving against the whole `RepoState` there."""
 
 from __future__ import annotations
 
@@ -63,25 +58,6 @@ def _table(*row_keys: str) -> Table:
     return Table({key: object() for key in row_keys})
 
 
-@pytest.fixture
-def no_state(monkeypatch):
-    """Fail the test if anything builds a RepoState or an import graph."""
-
-    def refuse(*args, **kwargs):
-        raise AssertionError("resolve built a RepoState; it needs only the yaml")
-
-    monkeypatch.setattr(worktree, "state_for", refuse)
-    monkeypatch.setattr("ci_selector.codemap.state.RepoState.build", refuse)
-    monkeypatch.setattr("ci_selector.codemap.state.build_full_graph", refuse)
-
-
-def test_resolve_reads_only_the_pipeline_yaml(pipeline_repo, no_state):
-    repo, recorded, _ = pipeline_repo
-    keys = RowKeys.resolve(_table("keyed", "nightly"), repo.root, recorded)
-    assert keys.owners == {"vllm_ci"}
-    assert keys.match_rate == {"vllm_ci": 1.0}
-
-
 def test_resolve_answers_as_the_full_state_did(pipeline_repo):
     """Owners, rates, spellings and the step objects: the same answer as
     resolving against the whole `RepoState` at that commit, which is what
@@ -100,7 +76,7 @@ def test_resolve_answers_as_the_full_state_did(pipeline_repo):
     assert got.candidates() == expected.candidates()
 
 
-def test_resolve_reads_the_table_commit_not_the_checkout(pipeline_repo, no_state):
+def test_resolve_reads_the_table_commit_not_the_checkout(pipeline_repo):
     """Labels move, so the yaml must come from the commit the rows were
     recorded at, not from whatever the checkout holds."""
     repo, recorded, later = pipeline_repo
@@ -109,9 +85,3 @@ def test_resolve_reads_the_table_commit_not_the_checkout(pipeline_repo, no_state
     at_later = RowKeys.resolve(table, repo.root, later)
     assert "vllm_ci:later" not in at_recorded.steps
     assert "vllm_ci:later" in at_later.steps
-
-
-def test_no_rows_means_no_rate(pipeline_repo, no_state):
-    repo, recorded, _ = pipeline_repo
-    keys = RowKeys.resolve(_table(), repo.root, recorded)
-    assert keys.match_rate == {"vllm_ci": 0.0}

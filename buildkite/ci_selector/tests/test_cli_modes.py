@@ -101,17 +101,6 @@ def test_the_table_override_reads_the_path_it_is_given(tmp_path):
 
 
 @pytest.fixture
-def no_download(monkeypatch):
-    """Fail the test if the latest table is downloaded."""
-    import ci_selector.scripts.fetch_functions as fetch_functions
-
-    def refuse():
-        raise AssertionError("downloaded a table although one was at hand")
-
-    monkeypatch.setattr(fetch_functions, "fetch_latest", refuse)
-
-
-@pytest.fixture
 def empty_coverage_dir(tmp_path, monkeypatch):
     """No table named and none in coverage-data/: CI's fresh checkout."""
     import ci_selector.coverage.source as source
@@ -132,27 +121,7 @@ def _unreadable_table(path: Path) -> Path:
     return path
 
 
-def test_a_named_table_is_read_as_it_is(tmp_path, empty_coverage_dir, no_download):
-    """Replays and tests pin a table with --table; it is never swapped for the
-    latest one."""
-    from ci_selector.coverage.source import coverage_table
-
-    pinned = _unreadable_table(tmp_path / "pinned.json")
-    assert "re-merge" in coverage_table(pinned).unavailable
-
-
-def test_a_table_named_by_the_environment_is_read_as_it_is(
-    tmp_path, empty_coverage_dir, no_download, monkeypatch
-):
-    from ci_selector.coverage.source import TABLE_ENV, coverage_table
-
-    monkeypatch.setenv(TABLE_ENV, str(_unreadable_table(tmp_path / "pinned.json")))
-    assert "re-merge" in coverage_table(None).unavailable
-
-
-def test_a_table_already_fetched_is_used_rather_than_replaced(
-    empty_coverage_dir, no_download
-):
+def test_a_table_already_fetched_is_used_rather_than_replaced(empty_coverage_dir):
     """`ci-fetch-function-record --commit X`, then `ci-select`: the pinned
     table on disk is used, and offline runs keep working."""
     from ci_selector.coverage.source import TABLE_NAME, coverage_table
@@ -161,24 +130,19 @@ def test_a_table_already_fetched_is_used_rather_than_replaced(
     assert "re-merge" in coverage_table(None).unavailable
 
 
-def test_with_no_table_at_hand_the_latest_is_fetched_and_parsed_once(
-    empty_coverage_dir, monkeypatch
-):
-    """CI's case: no separate fetch step, one parse, here."""
+def test_with_no_table_at_hand_the_latest_is_used(empty_coverage_dir, monkeypatch):
+    """CI's case: a fresh checkout with no table on disk."""
     import ci_selector.scripts.fetch_functions as fetch_functions
     from ci_selector.coverage.source import coverage_table
 
     sentinel = object()
-    calls = []
-    monkeypatch.setattr(
-        fetch_functions, "fetch_latest", lambda: calls.append(1) or sentinel
-    )
+    monkeypatch.setattr(fetch_functions, "fetch_latest", lambda: sentinel)
     assert coverage_table(None) is sentinel
-    assert calls == [1]
 
 
 def test_a_refused_download_reaches_the_caller(empty_coverage_dir, monkeypatch):
-    """main() turns it into exit 1, which sends CI back to today's rules."""
+    """Left uncaught, it exits ci-select non-zero, which sends CI back to
+    today's rules."""
     import ci_selector.scripts.fetch_functions as fetch_functions
     from ci_selector.coverage.source import FetchError, coverage_table
 

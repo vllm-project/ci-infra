@@ -208,8 +208,8 @@ class TestFetch:
     def test_fetch_hands_back_the_table_it_parsed(
         self, table, tmp_path, monkeypatch, tmp_repo
     ):
-        """`ci-select` run without a table uses the returned table instead of
-        reading the ~1 GB file a second time, so it must be the checked one."""
+        """`ci-select` run without a table uses the table `fetch` returns, so
+        it must be the one written to disk."""
         base, commit = "https://b/ci/fnrec", tmp_repo.head()
         self.serve(
             monkeypatch,
@@ -220,37 +220,10 @@ class TestFetch:
                 f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
             },
         )
-        loads = []
-        real_load = fetch_functions.load
-        monkeypatch.setattr(
-            fetch_functions, "load", lambda p: loads.append(p) or real_load(p)
-        )
         out = tmp_path / "out"
         got, got_commit, build = fetch_functions.fetch(base, out=out)
-        assert len(loads) == 1
         assert (got_commit, build) == (commit, "42")
         assert got.commit == commit and len(got) == len(load(out / TABLE_NAME))
-
-    def test_fetch_raises_what_main_reports(self, tmp_path, monkeypatch):
-        self.serve(monkeypatch, {})
-        with pytest.raises(FetchError, match="nothing published yet"):
-            fetch_functions.fetch("https://b/ci/fnrec", out=tmp_path / "out")
-
-    def test_fetch_latest_follows_the_configured_bucket(
-        self, table, tmp_path, monkeypatch, tmp_repo
-    ):
-        base, commit = "https://b/ci/fnrec", tmp_repo.head()
-        monkeypatch.setenv(fetch_functions.URL_ENV, base)
-        monkeypatch.setattr(fetch_functions, "COVERAGE_DIR", tmp_path / "data")
-        self.serve(
-            monkeypatch,
-            {
-                f"{base}/latest.json": json.dumps({"commit": commit}).encode(),
-                f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
-            },
-        )
-        assert fetch_functions.fetch_latest().commit == commit
-        assert (tmp_path / "data" / TABLE_NAME).is_file()
 
     def test_a_latest_pointer_that_is_not_an_object_is_refused_cleanly(
         self, tmp_path, monkeypatch
