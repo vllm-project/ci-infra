@@ -187,10 +187,18 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
         AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
     ),
-    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
-    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
-    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
-    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8),
+    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355, 1, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355, 2, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355, 4, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355, 8, gpu_size_tag=True
+    ),
 }
 
 
