@@ -65,6 +65,82 @@ CUptiResult CUPTIAPI cuptiActivityFlushAll(uint32_t flags) {
   return flush_status;
 }
 
+static CUptiResult subscribe_status = CUPTI_SUCCESS;
+static int subscriber_token = 0, unsubscribes = 0;
+static CUpti_CallbackFunc marker_callback = NULL;
+
+CUptiResult CUPTIAPI cuptiSubscribe(CUpti_SubscriberHandle *subscriber,
+                                    CUpti_CallbackFunc callback, void *userdata) {
+  (void)userdata;
+  if (subscribe_status != CUPTI_SUCCESS) return subscribe_status;
+  *subscriber = (CUpti_SubscriberHandle)&subscriber_token;
+  marker_callback = callback;
+  return CUPTI_SUCCESS;
+}
+
+CUptiResult CUPTIAPI cuptiEnableCallback(uint32_t enable,
+                                         CUpti_SubscriberHandle subscriber,
+                                         CUpti_CallbackDomain domain,
+                                         CUpti_CallbackId cbid) {
+  (void)enable;
+  (void)subscriber;
+  assert(domain == CUPTI_CB_DOMAIN_RESOURCE);
+  assert(cbid == CUPTI_CBID_RESOURCE_CONTEXT_CREATED);
+  return CUPTI_SUCCESS;
+}
+
+CUptiResult CUPTIAPI cuptiUnsubscribe(CUpti_SubscriberHandle subscriber) {
+  (void)subscriber;
+  unsubscribes++;
+  return CUPTI_SUCCESS;
+}
+
+static void read_file(const char *path, char *text, size_t size) {
+  FILE *input = fopen(path, "r");
+  assert(input != NULL);
+  memset(text, 0, size);
+  assert(fread(text, 1, size - 1, input) > 0);
+  fclose(input);
+}
+
+static int count(const char *text, const char *needle) {
+  int n = 0;
+  for (const char *at = text; (at = strstr(at, needle)); at += strlen(needle)) n++;
+  return n;
+}
+
+/* The context-creation marker: the header promises it only when armed, the
+ * first context writes it once, and the slot is freed afterwards. */
+static void check_marker(const char *mode, const char *path) {
+  char text[8192];
+  if (!strcmp(mode, "marker-subscribe-fails")) {
+    read_file(path, text, sizeof text);
+    assert(!strstr(text, "activity=1") && marker_callback == NULL);
+    return;
+  }
+  assert(marker_callback != NULL);
+  read_file(path, text, sizeof text);
+  assert(strstr(text, "backend=cuda recorder=cupti activity=1 pid="));
+  if (!strcmp(mode, "marker-idle")) {
+    assert(!strstr(text, "# gpu_active"));
+  } else if (!strcmp(mode, "marker-active")) {
+    marker_callback(NULL, CUPTI_CB_DOMAIN_RESOURCE,
+                    CUPTI_CBID_RESOURCE_CONTEXT_CREATED, NULL);
+    marker_callback(NULL, CUPTI_CB_DOMAIN_RESOURCE,
+                    CUPTI_CBID_RESOURCE_CONTEXT_CREATED, NULL);
+    read_file(path, text, sizeof text);
+    assert(count(text, "# gpu_active\n") == 1);
+    if (g_active) unsubscribe_activity_marker(); /* the flush tick's step */
+    assert(unsubscribes == 1);
+    unsubscribe_activity_marker();
+    assert(unsubscribes == 1);
+  } else if (!strcmp(mode, "marker-release")) {
+    assert(kernrec_release() == 1 && unsubscribes == 1);
+  } else {
+    assert(0 && "unknown marker mode");
+  }
+}
+
 CUptiResult CUPTIAPI cuptiGetResultString(CUptiResult result, const char **text) {
   (void)result;
   *text = "injected test failure";
@@ -92,6 +168,7 @@ int main(int argc, char **argv) {
   const char *mode = argv[2];
   if (!strcmp(mode, "register")) registration_status = CUPTI_ERROR_UNKNOWN;
   if (!strcmp(mode, "enable")) enable_status = CUPTI_ERROR_UNKNOWN;
+  if (!strcmp(mode, "marker-subscribe-fails")) subscribe_status = CUPTI_ERROR_UNKNOWN;
   if (!strcmp(mode, "released-pid")) {
     char pid[32];
     snprintf(pid, sizeof pid, "%ld", (long)getpid());
@@ -102,6 +179,12 @@ int main(int argc, char **argv) {
   assert(g_out != NULL);
   char path[4096];
   assert(snprintf(path, sizeof(path), "%s/kern.%ld.txt", argv[1], (long)getpid()) > 0);
+  if (!strncmp(mode, "marker-", 7)) {
+    check_marker(mode, path);
+    printf("CUDA callback check passed: %s\n", mode);
+    fflush(stdout);
+    _exit(0);
+  }
   struct failing_stream stream = {-1, 0};
   if (!strcmp(mode, "write")) {
     fclose(g_out);

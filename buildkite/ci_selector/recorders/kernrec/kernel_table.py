@@ -65,7 +65,8 @@ TABLE_VERSION = 3
 
 def read_recording(path: Path) -> tuple[set[str], int, bool]:
     """Read names and loss counters; only validated native footers are clean,
-    or an idle ROCm process that reports activity and never loaded GPU code.
+    or an idle process whose header reports activity and that never went
+    active (ROCm: loaded GPU code; CUDA: created a context).
 
     Older recordings remain positive evidence. Their footers do not attest
     error accounting, so they cannot establish an absence of launches.
@@ -101,10 +102,10 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
                         and (fields.get("backend"), fields.get("recorder"))
                         in {("cuda", "cupti"), ("rocm", "rocprofiler-sdk")}
                     )
-                    reports_activity = (
-                        fields.get("backend") == "rocm"
-                        and fields.get("activity") == "1"
-                    )
+                    # Both recorders now mark the point a process can
+                    # launch (ROCm: GPU code loaded; CUDA: first context).
+                    # Only headers that say so promise the marker.
+                    reports_activity = fields.get("activity") == "1"
                 elif line == "# gpu_active":
                     active = True
                 elif line.startswith("# dropped="):
@@ -133,8 +134,9 @@ def read_recording(path: Path) -> tuple[set[str], int, bool]:
                 errors = True
             continue
         names.add(line)
-    # Loading GPU code precedes every dispatch, so a process that never went
-    # active lost nothing by exiting without a footer (e.g. a killed daemon).
+    # Going active (GPU code loaded, or a CUDA context created) precedes every
+    # launch, so a process that never did lost nothing by exiting without a
+    # footer (e.g. a killed daemon, a helper that only ran cuInit).
     idle = (
         valid_header
         and reports_activity

@@ -28,6 +28,19 @@
  * kernel activity record per graph node. Only the set of names is kept, not
  * the timeline, which is what keeps the overhead and the output small.
  *
+ * Idle processes: vLLM tests start many short-lived Python processes that
+ * cuInit (import torch, is_available()) and exit or are killed before
+ * at_exit writes the footer. Without a footer the table cannot tell such a
+ * process from one that launched kernels and lost them, so every row with
+ * one became unusable (vLLM full runs after ci-infra#685: 30-40% of CUDA rows
+ * usable). Like the ROCm recorder, the header now says activity=1 and
+ * "# gpu_active" is written, unbuffered, when the process creates its first
+ * CUDA context, which every launch needs. A header-only file without it is a
+ * process that never could launch a kernel, and the table reads it as clean.
+ * The marker comes from CUPTI's resource callback; CUPTI allows one callback
+ * subscriber per process, so the recorder unsubscribes once the marker is
+ * written (next flush tick) and when it releases CUPTI to a profiler.
+ *
  * One activity client per process: CUPTI allows only one. When torch.profiler
  * (Kineto) took over mid-run, it was handed this recorder's half-filled
  * buffer, dropped it as "unknown", and reported no GPU activity at all
@@ -91,6 +104,11 @@ static void check_status(CUptiResult status, const char *operation) {
 static int g_initialized = 0;
 static int g_armed = 0;
 static int g_released = 0;
+/* The context-creation marker; see the header comment. g_subscriber_pid is
+ * the process whose header promised it (activity=1). */
+static CUpti_SubscriberHandle g_subscriber;
+static pid_t g_subscriber_pid = 0;
+static int g_active = 0;
 
 /* Flush thread; see the header comment. g_flush_pid guards the join: a forked
  * child inherits the atexit handler but not the thread. */
@@ -206,12 +224,57 @@ static FILE *output(void) {
   setvbuf(g_out, NULL, _IOLBF, 0);
   char exe[1024] = {0};
   ssize_t r = readlink("/proc/self/exe", exe, sizeof exe - 1);
-  fprintf(g_out, "# kernrec v1 backend=cuda recorder=cupti pid=%ld ppid=%ld exe=%s\n", (long)pid,
+  fprintf(g_out, "# kernrec v1 backend=cuda recorder=cupti%s pid=%ld ppid=%ld exe=%s\n",
+          g_subscriber_pid == pid ? " activity=1" : "", (long)pid,
           (long)getppid(), r > 0 ? exe : "?");
   return g_out;
 }
 
 /* ---- CUPTI callbacks --------------------------------------------------- */
+
+/* First CUDA context in this process: from here on it can launch kernels, so
+ * a later missing footer may hide some. Written before any launch, unbuffered,
+ * so a SIGKILL right after still leaves it. */
+static void CUPTIAPI resource_callback(void *userdata, CUpti_CallbackDomain domain,
+                                       CUpti_CallbackId cbid, const void *data) {
+  (void)userdata;
+  (void)data;
+  if (domain != CUPTI_CB_DOMAIN_RESOURCE ||
+      cbid != CUPTI_CBID_RESOURCE_CONTEXT_CREATED)
+    return;
+  pthread_mutex_lock(&g_lock);
+  if (!g_active && g_subscriber_pid == getpid()) {
+    g_active = 1;
+    FILE *f = output();
+    if (f) {
+      fputs("# gpu_active\n", f);
+      if (fflush(f) != 0) g_errors++;
+    }
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+
+/* Arms the marker. Without it the header omits activity=1 and the table
+ * keeps reading a missing footer as possible loss, as before. */
+static void subscribe_activity_marker(void) {
+  if (cuptiSubscribe(&g_subscriber, (CUpti_CallbackFunc)resource_callback,
+                     NULL) != CUPTI_SUCCESS)
+    return;
+  if (cuptiEnableCallback(1, g_subscriber, CUPTI_CB_DOMAIN_RESOURCE,
+                          CUPTI_CBID_RESOURCE_CONTEXT_CREATED) != CUPTI_SUCCESS) {
+    cuptiUnsubscribe(g_subscriber);
+    return;
+  }
+  g_subscriber_pid = getpid();
+}
+
+/* Frees CUPTI's single callback slot. Not from inside the callback: the flush
+ * thread does it once the marker is written, and release does it at once. */
+static void unsubscribe_activity_marker(void) {
+  if (g_subscriber_pid != getpid()) return;
+  g_subscriber_pid = 0;
+  check_status(cuptiUnsubscribe(g_subscriber), "unsubscribe-marker");
+}
 
 static void CUPTIAPI buffer_requested(uint8_t **buffer, size_t *size,
                                       size_t *max_records) {
@@ -300,6 +363,7 @@ static void *flush_loop(void *arg) {
     int forced = g_force_every > 0 && tick % g_force_every == 0;
     check_status(cuptiActivityFlushAll(forced ? CUPTI_ACTIVITY_FLAG_FLUSH_FORCED : 0),
                  "periodic-flush");
+    if (g_active) unsubscribe_activity_marker();
     pthread_mutex_lock(&g_flush_lock);
   }
   pthread_mutex_unlock(&g_flush_lock);
@@ -338,6 +402,7 @@ int kernrec_release(void) {
   if (!g_armed || g_released) return 0;
   g_released = 1;
   stop_flush_thread();
+  unsubscribe_activity_marker();
   check_status(cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL),
                "release-disable");
   check_status(cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED),
@@ -377,14 +442,17 @@ static const char *cupti_err(CUptiResult st) {
 int InitializeInjection(void) {
   if (g_initialized) return 1;
   g_initialized = 1;
+  const char *released = getenv("KERNREC_RELEASED_PID");
+  int released_here = released && strtol(released, NULL, 10) == (long)getpid();
+  /* Before the header, which says activity=1 only if this armed. */
+  if (!released_here) subscribe_activity_marker();
   pthread_mutex_lock(&g_lock);
   output();
   pthread_mutex_unlock(&g_lock);
   atexit(at_exit);
 
   /* Still writes a file, so the row shows this process ran unrecorded. */
-  const char *released = getenv("KERNREC_RELEASED_PID");
-  if (released && strtol(released, NULL, 10) == (long)getpid()) {
+  if (released_here) {
     g_released = 1;
     pthread_mutex_lock(&g_lock);
     record_error("released-to-profiler");
