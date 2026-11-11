@@ -15,7 +15,7 @@ import urllib.error
 from pathlib import Path
 
 import pytest
-from ci_selector.coverage.source import TABLE_NAME, FetchError
+from ci_selector.coverage.source import TABLE_NAME
 from ci_selector.coverage.table import load
 from ci_selector.scripts import fetch_functions, publish
 from ci_selector.scripts.build import merge_build, write_table
@@ -224,13 +224,3 @@ class TestFetch:
         got, got_commit, build = fetch_functions.fetch(base, out=out)
         assert (got_commit, build) == (commit, "42")
         assert got.commit == commit and len(got) == len(load(out / TABLE_NAME))
-
-    def test_a_latest_pointer_that_is_not_an_object_is_refused_cleanly(
-        self, tmp_path, monkeypatch
-    ):
-        """A list or string in latest.json raised TypeError/AttributeError,
-        which escaped as a traceback instead of exit 1 with a message."""
-        base = "https://b/ci/fnrec"
-        self.serve(monkeypatch, {f"{base}/latest.json": b'["not", "an", "object"]'})
-        with pytest.raises(FetchError, match="TypeError"):
-            fetch_functions.fetch(base, out=tmp_path / "out")

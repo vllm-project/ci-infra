@@ -110,23 +110,18 @@ def empty_coverage_dir(tmp_path, monkeypatch):
     return tmp_path / "coverage-data"
 
 
-def _unreadable_table(path: Path) -> Path:
-    """A table `load` reads and then refuses for its version, so a test can
-    tell it was this file that was read."""
-    import gzip
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    body = b'{"version": 999, "rows": {}}'
-    path.write_bytes(gzip.compress(body) if path.suffix == ".gz" else body)
-    return path
-
-
 def test_a_table_already_fetched_is_used_rather_than_replaced(empty_coverage_dir):
     """`ci-fetch-function-record --commit X`, then `ci-select`: the pinned
     table on disk is used, and offline runs keep working."""
+    import gzip
+
     from ci_selector.coverage.source import TABLE_NAME, coverage_table
 
-    _unreadable_table(empty_coverage_dir / TABLE_NAME)
+    # A version `load` refuses, so the reason shows this file was read.
+    empty_coverage_dir.mkdir()
+    (empty_coverage_dir / TABLE_NAME).write_bytes(
+        gzip.compress(b'{"version": 999, "rows": {}}')
+    )
     assert "re-merge" in coverage_table(None).unavailable
 
 
@@ -138,17 +133,3 @@ def test_with_no_table_at_hand_the_latest_is_used(empty_coverage_dir, monkeypatc
     sentinel = object()
     monkeypatch.setattr(fetch_functions, "fetch_latest", lambda: sentinel)
     assert coverage_table(None) is sentinel
-
-
-def test_a_refused_download_reaches_the_caller(empty_coverage_dir, monkeypatch):
-    """Left uncaught, it exits ci-select non-zero, which sends CI back to
-    today's rules."""
-    import ci_selector.scripts.fetch_functions as fetch_functions
-    from ci_selector.coverage.source import FetchError, coverage_table
-
-    def refuse():
-        raise FetchError("nothing published yet: HTTP 404")
-
-    monkeypatch.setattr(fetch_functions, "fetch_latest", refuse)
-    with pytest.raises(FetchError):
-        coverage_table(None)

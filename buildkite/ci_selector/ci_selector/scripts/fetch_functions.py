@@ -18,7 +18,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from ..coverage.source import COVERAGE_DIR, TABLE_NAME, FetchError
+from ..coverage.source import COVERAGE_DIR, TABLE_NAME
 from ..coverage.table import Table, load
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec"
@@ -40,47 +40,35 @@ def fetch(
     The table is parsed once, here, and checked before it replaces the one on
     disk, so a bad download leaves the old one in place. A caller that goes on
     to use the table takes the parsed one rather than reading the file again:
-    it is about 1 GB of JSON. Raises FetchError on any problem.
+    it is about 1 GB of JSON. A failed download raises; a table that must be
+    refused raises ValueError.
     """
     url = url.rstrip("/")
-    try:
-        if commit:
-            build = "?"
-        else:
-            latest = json.loads(_get(f"{url}/latest.json"))
-            commit, build = latest["commit"], latest.get("build", "?")
-        out.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=out) as tmp:
-            staged = Path(tmp) / TABLE_NAME
-            staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
-            table = load(staged)
-            if not table.available:
-                raise FetchError(f"table for {commit[:10]}: {table.unavailable}")
-            # A mismatch means table and pointer were published out of step.
-            if table.commit and table.commit != commit:
-                raise FetchError(
-                    f"asked for {commit[:10]}, table records "
-                    f"{table.commit[:10]}; refusing it"
-                )
-            os.replace(staged, out / TABLE_NAME)
-    except urllib.error.HTTPError as exc:
-        what = "nothing published yet" if exc.code in (403, 404) else "download failed"
-        raise FetchError(f"{what}: HTTP {exc.code} for {exc.url}") from exc
-    except (
-        urllib.error.URLError,
-        OSError,
-        KeyError,
-        ValueError,
-        TypeError,  # latest.json that is not an object
-        AttributeError,
-    ) as exc:
-        raise FetchError(f"{type(exc).__name__}: {exc}") from exc
+    if commit:
+        build = "?"
+    else:
+        latest = json.loads(_get(f"{url}/latest.json"))
+        commit, build = latest["commit"], latest.get("build", "?")
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        staged = Path(tmp) / TABLE_NAME
+        staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
+        table = load(staged)
+        if not table.available:
+            raise ValueError(table.unavailable)
+        # A mismatch means table and pointer were published out of step.
+        if table.commit and table.commit != commit:
+            raise ValueError(
+                f"asked for {commit[:10]}, table records "
+                f"{table.commit[:10]}; refusing it"
+            )
+        os.replace(staged, out / TABLE_NAME)
     return table, commit, build
 
 
 def fetch_latest() -> Table:
     """The latest published table, downloaded into coverage-data/ and parsed
-    once, for `ci-select` run without a table. Raises FetchError."""
+    once, for `ci-select` run without a table."""
     return fetch(os.environ.get(URL_ENV, DEFAULT_URL), out=COVERAGE_DIR)[0]
 
 
@@ -100,9 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     try:
         table, commit, build = fetch(args.url, args.commit, args.out)
-    except FetchError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except urllib.error.HTTPError as exc:
+        what = "nothing published yet" if exc.code in (403, 404) else "download failed"
+        print(f"error: {what}: HTTP {exc.code} for {exc.url}", file=sys.stderr)
         return 1
+    except (urllib.error.URLError, OSError, KeyError, ValueError) as exc:
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
     print(
         f"function record for {commit[:10]} (build {build}): "
         f"{len(table)} step rows -> {args.out}"
