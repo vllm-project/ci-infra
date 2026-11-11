@@ -1,0 +1,50 @@
+<!-- ci-selector-shadow -->
+### CI selector (shadow): 7 test steps (7 jobs) instead of 7 (7 jobs)
+
+Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
+
+**Feedback welcome:** reply here if it would skip a step this change needs, or runs something unrelated.
+
+| steps (jobs) | Today's rules | Selector | Would skip | Would add |
+|---|---|---|---|---|
+| NVIDIA, CPU and others | 7 (7) | 7 (7) | 0 (0) | 0 (0) |
+| AMD mirrors | 7 (7) | 7 (7) | 0 (0) | 0 (0) |
+
+<details><summary>Selector would run (7)</summary>
+
+- `pytorch-compilation-dynamic-shapes`
+- `pytorch-compilation-passes-unit-tests`
+- `pytorch-compilation-unit-tests`
+- `pytorch-compilation-unit-tests-h100`
+- `pytorch-fullgraph-cudagraph-l4-compatibility`
+- `pytorch-fullgraph-test`
+- `pytorch-nightly-dependency-override-check`
+</details>
+
+<details><summary>Would skip (today's rules run them) (0)</summary>
+
+none
+</details>
+
+<details><summary>Would add (today's rules do not run them) (0)</summary>
+
+none
+</details>
+
+<details><summary>AMD mirrors: would skip (0)</summary>
+
+none
+</details>
+
+<details><summary>AMD mirrors: would add (0)</summary>
+
+none
+</details>
+
+#### CI results (2026-10-12 13:40 UTC)
+
+0 passed, 0 failed, 0 pending.
+
+No failures to judge.
+
+<sub>1 changed files · base `ee8f7ea449` · head `4de674d635` · Python record: build 93039 at `1e5d0ea888` · kernel record: table 74f4404f58 (build 94125), map 74f4404f58 · not counted: 11 build steps, 5 A100 steps the generator no longer emits, 0 optional steps the selector would also run</sub>

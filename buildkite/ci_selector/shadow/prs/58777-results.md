@@ -1,0 +1,55 @@
+<!-- ci-selector-shadow -->
+### CI selector (shadow): 12 test steps (12 jobs) instead of 12 (12 jobs)
+
+Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
+
+**Feedback welcome:** reply here if it would skip a step this change needs, or runs something unrelated.
+
+| steps (jobs) | Today's rules | Selector | Would skip | Would add |
+|---|---|---|---|---|
+| NVIDIA, CPU and others | 12 (12) | 12 (12) | 0 (0) | 0 (0) |
+| AMD mirrors | 8 (8) | 8 (8) | 0 (0) | 0 (0) |
+
+<details><summary>Selector would run (12)</summary>
+
+- `amd-lm-eval-small-models-harness`
+- `kv-offload-large`
+- `kv-offload-medium`
+- `kv-offload-small`
+- `lm-eval-dspark-watermark-2xh100`
+- `lm-eval-small-models`
+- `lm-eval-turboquant-k3v4nc`
+- `lm-eval-turboquant-k8v4`
+- `lm-eval-turboquant-t3nc`
+- `lm-eval-turboquant-t4nc`
+- `lm-eval-watermarking`
+- `mrcr-eval-small-models`
+</details>
+
+<details><summary>Would skip (today's rules run them) (0)</summary>
+
+none
+</details>
+
+<details><summary>Would add (today's rules do not run them) (0)</summary>
+
+none
+</details>
+
+<details><summary>AMD mirrors: would skip (0)</summary>
+
+none
+</details>
+
+<details><summary>AMD mirrors: would add (0)</summary>
+
+none
+</details>
+
+#### CI results (2026-10-03 05:32 UTC)
+
+0 passed, 0 failed, 0 pending.
+
+No failures to judge.
+
+<sub>7 changed files · base `31cc226401` · head `07acea207b` · Python record: build 92706 at `6e517b15c1` · kernel record: table 6e517b15c1 (build 92706), map 6e517b15c1 · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 36 optional steps the selector would also run</sub>

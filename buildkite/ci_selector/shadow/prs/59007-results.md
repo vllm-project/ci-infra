@@ -1,0 +1,145 @@
+<!-- ci-selector-shadow -->
+### CI selector (shadow): 6 test steps (9 jobs) instead of 57 (73 jobs)
+
+Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
+
+**Feedback welcome:** reply here if it would skip a step this change needs, or runs something unrelated.
+
+| steps (jobs) | Today's rules | Selector | Would skip | Would add |
+|---|---|---|---|---|
+| NVIDIA, CPU and others | 57 (73) | 6 (9) | 52 (65) | 1 (1) |
+| AMD mirrors | 50 (64) | 5 (8) | 46 (57) | 1 (1) |
+
+<details><summary>Selector would run (6)</summary>
+
+- `e2e-core-1-gpu`
+- `engine`
+- `v1-core`
+- `v1-executor-worker`
+- `v1-kv-connectors` ×4
+- `v1-others-cpu`
+</details>
+
+<details><summary>Would skip (today's rules run them) (52)</summary>
+
+- `ascend-npu-test`
+- `async-engine-inputs-utils-worker`
+- `basic-correctness` ×2
+- `basic-correctness-cpu-offload`
+- `basic-correctness-cumem`
+- `basic-correctness-prefetch-offload`
+- `basic-correctness-sleep-mode`
+- `basic-models-test-other-cpu`
+- `basic-models-tests-initialization`
+- `basic-models-tests-other`
+- `benchmarks-cli-test`
+- `cpu-language-generation-and-pooling-model-tests` ×3
+- `cpu-multimodal-config`
+- `cpu-params-env-tokenizers-parser`
+- `cpu-reasoning-renderers`
+- `cpu-tool-parsers`
+- `e2e-core-large-memory`
+- `e2e-scheduling-1-gpu`
+- `entrypoints-integration-api-server` ×4
+- `entrypoints-integration-api-server-generate`
+- `entrypoints-integration-api-server-openai-chat_completion`
+- `entrypoints-integration-api-server-openai-completion`
+- `entrypoints-integration-llm`
+- `entrypoints-integration-multimodal`
+- `entrypoints-integration-pooling`
+- `entrypoints-integration-responses-api`
+- `entrypoints-integration-speech_to_text`
+- `kernels-fla-ops-test-b200`
+- `kernels-mhc-test-b200`
+- `kernels-root-misc-test-b200`
+- `language-models-tests-granite-l4-compatibility`
+- `language-models-tests-hybrid` ×2
+- `language-models-tests-standard`
+- `metrics-tracing-2-gpus`
+- `multi-modal-models-standard-1-qwen2`
+- `multi-modal-models-standard-2-qwen3-gemma`
+- `multi-modal-models-standard-3-llava-qwen2-vl`
+- `multi-modal-models-standard-4-other-whisper`
+- `multi-modal-processor` ×4
+- `multi-modal-processor-cpu` ×4
+- `pytorch-compilation-dynamic-shapes`
+- `pytorch-compilation-passes-unit-tests`
+- `pytorch-compilation-unit-tests`
+- `pytorch-compilation-unit-tests-h100`
+- `pytorch-fullgraph-cudagraph-l4-compatibility`
+- `pytorch-fullgraph-test`
+- `regression`
+- `v1-kv-offload`
+- `v1-logits-oracle`
+- `v1-metrics-lmeval`
+- `v1-sample`
+- `v1-spec-decode`
+</details>
+
+<details><summary>Would add (today's rules do not run them) (1)</summary>
+
+- `engine` (code map)
+</details>
+
+<details><summary>AMD mirrors: would skip (46)</summary>
+
+- `async-engine-inputs-utils-worker`
+- `basic-correctness` ×2
+- `basic-correctness-cpu-offload`
+- `basic-correctness-cumem`
+- `basic-correctness-prefetch-offload`
+- `basic-correctness-sleep-mode`
+- `basic-models-test-other-cpu`
+- `basic-models-tests-initialization`
+- `basic-models-tests-other`
+- `benchmarks-cli-test`
+- `e2e-core-large-memory`
+- `e2e-scheduling-1-gpu`
+- `entrypoints-integration-api-server` ×4
+- `entrypoints-integration-api-server-generate`
+- `entrypoints-integration-api-server-openai-chat_completion`
+- `entrypoints-integration-api-server-openai-completion`
+- `entrypoints-integration-llm`
+- `entrypoints-integration-multimodal`
+- `entrypoints-integration-pooling`
+- `entrypoints-integration-responses-api`
+- `entrypoints-integration-speech_to_text`
+- `kernels-fla-ops-test-b200`
+- `kernels-mhc-test-b200`
+- `kernels-root-misc-test-b200`
+- `language-models-tests-granite-l4-compatibility`
+- `language-models-tests-hybrid` ×2
+- `language-models-tests-standard`
+- `metrics-tracing-2-gpus`
+- `multi-modal-models-standard-1-qwen2`
+- `multi-modal-models-standard-2-qwen3-gemma`
+- `multi-modal-models-standard-3-llava-qwen2-vl`
+- `multi-modal-models-standard-4-other-whisper`
+- `multi-modal-processor` ×4
+- `multi-modal-processor-cpu` ×4
+- `platform-tests`
+- `pytorch-compilation-dynamic-shapes`
+- `pytorch-compilation-passes-unit-tests`
+- `pytorch-compilation-unit-tests`
+- `pytorch-compilation-unit-tests-h100`
+- `pytorch-fullgraph-test`
+- `regression`
+- `v1-kv-offload`
+- `v1-logits-oracle`
+- `v1-metrics-lmeval`
+- `v1-sample`
+- `v1-spec-decode`
+</details>
+
+<details><summary>AMD mirrors: would add (1)</summary>
+
+- `engine` (code map)
+</details>
+
+#### CI results (2026-09-30 17:07 UTC)
+
+130 passed, 0 failed, 0 pending.
+
+No failures to judge.
+
+<sub>3 changed files · base `279012f94d` · head `ff1b87cca2` · Python record: not used (/tmp/ci-infra-selector/buildkite/ci_selector/coverage-data/table.json.gz is table version 5, expected 7; re-merge it from the raw recordings) · kernel record: table 866fa130fa (build 92059), map 866fa130fa · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 8 optional steps the selector would also run</sub>
