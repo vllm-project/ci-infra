@@ -46,7 +46,7 @@ PRECOMMIT_GROUP = "GitHub pre-commit check"
 # The CUDA image build. Every PR test step waits on it.
 CUDA_IMAGE_BUILD_STEP_KEY = "image-build"
 AMD_GROUP = "Hardware-AMD Tests"
-PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
+PRECOMMIT_MAX_WAIT = 3600  # 1 hour
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
@@ -137,20 +137,30 @@ def _otel_setup_command() -> str:
 # carries no shell variables (nothing for `buildkite-agent pipeline upload` to
 # interpolate) and needs no third-party Python packages on the agent.
 _PRECOMMIT_POLL_PROGRAM = """\
-import json, subprocess, time, urllib.request
+import http.client, json, subprocess, time, urllib.error, urllib.request
 commit = "{commit}"
 repo = "{repo}"
 api_url = "https://api.github.com/repos/" + repo + "/commits/" + commit + "/check-runs"
 max_wait = {max_wait}
 wait_interval = {wait_interval}
-elapsed = 0
+# Time from a fixed start, so requests that time out count against max_wait too.
+start = time.monotonic()
 while True:
     request = urllib.request.Request(api_url)
     request.add_header("User-Agent", "vllm-ci-precommit-check")
     request.add_header("Accept", "application/vnd.github+json")
-    with urllib.request.urlopen(request) as response:
-        check_runs = json.load(response).get("check_runs", [])
-    precommit_run = next((run for run in check_runs if run["name"] == "pre-commit"), None)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            check_runs = json.load(response).get("check_runs", [])
+    except (OSError, http.client.HTTPException) as error:
+        # A GitHub 5xx, timeout or dropped connection (also mid-body, which
+        # raises IncompleteRead) is no answer, so poll again within max_wait;
+        # a 4xx is a real error and still fails.
+        if isinstance(error, urllib.error.HTTPError) and error.code < 500:
+            raise
+        print("GitHub API request failed (" + type(error).__name__ + ": " + str(error) + "); polling again.")
+        check_runs = None
+    precommit_run = next((run for run in check_runs or [] if run["name"] == "pre-commit"), None)
     if precommit_run and precommit_run["status"] == "completed":
         conclusion = precommit_run["conclusion"]
         if conclusion == "success":
@@ -165,16 +175,17 @@ while True:
             raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
         print("pre-commit check did not fail (conclusion: " + str(conclusion) + "); allowing CI to proceed.")
         raise SystemExit(0)
+    elapsed = int(time.monotonic() - start)
     if elapsed >= max_wait:
         # Do not block CI if the check never completes; the pre-commit check on
         # the PR still surfaces a genuine failure independently.
         subprocess.run(["buildkite-agent", "annotate", ":warning: Timed out waiting for the pre-commit check to complete; allowing CI to proceed. See the pre-commit check on the PR for its status.", "--style", "warning"], check=False)
         print("Timed out after " + str(max_wait) + "s waiting for pre-commit check on commit " + commit + "; allowing CI to proceed.")
         raise SystemExit(0)
-    status = precommit_run["status"] if precommit_run else "not found"
+    status = precommit_run["status"] if precommit_run else ("unknown" if check_runs is None else "not found")
     print("pre-commit check is not yet complete (status: " + status + "). Waiting " + str(wait_interval) + "s... (" + str(elapsed) + "/" + str(max_wait) + "s)")
-    time.sleep(wait_interval)
-    elapsed += wait_interval
+    # Never sleep past max_wait, so the gate ends within one request of it.
+    time.sleep(min(wait_interval, max_wait - elapsed))
 """
 
 

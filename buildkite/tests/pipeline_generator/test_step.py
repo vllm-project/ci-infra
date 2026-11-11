@@ -1,8 +1,14 @@
+import http.client
+import io
+import json
 import os
 import re
 import shlex
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -1290,6 +1296,112 @@ def test_the_precommit_gate_retries_infra_failures():
             {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
         ],
     }
+
+
+class _BodyCutOff:
+    """A response whose connection closes before the whole body arrives."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, *args):
+        raise http.client.IncompleteRead(b'{"check_ru')
+
+
+def _run_precommit_gate(monkeypatch, *answers):
+    """Run the gate's generated `python3 -c` program in-process, with GitHub
+    answering each poll from `answers` in turn: an exception to raise (a
+    TimeoutError also costs the 30 s request timeout), a response to return,
+    or the check runs to return. Returns (exit code, seconds slept,
+    annotations, seconds on the clock when the gate ended)."""
+    (gate,) = buildkite_step.create_precommit_group_step("vllm-project/vllm", "abc123").steps
+    (command,) = gate.commands
+    program = shlex.split(command)[2]
+    answers = list(answers)
+    slept, annotations, clock = [], [], [0.0]
+
+    def urlopen(request, timeout):
+        assert timeout == 30
+        answer = answers.pop(0) if answers else OSError("no more answers")
+        if isinstance(answer, TimeoutError):
+            clock[0] += timeout
+        if isinstance(answer, Exception):
+            raise answer
+        if isinstance(answer, _BodyCutOff):
+            return answer
+        return io.BytesIO(json.dumps({"check_runs": answer}).encode())
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(time, "sleep", sleep)
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(subprocess, "run", lambda args, check: annotations.append(args[2]))
+    with pytest.raises(SystemExit) as exited:
+        exec(program, {})
+    return exited.value.code, sum(slept), annotations, clock[0]
+
+
+def _github_error(status):
+    return urllib.error.HTTPError("https://api.github.com/x", status, "error", {}, None)
+
+
+PRECOMMIT_PASSED = [{"name": "pre-commit", "status": "completed", "conclusion": "success"}]
+PRECOMMIT_FAILED = [{"name": "pre-commit", "status": "completed", "conclusion": "failure"}]
+
+
+def test_the_precommit_gate_polls_through_a_github_outage(monkeypatch, capsys):
+    # GitHub 500s and a dropped connection are no answer: the gate keeps
+    # polling instead of failing and blocking every test after it.
+    code, slept, _, _ = _run_precommit_gate(
+        monkeypatch,
+        _github_error(500),
+        urllib.error.URLError("reset"),
+        TimeoutError(),
+        _BodyCutOff(),
+        PRECOMMIT_PASSED,
+    )
+    assert code == 0 and slept == 4 * buildkite_step.PRECOMMIT_WAIT_INTERVAL
+    log = capsys.readouterr().out
+    assert log.count("polling again") == 4 and log.count("(status: unknown)") == 4
+
+
+def test_the_precommit_gate_still_fails_on_a_precommit_failure_after_an_outage(monkeypatch):
+    code, _, annotations, _ = _run_precommit_gate(monkeypatch, _github_error(503), PRECOMMIT_FAILED)
+    assert code and "pre-commit check failed" in code and "failed" in annotations[0]
+
+
+def test_the_precommit_gate_lets_ci_proceed_when_github_stays_down(monkeypatch):
+    # An outage longer than the wait limit ends like any other timeout:
+    # CI goes ahead, and the PR's own pre-commit check still reports.
+    code, slept, annotations, _ = _run_precommit_gate(monkeypatch, *[_github_error(502)] * 100)
+    assert code == 0 and slept == buildkite_step.PRECOMMIT_MAX_WAIT
+    assert "Timed out" in annotations[0]
+
+
+def test_requests_that_time_out_count_against_the_precommit_wait_limit(monkeypatch):
+    # Every request hangs for its full 30 s: the gate still ends within one
+    # request of the limit, not after the limit's worth of sleeps on top.
+    code, _, annotations, ended = _run_precommit_gate(monkeypatch, *[TimeoutError()] * 100)
+    assert code == 0 and "Timed out" in annotations[0]
+    assert buildkite_step.PRECOMMIT_MAX_WAIT <= ended <= buildkite_step.PRECOMMIT_MAX_WAIT + 30
+
+
+def test_the_precommit_gate_never_sleeps_past_its_wait_limit(monkeypatch):
+    # One 30 s timeout puts every later poll 30 s off the minute, so the last
+    # wait is cut to 30 s and the final poll lands on the limit, not past it.
+    code, _, _, ended = _run_precommit_gate(monkeypatch, TimeoutError(), *[_github_error(502)] * 100)
+    assert code == 0 and ended == buildkite_step.PRECOMMIT_MAX_WAIT
+
+
+def test_the_precommit_gate_fails_on_a_github_4xx(monkeypatch):
+    with pytest.raises(urllib.error.HTTPError):
+        _run_precommit_gate(monkeypatch, _github_error(404))
 
 
 def test_a_step_that_retries_a_hook_code_keeps_its_own_rule_for_it():
