@@ -1,4 +1,5 @@
-"""Runtime sharding for steps enrolled with `automatic_shard: true`.
+"""Runtime sharding for steps enrolled with `automatic_shard: true`, or by
+the pipeline config's `automatic_shard_default`.
 
 The pipeline generator plans an enrolled step's shards while it generates the
 pipeline, from the vLLM checkout it runs in:
@@ -86,7 +87,9 @@ COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
 COVERAGE_DIR = ".runtime-shard-coverage"
 COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.json"
 # pytest-shard would select a subset a second time on top of the plan.
-_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
+# -n: pytest-xdist workers don't get the plan, so each shard would run it all.
+_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id", "-n", "--numprocesses")
+_ATTACHED_XDIST = re.compile(r"-n(\d+|auto|logical)")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # pytest options that take their value as the next argument, so that value is
@@ -200,12 +203,24 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
     for command in tests:
         if _program(command) != "pytest" or any(s in command for s in _SHELL_SYNTAX):
             return None
-        if any(
-            a.split("=")[0] in _UNSHARDABLE_ARGS
-            for a in shlex.split(command, comments=True)
-        ):
+        if unshardable(command):
             return None
     return commands[:first], tests
+
+
+def unshardable(arguments: str) -> bool:
+    """Whether a pytest command, or a PYTEST_ADDOPTS value, can't run under a
+    shard plan: it sets its own shards or pytest-xdist, it replaces the
+    PYTEST_ADDOPTS that loads the shard plugin, or it doesn't parse."""
+    try:
+        words = shlex.split(arguments, comments=True)
+    except ValueError:
+        return True
+    return any(
+        a.split("=")[0] in _UNSHARDABLE_ARGS + ("PYTEST_ADDOPTS",)
+        or _ATTACHED_XDIST.fullmatch(a)
+        for a in words
+    )
 
 
 def _picks_tests(command: str) -> bool:

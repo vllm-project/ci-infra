@@ -1115,6 +1115,64 @@ def ensure_infra_failure_retry(
 # "off" is the rollback switch: enrolled steps run as their normal single job.
 RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
 
+# Under automatic_shard_default: step key -> why the planner gave it no shards
+# in this build, for the one annotation that lists them (one_job_annotation).
+ONE_JOB_REASONS: Dict[str, str] = {}
+
+
+def _shard_by_default() -> bool:
+    return bool(get_global_config().get("automatic_shard_default"))
+
+
+def _automatic_shard_on(step: Step, amd: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the step wants shards. For an AMD mirror, `step` is the
+    mirror's effective step and `amd` its block.
+
+    Under automatic_shard_default a step shards unless it says false, and a
+    mirror follows its step unless it says otherwise. Elsewhere, on a branch
+    that hasn't opted in, a step says true and so does its mirror.
+    """
+    if not _shard_by_default():
+        return bool(step.automatic_shard) and (amd is None or bool(amd.get("automatic_shard")))
+    on = True if step.automatic_shard is None else step.automatic_shard
+    if amd is None:
+        return on
+    value = amd.get("automatic_shard", on)
+    if not isinstance(value, bool):  # pydantic checks a step's; a mirror is a dict
+        raise ValueError(
+            f"{step.key}: automatic_shard must be true or false, not {value!r}"
+        )
+    return value
+
+
+def one_job_annotation(groups: "List[BuildkiteGroupStep]") -> Optional[str]:
+    """Under automatic_shard_default, one collapsed list of this build's test
+    jobs the planner gave no shards, each with its reason; None when there are
+    none. A job whose tests fit in one job is planned, so it is not listed."""
+    if not _shard_by_default():
+        return None
+    rows = []
+    for group in groups:
+        for step in group.steps:
+            reason = ONE_JOB_REASONS.get(step.key)
+            # A fixed split that opted out still runs several jobs.
+            if (
+                reason
+                and not step.deferred
+                and not step.parallelism
+                and not step.label.startswith(":docker:")
+            ):
+                # A planner error is free text: keep it inside its table cell.
+                reason = reason.replace("|", "\\|").replace("\n", " ")
+                rows.append(f"| {step.label} | {reason} |")
+    if not rows:
+        return None
+    jobs = f"{len(rows)} job{'' if len(rows) == 1 else 's'}"
+    return (
+        f"<details><summary>{jobs} ran as one job without a shard plan</summary>\n\n"
+        "| Job | Why |\n| --- | --- |\n" + "\n".join(rows) + "\n\n</details>"
+    )
+
 
 def _runtime_shard_mode(
     step: Step,
@@ -1122,11 +1180,12 @@ def _runtime_shard_mode(
     list_file_diff: List[str],
     amd: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """How to run a step with `automatic_shard: true`: "on" (as shards),
-    "shadow" (one job, plus an annotation of the plan), or None (as usual).
-    For an AMD mirror, `step` is the mirror's effective step and `amd` its
-    block, whose own `automatic_shard` must be set too."""
-    if not step.automatic_shard or (amd and not amd.get("automatic_shard")):
+    """How to run a step that wants shards: "on" (as shards), "shadow" (one
+    job, plus an annotation of the plan), or None (as usual). For an AMD
+    mirror, `step` is the mirror's effective step and `amd` its block."""
+    by_default = _shard_by_default()
+    on = _automatic_shard_on(step, amd)
+    if not by_default and not on:
         return None
     if amd:
         should_run = _amd_mirror_should_run(
@@ -1136,23 +1195,43 @@ def _runtime_shard_mode(
         should_run = _step_should_run(step, list_file_diff)
     if not should_run:
         return None
+    if by_default and step.parallelism:
+        # A fixed split, the step's own or the one its mirror inherits, runs
+        # as it does without the default.
+        return None
+    if not on:
+        ONE_JOB_REASONS[step_key] = "opted out (`automatic_shard: false`)"
+        return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
         if mode != "off":
             print(
                 f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
             )
+        ONE_JOB_REASONS[step_key] = f"{RUNTIME_SHARD_ENV_VAR}={mode}"
         return None
-    if (
-        runtime_shard.split_commands(step.commands or []) is None
-        or step.no_plugin
-        or (is_amd_device(step.device) and step.dind)
-        or (step.num_nodes and step.num_nodes >= 2)
-    ):
-        print(
-            f"automatic_shard ignored on {step_key}: only single-node, non-dind "
-            "steps whose test commands are all plain pytest can be sharded"
-        )
+    # What pytest reads its extra options from: the step's, then its mirror's.
+    env = dict(step.env or {})
+    env.update((amd or {}).get("env") or {})
+    reason = None
+    if step.num_nodes and step.num_nodes >= 2:
+        reason = "multi-node"
+    elif step.no_plugin:
+        reason = "no_plugin"
+    elif is_amd_device(step.device) and step.dind:
+        reason = "dind"
+    elif runtime_shard.split_commands(step.commands or []) is None:
+        reason = "commands aren't all plain pytest"
+    elif runtime_shard.unshardable(str(env.get("PYTEST_ADDOPTS", ""))):
+        reason = "`PYTEST_ADDOPTS` sets its own shards or pytest-xdist"
+    if reason:
+        if by_default:
+            ONE_JOB_REASONS[step_key] = reason
+        else:
+            print(
+                f"automatic_shard ignored on {step_key}: only single-node, non-dind "
+                "steps whose test commands are all plain pytest can be sharded"
+            )
         return None
     return mode
 
@@ -1180,6 +1259,10 @@ def _shard_at_generation(
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
+        return None
+    if result is None and _shard_by_default():
+        # One row in the one-job list, not an annotation per step.
+        ONE_JOB_REASONS[step_key] = text
         return None
     if (
         result is None

@@ -38,6 +38,7 @@ class GlobalConfig(TypedDict):
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
     platform: Optional[Platform] = None
+    automatic_shard_default: bool = False
 
 
 config = None
@@ -100,6 +101,9 @@ def init_global_config(pipeline_config_path: str):
         platform=_parse_platform(
             os.getenv(PLATFORM_ENV_VAR), os.getenv("TORCH_NIGHTLY") == "1"
         ),
+        # In the checkout's config, not a default here: release branches run
+        # this generator on their own older steps, which never opted in.
+        automatic_shard_default=bool(pipeline_config.get("automatic_shard_default")),
     )
     if "ready-run-all-tests" in pr_labels:
         config["run_all"] = True

@@ -21,6 +21,7 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     shard_coverage_step,
+    one_job_annotation,
     kernrec_collect_group,
     kernrec_amd_enabled,
     kernrec_enabled,
@@ -29,6 +30,7 @@ from buildkite_step import (
 )
 from constants import AgentQueue, Platform
 from recorder_switches import fnrec_enabled
+import runtime_shard
 import selector_gate
 from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
@@ -169,6 +171,9 @@ class PipelineGenerator:
         coverage = shard_coverage_step(buildkite_group_steps)
         if coverage:
             collect.append(coverage)
+        one_job = one_job_annotation(buildkite_group_steps)
+        if one_job:
+            runtime_shard.annotate("one-job", one_job, "warning")
         if collect:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
