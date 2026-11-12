@@ -316,24 +316,12 @@ intel_gpu_k8s_plugin_template = {
             "resourceClaims": [
                 {"name": "gpu", "resourceClaimTemplateName": ""},
             ],
-            "initContainers": [
-                {
-                    "name": "copy-vllm-src",
-                    "image": "",
-                    "command": ["cp", "-a", "/workspace/vllm", "/mnt/workspace/"],
-                    "volumeMounts": [
-                        {"name": "workspace", "mountPath": "/mnt/workspace"},
-                    ],
-                },
-            ],
             "containers": [
                 {
                     "image": "",
-                    "workingDir": "/workspace/vllm",
                     "env": [
                         {"name": "VLLM_USAGE_SOURCE", "value": "ci-test"},
                         {"name": "VLLM_TEST_DEVICE", "value": "xpu"},
-                        {"name": "PYTHONPATH", "value": ".."},
                         {"name": "VLLM_DISABLE_COMPILE_CACHE", "value": "1"},
                         {"name": "HF_HOME", "value": "/data/huggingface"},
                         {
@@ -368,7 +356,7 @@ intel_gpu_k8s_plugin_template = {
                 {
                     "name": "hf-cache",
                     "hostPath": {
-                        "path": "/var/lib/hf-cache",
+                        "path": "/data/huggingface",
                         "type": "DirectoryOrCreate",
                     },
                 },
@@ -383,11 +371,9 @@ def get_k8s_plugin(step: Step, image: str):
         num_gpus = step.num_devices or 1
         plugin = copy.deepcopy(intel_gpu_k8s_plugin_template)
         pod_spec = plugin["kubernetes"]["podSpec"]
-        pod_spec["resourceClaims"][0]["resourceClaimTemplateName"] = (
-            step.resource_claim_template or f"b70-{num_gpus}"
-        )
-        for container in pod_spec["containers"] + pod_spec["initContainers"]:
-            container["image"] = f"{image}-xpu"
+        pod_spec["resourceClaims"][0]["resourceClaimTemplateName"] = f"b70-{num_gpus}"
+        for container in pod_spec["containers"]:
+            container["image"] = image
         resources = pod_spec["containers"][0]["resources"]
         resources["requests"] = {
             "cpu": str(INTEL_CPU_REQUEST_PER_GPU * num_gpus),
