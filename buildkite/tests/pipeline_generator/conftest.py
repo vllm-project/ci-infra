@@ -46,7 +46,7 @@ def fake_global_config(monkeypatch):
     monkeypatch.setattr(
         buildkite_step,
         "get_image",
-        lambda cpu=False, arm64=False: "test-image",
+        lambda cpu=False, arm64=False, xpu=False: "test-image",
     )
     monkeypatch.setattr(
         buildkite_step,
