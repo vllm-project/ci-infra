@@ -27,7 +27,9 @@ the MIG profile created on the GPUs, `spawn` in `buildkite-agent.cfg`, and
 `SLICES_PER_GPU` in `environment`.
 
 A whole-GPU host (no MIG) sets `spawn=1` and `SLICES_PER_GPU=0`; the hook then
-skips the slice mapping and the job gets every GPU.
+skips the slice mapping and the image pre-pull (one agent has nothing to
+serialize, and other pipelines on its queue, such as perf-eval, have no CI
+image), and the job gets every GPU.
 
 ## Files
 

@@ -127,9 +127,12 @@ KEEP_MARKER=1 run login-waiter-reuses 0 '' '' LOGIN_WAITER=1
 
 # A whole-GPU host (SLICES_PER_GPU=0) has no MIG slice to pin: it never lists
 # GPUs, whatever its agent is called, and the job gets every GPU through CDI.
+# It skips the pre-pull too: one agent has no stampede, and other pipelines on
+# its queue have no CI image.
 sed 's/^SLICES_PER_GPU=7$/SLICES_PER_GPU=0/' "$tmp/environment" >"$tmp/whole-gpu" && mv "$tmp/whole-gpu" "$tmp/environment"
 run whole-gpu 0 '' '' FAIL_SMI=99
 [[ $(calls smi) -eq 0 ]] || { echo "FAIL whole-gpu: nvidia-smi called $(calls smi) times"; exit 1; }
+[[ $(calls pull) -eq 0 ]] || { echo "FAIL whole-gpu: pre-pulled $(calls pull) times"; exit 1; }
 device=$(env PATH="$tmp/bin:$PATH" DOCKER_CONFIG="$tmp/docker" BUILDKITE_AGENT_NAME=no-number BUILDKITE_JOB_ID=job-1 \
     BUILDKITE_PLUGIN_DOCKER_IMAGE="test/image:$$" \
     bash -c 'source "$1" >/dev/null; echo "$BUILDKITE_PLUGIN_DOCKER_DEVICES_0"' _ "$tmp/environment" 2>/dev/null)

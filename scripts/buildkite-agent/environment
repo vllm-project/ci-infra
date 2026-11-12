@@ -11,7 +11,7 @@
 #   3. Maps this agent's spawn number to a specific MIG slice UUID and pins the
 #      job to it via BUILDKITE_PLUGIN_DOCKER_GPUS.
 #   4. Serializes the first docker pull of the job image across the many agents
-#      on the host (flock), so 56 agents don't all pull at once.
+#      on the host (flock), so 56 agents don't all pull at once. MIG hosts only.
 #
 # This template assumes the H200 MIG layout from scripts/setup_mig_h200.sh,
 # with agents spawned with names ending in -<N> (N = 1..num_slices).
@@ -176,7 +176,9 @@ else
   IMAGE=""
 fi
 
-if [[ -n "$IMAGE" ]]; then
+# A whole-GPU host has one agent, so there is no stampede to serialize, and
+# other pipelines on its queue (perf-eval) have no CI image to pre-pull.
+if [[ -n "$IMAGE" ]] && (( SLICES_PER_GPU > 0 )); then
   LOCK_DIR="/tmp/docker-pull-locks"
   mkdir -p "$LOCK_DIR"
   LOCK_FILE="${LOCK_DIR}/$(echo "$IMAGE" | tr '/:' '__').lock"
