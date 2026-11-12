@@ -65,12 +65,18 @@ class PipelineGenerator:
 
     def generate(self):
         global_config = get_global_config()
+        included = global_config.get("include_step_keys")
+        if included and global_config["only_step_keys"] is not None:
+            raise ValueError(
+                "VLLM_CI_INCLUDE_STEP_KEYS cannot be combined with VLLM_CI_ONLY_STEP_KEYS."
+            )
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
         if (
             global_config["docs_only_disable"] == "0"
             and not global_config["run_all"]
             and global_config["only_step_keys"] is None
+            and not included
         ):
             if is_docs_only_change(global_config["list_file_diff"]):
                 print("List file diff: ", global_config["list_file_diff"])
@@ -100,6 +106,12 @@ class PipelineGenerator:
         steps = []
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
+        try:
+            _, included = select_steps_and_dependencies(steps, included, platform)
+        except ValueError as error:
+            _annotate_best_effort(str(error), style="error")
+            raise
+        global_config["include_step_keys"] = included
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )
@@ -140,6 +152,10 @@ class PipelineGenerator:
                 )
             else:
                 record["scheduled_keys"] = record["legacy_keys"]
+            if included:
+                record["scheduled_keys"] = sorted(
+                    set(record["scheduled_keys"]) | included
+                )
             selector_gate.write_and_upload(
                 record, os.path.dirname(self.output_file_path)
             )

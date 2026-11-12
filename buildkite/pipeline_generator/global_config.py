@@ -10,6 +10,7 @@ from utils_lib.git_utils import get_merge_base_commit, get_list_file_diff, get_p
 
 
 ONLY_STEP_KEYS_ENV_VAR = "VLLM_CI_ONLY_STEP_KEYS"
+INCLUDE_STEP_KEYS_ENV_VAR = "VLLM_CI_INCLUDE_STEP_KEYS"
 PLATFORM_ENV_VAR = "VLLM_CI_PLATFORM"
 STEP_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
 
@@ -37,6 +38,7 @@ class GlobalConfig(TypedDict):
     merge_base_commit: Optional[str] = None
     fail_fast: bool = False
     only_step_keys: Optional[FrozenSet[str]] = None
+    include_step_keys: Optional[FrozenSet[str]] = None
     platform: Optional[Platform] = None
 
 
@@ -97,6 +99,9 @@ def init_global_config(pipeline_config_path: str):
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
         only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        include_step_keys=_parse_only_step_keys(
+            os.getenv(INCLUDE_STEP_KEYS_ENV_VAR), INCLUDE_STEP_KEYS_ENV_VAR
+        ),
         platform=_parse_platform(
             os.getenv(PLATFORM_ENV_VAR), os.getenv("TORCH_NIGHTLY") == "1"
         ),
@@ -116,24 +121,24 @@ def get_global_config():
     return config
 
 
-def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
+def _parse_only_step_keys(
+    value: Optional[str], env_var: str = ONLY_STEP_KEYS_ENV_VAR
+) -> Optional[FrozenSet[str]]:
     if value is None:
         return None
     try:
         parsed = json.loads(value)
     except json.JSONDecodeError as error:
-        raise ValueError(
-            f"{ONLY_STEP_KEYS_ENV_VAR} must be a JSON array of step keys."
-        ) from error
+        raise ValueError(f"{env_var} must be a JSON array of step keys.") from error
     if not isinstance(parsed, list) or not parsed:
-        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} must be a non-empty JSON array.")
+        raise ValueError(f"{env_var} must be a non-empty JSON array.")
     if any(
         not isinstance(key, str) or not STEP_KEY_PATTERN.fullmatch(key)
         for key in parsed
     ):
-        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains an invalid step key.")
+        raise ValueError(f"{env_var} contains an invalid step key.")
     if len(set(parsed)) != len(parsed):
-        raise ValueError(f"{ONLY_STEP_KEYS_ENV_VAR} contains duplicate step keys.")
+        raise ValueError(f"{env_var} contains duplicate step keys.")
     return frozenset(parsed)
 
 

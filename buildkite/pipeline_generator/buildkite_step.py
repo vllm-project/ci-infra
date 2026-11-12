@@ -721,7 +721,9 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
 
 def _kernrec_backend(step: "BuildkiteCommandStep") -> str:
     """The backend the kernel recorder prelude exports on this rendered step."""
-    text = " ".join(list(step.commands or []) + [str(v) for v in (step.env or {}).values()])
+    text = " ".join(
+        list(step.commands or []) + [str(v) for v in (step.env or {}).values()]
+    )
     return "rocm" if "KERNREC_BACKEND=rocm" in text else "cuda"
 
 
@@ -814,7 +816,11 @@ def _collect_step(
             # since #685, and the step passed.
             for backend in ("cuda", "rocm"):
                 env[f"KERNREC_EXPECTED_JOBS_{backend.upper()}"] = str(
-                    sum(s.parallelism or 1 for s in armed if _kernrec_backend(s) == backend)
+                    sum(
+                        s.parallelism or 1
+                        for s in armed
+                        if _kernrec_backend(s) == backend
+                    )
                 )
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
@@ -1111,11 +1117,7 @@ def _shard_at_generation(
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
-    if (
-        result is None
-        or result["overBudget"]
-        or runtime_shard.setup_too_long(result)
-    ):
+    if result is None or result["overBudget"] or runtime_shard.setup_too_long(result):
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
         return None
@@ -1490,6 +1492,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
+    if step.key in (global_config.get("include_step_keys") or ()):
+        return True
     # The test selector's choice (selector_gate.py), prerequisites included.
     # Unlike only_step_keys it removes nothing: the rest are deferred, so
     # "Run more jobs" still offers them.
