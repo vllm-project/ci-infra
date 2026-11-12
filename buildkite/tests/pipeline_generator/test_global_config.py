@@ -1,4 +1,5 @@
 import os
+from contextlib import ExitStack
 from unittest.mock import mock_open, patch
 
 import pytest
@@ -241,3 +242,80 @@ def test_amd_run_all_patterns_use_the_shared_excludes():
     assert not match(["csrc/rocm/a.cu"], patterns, excludes)
     assert not match(["vllm/a.py"], patterns, excludes)
     assert not match(["csrc/a.cu"], None, excludes), "no patterns, no match"
+
+
+CUDA_ONLY_CONFIG = """\
+name: test
+job_dirs: [/tmp]
+registries: reg
+repositories: {main: repo}
+run_all_patterns: ["docker/Dockerfile", "CMakeLists.txt", "cmake/"]
+run_all_exclude_patterns: ["docker/Dockerfile."]
+"""
+CUDA_ONLY_KEY = """\
+cuda_only_run_all_patterns:
+  - "docker/Dockerfile$"
+  - "cmake/external_projects/vllm_flash_attn.cmake"
+"""
+
+
+def _init_with(pipeline_config, list_file_diff, labels=(), env=None):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    with ExitStack() as stack:
+        for patcher in (
+            patch.object(global_config, "get_merge_base_commit", return_value="sha"),
+            patch.object(
+                global_config, "get_list_file_diff", return_value=list_file_diff
+            ),
+            patch.object(global_config, "get_pr_labels", return_value=list(labels)),
+            patch("builtins.open", mock_open(read_data=pipeline_config)),
+            patch("os.path.exists", return_value=True),
+            patch.dict(os.environ, {"BUILDKITE_BRANCH": "test-branch", **(env or {})}),
+        ):
+            stack.enter_context(patcher)
+        init_global_config("dummy_path")
+    return global_config.config
+
+
+@pytest.mark.parametrize(
+    "diff, run_all, cuda_only_run_all",
+    [
+        (["docker/Dockerfile"], True, True),
+        (["cmake/external_projects/vllm_flash_attn.cmake"], True, True),
+        (["CMakeLists.txt"], True, False),
+        (["cmake/utils.cmake"], True, False),
+        (["docker/Dockerfile", "CMakeLists.txt"], True, False),
+        (["docker/Dockerfile.rocm"], False, False),
+        (["vllm/a.py"], False, False),
+    ],
+)
+def test_cuda_only_run_all_is_set_only_by_cuda_only_files(
+    diff, run_all, cuda_only_run_all
+):
+    config = _init_with(CUDA_ONLY_CONFIG + CUDA_ONLY_KEY, diff)
+    assert (config["run_all"], config["cuda_only_run_all"]) == (
+        run_all,
+        cuda_only_run_all,
+    )
+
+
+@pytest.mark.parametrize(
+    "config, diff, labels, env",
+    [
+        (CUDA_ONLY_CONFIG, ["docker/Dockerfile"], (), {}),
+        (CUDA_ONLY_CONFIG + CUDA_ONLY_KEY, [], (), {"RUN_ALL": "1"}),
+        (
+            CUDA_ONLY_CONFIG + CUDA_ONLY_KEY,
+            ["docker/Dockerfile"],
+            ["ready-run-all-tests"],
+            {},
+        ),
+    ],
+    ids=["no key", "RUN_ALL=1", "ready-run-all-tests label"],
+)
+def test_cuda_only_run_all_is_off_without_the_key_or_when_run_all_is_forced(
+    config, diff, labels, env
+):
+    config = _init_with(config, diff, labels=labels, env=env)
+    assert (config["run_all"], config["cuda_only_run_all"]) == (True, False)

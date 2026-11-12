@@ -29,6 +29,8 @@ class GlobalConfig(TypedDict):
     torch_nightly: Optional[str] = "0"
     aiter_nightly: Optional[str] = "0"
     run_all: bool = False
+    # run_all comes only from cuda_only_run_all_patterns files: AMD steps skip it.
+    cuda_only_run_all: bool = False
     # AMD steps only: AMD is not selected by ci-selector, so a pattern can stop
     # running everything on CUDA (the selector narrows it there) and still run
     # every AMD step. Same exclude list as run_all_patterns.
@@ -69,6 +71,12 @@ def init_global_config(pipeline_config_path: str):
     list_file_diff = get_list_file_diff(branch, merge_base_commit)
     pr_labels = get_pr_labels(pull_request, pipeline_config["github_repo_name"])
 
+    run_all_patterns = pipeline_config.get("run_all_patterns", None)
+    run_all_exclude_patterns = pipeline_config.get("run_all_exclude_patterns", None)
+    run_all = _should_run_all(
+        pr_labels, list_file_diff, run_all_patterns, run_all_exclude_patterns
+    )
+
     config = GlobalConfig(
         name=pipeline_config["name"],
         github_repo_name=pipeline_config["github_repo_name"],
@@ -79,22 +87,25 @@ def init_global_config(pipeline_config_path: str):
         commit=os.getenv("BUILDKITE_COMMIT"),
         pull_request=pull_request,
         docs_only_disable=os.getenv("DOCS_ONLY_DISABLE", "0"),
-        run_all_patterns=pipeline_config.get("run_all_patterns", None),
-        run_all_exclude_patterns=pipeline_config.get("run_all_exclude_patterns", None),
+        run_all_patterns=run_all_patterns,
+        run_all_exclude_patterns=run_all_exclude_patterns,
         nightly=os.getenv("NIGHTLY", "0"),
         torch_nightly=os.getenv("TORCH_NIGHTLY", "0"),
         aiter_nightly=os.getenv("AITER_NIGHTLY", "0"),
-        run_all=_should_run_all(
+        run_all=run_all,
+        cuda_only_run_all=run_all
+        and not _should_run_all(
             pr_labels,
             list_file_diff,
-            pipeline_config.get("run_all_patterns", None),
-            pipeline_config.get("run_all_exclude_patterns", None),
+            run_all_patterns,
+            (run_all_exclude_patterns or [])
+            + (pipeline_config.get("cuda_only_run_all_patterns") or []),
         ),
         amd_run_all_patterns=pipeline_config.get("amd_run_all_patterns", None),
         amd_run_all=_matches_run_all_patterns(
             list_file_diff,
             pipeline_config.get("amd_run_all_patterns", None),
-            pipeline_config.get("run_all_exclude_patterns", None),
+            run_all_exclude_patterns,
         ),
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,

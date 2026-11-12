@@ -56,6 +56,11 @@ run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
 
+# Optional. run_all_patterns matches that only the CUDA build reads: they run
+# every CUDA step but not every AMD step.
+cuda_only_run_all_patterns:
+  - "docker/Dockerfile$"
+
 # Container registry to store images
 registries: public.ecr.aws/q9t5s3a7
 
