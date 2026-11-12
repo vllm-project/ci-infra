@@ -71,6 +71,20 @@ class PipelineGenerator:
                 "VLLM_CI_INCLUDE_STEP_KEYS cannot be combined with VLLM_CI_ONLY_STEP_KEYS."
             )
 
+        platform = global_config["platform"]
+        steps = []
+        for job_dir in global_config["job_dirs"]:
+            steps.extend(read_steps_from_job_dir(job_dir))
+        try:
+            _, included = select_steps_and_dependencies(steps, included, platform)
+        except ValueError as error:
+            _annotate_best_effort(
+                f"{error} Ignoring requested extra jobs; running normal CI.",
+                style="warning",
+            )
+            included = None
+        global_config["include_step_keys"] = included
+
         # Skip if changes are doc-only (unless RUN_ALL is set)
         if (
             global_config["docs_only_disable"] == "0"
@@ -94,7 +108,6 @@ class PipelineGenerator:
                     f.write("true")
                 return
 
-        platform = global_config["platform"]
         if platform:
             reason = (
                 "torch nightly validates CUDA only"
@@ -103,15 +116,6 @@ class PipelineGenerator:
             )
             _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
-        steps = []
-        for job_dir in global_config["job_dirs"]:
-            steps.extend(read_steps_from_job_dir(job_dir))
-        try:
-            _, included = select_steps_and_dependencies(steps, included, platform)
-        except ValueError as error:
-            _annotate_best_effort(str(error), style="error")
-            raise
-        global_config["include_step_keys"] = included
         early_keys = upload_image_steps_early(
             steps, os.path.dirname(self.output_file_path)
         )

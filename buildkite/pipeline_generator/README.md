@@ -109,7 +109,8 @@ The generator relies on several environment variables, typically provided by Bui
 * `VLLM_CI_INCLUDE_STEP_KEYS`: A non-empty JSON array of stable step keys to
     add to the normal selection, including optional jobs and their dependencies.
     For example, `["language-models-test-mteb"]`. Applies to this build only;
-    unknown or off-platform keys fail generation. Cannot be combined with
+    unknown or off-platform keys warn and discard the include request, keeping
+    the normal selection. Cannot be combined with
     `VLLM_CI_ONLY_STEP_KEYS`. `NOAUTO=1` still defers all jobs.
 * `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,

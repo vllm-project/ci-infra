@@ -98,8 +98,8 @@ def init_global_config(pipeline_config_path: str):
         merge_base_commit=merge_base_commit,
         list_file_diff=list_file_diff,
         fail_fast=_should_fail_fast(pr_labels),
-        only_step_keys=_parse_only_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
-        include_step_keys=_parse_only_step_keys(
+        only_step_keys=_parse_step_keys(os.getenv(ONLY_STEP_KEYS_ENV_VAR)),
+        include_step_keys=_parse_step_keys(
             os.getenv(INCLUDE_STEP_KEYS_ENV_VAR), INCLUDE_STEP_KEYS_ENV_VAR
         ),
         platform=_parse_platform(
@@ -121,7 +121,7 @@ def get_global_config():
     return config
 
 
-def _parse_only_step_keys(
+def _parse_step_keys(
     value: Optional[str], env_var: str = ONLY_STEP_KEYS_ENV_VAR
 ) -> Optional[FrozenSet[str]]:
     if value is None:
