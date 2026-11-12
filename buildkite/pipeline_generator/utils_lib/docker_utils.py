@@ -5,7 +5,7 @@ from typing import Tuple
 from global_config import get_global_config
 
 
-def get_image(cpu: bool = False, arm64: bool = False) -> str:
+def get_image(cpu: bool = False, arm64: bool = False, xpu: bool = False) -> str:
     global_config = get_global_config()
     commit = "$BUILDKITE_COMMIT"
     branch = global_config["branch"]
@@ -19,12 +19,14 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     # In the full torch-nightly run, every step must use the nightly image. Use
     # the dedicated -torch-nightly tag so it never collides with the shared
     # postmerge tag (no overwrite / race with the regular postmerge image).
-    if global_config.get("torch_nightly") == "1":
+    if global_config.get("torch_nightly") == "1" and not xpu:
         image = f"{image}-torch-nightly"
     if cpu:
         image = f"{image}-cpu"
     if arm64:
         image = f"{image}-arm64"
+    if xpu:
+        image = f"{image}-xpu"
     return image
 
 
