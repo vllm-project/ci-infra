@@ -2474,6 +2474,31 @@ def test_a_failed_inventory_prints_a_bounded_tail_of_its_output(
     assert shown[-1] == "noise line 199"
 
 
+def test_stderr_inventory_tail_is_kept_and_exact_limit_is_not_truncated(
+    tmp_path, monkeypatch, capsys
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    noise = "".join(
+        f"line {i}\n" for i in range(plugin.INVENTORY_TAIL_LINES - 1)
+    )
+
+    def failed(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, "", "first error\n" + noise)
+
+    monkeypatch.setattr(plugin.subprocess, "run", failed)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    err = capsys.readouterr().err
+    assert "first error" in err and "line 0" in err
+    assert "error output" in err and "...\n" not in err
+
+
 def test_the_coverage_record_names_its_build(tmp_path, monkeypatch):
     """Each record carries its build's id, so the coverage check can filter
     out records a stale job wrote; off Buildkite there is no build and the id

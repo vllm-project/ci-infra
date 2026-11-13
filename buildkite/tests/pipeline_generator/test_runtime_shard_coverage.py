@@ -271,6 +271,16 @@ def test_main_only_relaxes_unverified_evidence_for_a_soft_failed_step(monkeypatc
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "step", "get"]:
+            assert command == [
+                "buildkite-agent",
+                "step",
+                "get",
+                "outcome",
+                "--step",
+                "k",
+            ]
+            assert check is False
+            assert kwargs == {"capture_output": True, "text": True, "timeout": 60}
             outcome = next(outcomes)
             if isinstance(outcome, Exception):
                 raise outcome
@@ -287,6 +297,26 @@ def test_main_only_relaxes_unverified_evidence_for_a_soft_failed_step(monkeypatc
     assert coverage.main() == 1
     assert coverage.main() == 1
     assert styles == ["warning", "error", "error", "error"]
+
+
+def test_soft_failed_outcomes_are_independent_for_each_step(monkeypatch):
+    steps = {
+        "hard": [{"position": 0, "label": "Hard", "fallback": 0, "owners": [0]}],
+        "soft-a": [dict(SOFT_STEPS["k"][0])],
+        "soft-b": [dict(SOFT_STEPS["k"][0])],
+    }
+    results = coverage.compare(steps, [])
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command[-1])
+        outcome = "soft_failed\n" if command[-1] == "soft-a" else "passed\n"
+        return subprocess.CompletedProcess(command, 0, stdout=outcome)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    coverage._relax_soft_failed_unverified(results)
+    assert calls == ["soft-a", "soft-b"]
+    assert [result.get("soft_failed") for result in results] == [None, True, False]
 
 
 def test_soft_fail_defaults_to_false_so_todays_behavior_is_kept():
