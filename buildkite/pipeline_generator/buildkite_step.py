@@ -858,8 +858,9 @@ def shard_coverage_step(
     """The job that checks no test dropped out of a build's shards, or None
     when nothing in this build is sharded.
 
-    Soft-fails: a miss shows red and in a red annotation, and blocks nothing.
-    Waits like a recorder's collect step, on what the shards wait on and then
+    Fails when a test is missed or coverage cannot be proven, so a successful
+    shard cannot hide a missing record. Waits like a recorder's collect step,
+    on what the shards wait on and then
     on their state (COLLECT_WAIT): a timed-out or cancelled shard would end a
     step depending on it waiting_failed, and a shard that didn't finish is one
     of the things this job reports.
@@ -915,7 +916,7 @@ def shard_coverage_step(
         ],
         depends_on=depends_on,
         allow_dependency_failure=True,
-        soft_fail=True,
+        soft_fail=False,
         timeout_in_minutes=COLLECT_AFTER_MINUTES + 30,
     )
 

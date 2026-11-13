@@ -2143,7 +2143,7 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert job.depends_on == []
     assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "model-executor amd-model-executor"
     assert int(job.env["CI_SELECTOR_COLLECT_DEADLINE"]) > time.time() + 170 * 60
-    assert job.allow_dependency_failure is True and job.soft_fail is True
+    assert job.allow_dependency_failure is True and job.soft_fail is False
     steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
     assert sorted(steps) == ["amd-model-executor", "model-executor"]
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
