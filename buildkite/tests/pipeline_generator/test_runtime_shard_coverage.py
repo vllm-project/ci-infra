@@ -107,6 +107,16 @@ def test_a_finished_shards_miss_is_not_hidden_by_an_unfinished_shard():
     assert text.startswith("### :x: 1 tests ran in no finished shard\n")
 
 
+def test_an_unowned_test_with_an_unfinished_shard_is_a_definite_miss():
+    records = [
+        _record(0, [], expected=["a"], planned=[]),
+        _record(1, [], finished=False, planned=[]),
+    ]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["missed"] == ["a"] and result["not_run"] == []
+    assert coverage.report([result])[0] == "error"
+
+
 def test_an_unknown_unfinished_plan_does_not_invent_a_definite_miss():
     unknown = _record(1, [], finished=False)
     unknown["planned"] = None
