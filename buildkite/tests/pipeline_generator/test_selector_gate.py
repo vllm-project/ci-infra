@@ -6,6 +6,7 @@ import os
 import subprocess
 
 import pytest
+import yaml
 
 import selector_gate
 from constants import Platform
@@ -437,3 +438,97 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+# `/ci run --include <key> ...` (VLLM_CI_INCLUDE_STEP_KEYS)
+
+
+def _steps_with_optional():
+    return _steps() + [
+        Step(
+            label="Opt",
+            key="test-opt",
+            depends_on=["image-build"],
+            commands=["opt"],
+            source_file_dependencies=["vllm/"],
+            optional=True,
+        ),
+    ]
+
+
+def _generate(config, monkeypatch, tmp_path, steps=_steps_with_optional):
+    monkeypatch.setattr(pg, "read_steps_from_job_dir", lambda _: steps())
+    monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
+    monkeypatch.setenv("PATH", "")  # no buildkite-agent: uploads are skipped
+    annotations = []
+    monkeypatch.setattr(
+        pg, "_annotate_best_effort", lambda msg, style=None: annotations.append(msg)
+    )
+    config["job_dirs"] = ["jobs"]
+    generator = object.__new__(pg.PipelineGenerator)
+    generator.output_file_path = str(tmp_path / "pipeline.yaml")
+    generator.generate()
+    return annotations
+
+
+def _ready_keys(tmp_path):
+    """Keys that run without anyone unblocking them."""
+    pipeline = yaml.safe_load(open(tmp_path / "pipeline.yaml"))
+    return {
+        step.get("key")
+        for group in pipeline["steps"]
+        for step in group.get("steps", [group])
+        if step.get("key")
+    }
+
+
+def test_requested_jobs_run_beside_the_selectors(pr_config, monkeypatch, tmp_path):
+    """An included optional step runs with the selector's choice, and is
+    recorded apart from today's rules, the baseline the selector is scored
+    against."""
+    monkeypatch.setattr(selector_gate, "run_ci_select", _emission(["test-b"]))
+    pr_config["include_step_keys"] = frozenset({"test-opt"})
+    _generate(pr_config, monkeypatch, tmp_path)
+
+    record = json.load(open(tmp_path / selector_gate.DECISION_FILE))
+    assert record["applied"] is True
+    assert record["legacy_keys"] == ["image-build", "test-a"]
+    assert record["included_keys"] == ["image-build", "test-opt"]
+    assert record["scheduled_keys"] == ["image-build", "test-b", "test-opt"]
+    assert {"test-b", "test-opt"} <= _ready_keys(tmp_path)
+    assert "test-a" not in _ready_keys(tmp_path)
+
+
+def test_requested_jobs_stay_out_of_todays_rules(pr_config):
+    pr_config["include_step_keys"] = frozenset({"test-opt", "test-b"})
+    assert pg._legacy_keys(_steps_with_optional(), ["vllm/foo.py"]) == [
+        "image-build",
+        "test-a",
+    ]
+    assert pr_config["include_step_keys"] == frozenset({"test-opt", "test-b"})
+
+
+def test_an_unknown_requested_key_keeps_normal_ci(pr_config, monkeypatch, tmp_path):
+    monkeypatch.setattr(selector_gate, "run_ci_select", _emission(["test-b"]))
+    pr_config["include_step_keys"] = frozenset({"no-such-step"})
+    annotations = _generate(pr_config, monkeypatch, tmp_path)
+
+    assert any("Ignoring requested extra jobs" in a for a in annotations)
+    record = json.load(open(tmp_path / selector_gate.DECISION_FILE))
+    assert record["included_keys"] is None
+    assert record["scheduled_keys"] == ["image-build", "test-b"]
+    assert "test-opt" not in _ready_keys(tmp_path)
+
+
+def test_requested_jobs_run_on_a_docs_only_change(pr_config, monkeypatch, tmp_path):
+    pr_config.update(docs_only_disable="0", list_file_diff=["docs/index.md"])
+    pr_config["include_step_keys"] = frozenset({"test-opt"})
+    _generate(pr_config, monkeypatch, tmp_path)
+    assert "test-opt" in _ready_keys(tmp_path)
+
+
+def test_include_cannot_be_combined_with_only(pr_config, monkeypatch, tmp_path):
+    pr_config["include_step_keys"] = frozenset({"test-opt"})
+    pr_config["only_step_keys"] = frozenset({"test-a"})
+    with pytest.raises(ValueError, match="cannot be combined"):
+        _generate(pr_config, monkeypatch, tmp_path)

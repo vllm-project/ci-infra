@@ -127,6 +127,10 @@ def base_record(global_config: Dict[str, Any], gate_mode: str) -> Dict[str, Any]
         "selector_keys": None,
         "explain": None,
         "legacy_keys": None,
+        # Steps added by `/ci run --include` (VLLM_CI_INCLUDE_STEP_KEYS) with
+        # their prerequisites: scheduled, but in neither the selector's keys
+        # nor today's rules.
+        "included_keys": None,
         "scheduled_keys": None,
         "records": None,
         "seconds": None,

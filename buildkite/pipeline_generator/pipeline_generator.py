@@ -157,6 +157,7 @@ class PipelineGenerator:
             else:
                 record["scheduled_keys"] = record["legacy_keys"]
             if included:
+                record["included_keys"] = sorted(included)
                 record["scheduled_keys"] = sorted(
                     set(record["scheduled_keys"]) | included
                 )
@@ -359,17 +360,28 @@ def write_deferred_steps(
 
 def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
     """The keys today's rules run, AMD mirrors included, decided the way
-    convert_group_step_to_buildkite_step decides them."""
-    keys = []
-    for step in steps:
-        if _step_should_run(step, diff):
-            keys.append(step.key)
-        amd = (step.mirror or {}).get("amd")
-        if amd and _amd_mirror_should_run(
-            _step_should_run(_get_amd_mirror_effective_step(step, amd), diff), diff
-        ):
-            keys.append(f"amd-{step.key}")
-    return keys
+    convert_group_step_to_buildkite_step decides them.
+
+    Steps a `/ci run --include` request added are the requester's choice,
+    not today's rules: they stay out of this baseline, which the selector is
+    compared with, and are recorded as `included_keys` instead."""
+    global_config = get_global_config()
+    included = global_config.get("include_step_keys")
+    global_config["include_step_keys"] = None
+    try:
+        keys = []
+        for step in steps:
+            if _step_should_run(step, diff):
+                keys.append(step.key)
+            amd = (step.mirror or {}).get("amd")
+            if amd and _amd_mirror_should_run(
+                _step_should_run(_get_amd_mirror_effective_step(step, amd), diff),
+                diff,
+            ):
+                keys.append(f"amd-{step.key}")
+        return keys
+    finally:
+        global_config["include_step_keys"] = included
 
 
 # How selector_gate records the selector declining because it cannot narrow

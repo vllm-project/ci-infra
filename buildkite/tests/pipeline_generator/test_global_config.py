@@ -220,3 +220,10 @@ def test_amd_run_all_patterns_use_the_shared_excludes():
     assert not match(["csrc/rocm/a.cu"], patterns, excludes)
     assert not match(["vllm/a.py"], patterns, excludes)
     assert not match(["csrc/a.cu"], None, excludes), "no patterns, no match"
+
+
+def test_parse_step_keys_names_the_include_variable():
+    from buildkite.pipeline_generator.global_config import INCLUDE_STEP_KEYS_ENV_VAR
+
+    with pytest.raises(ValueError, match=INCLUDE_STEP_KEYS_ENV_VAR):
+        _parse_step_keys("[]", INCLUDE_STEP_KEYS_ENV_VAR)
