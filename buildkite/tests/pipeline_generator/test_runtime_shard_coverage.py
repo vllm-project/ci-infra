@@ -251,11 +251,11 @@ def test_a_soft_fail_step_unfinished_shard_is_warning_only():
     assert "**k**, Command (1/1): shard 2 (soft-fail step)" in text
 
 
-def test_a_soft_fail_step_unverified_is_warning_only():
+def test_a_soft_fail_step_unverified_fails_closed():
     [result] = coverage.compare(SOFT_STEPS, [_record(0, ["a"], expected=["a", "b"])])
     assert result["unverified"] == "shard 2 recorded nothing"
     style, text = coverage.report([result])
-    assert style == "warning"
+    assert style == "error"
     assert "shard 2 recorded nothing (soft-fail step)" in text
 
 
