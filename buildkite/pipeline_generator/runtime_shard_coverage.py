@@ -4,9 +4,11 @@
 Each shard of a runtime-sharded step records what it ran
 (runtime_shard_plugin.py), and the first shard that runs a command also records
 every test the command should run. This job compares them and posts one
-annotation: red for a miss, a test that no shard ran although every shard
-finished. Tests of a shard that didn't finish are listed apart, because the
-build is already red for that. Yellow for a test that two finished shards both
+annotation, failing closed: red whenever coverage is not proven. That is a
+miss (a test no shard ran although every shard finished), a shard that
+didn't finish (its tests may not have run, so they are listed apart from
+misses), and a command it cannot check (a shard left no record, or none
+recorded the test list). Yellow only for a test that two finished shards both
 ran: it costs a shard's time but loses no test. Standard library only: it runs
 on a small CPU agent, fetched as a single file.
 """
@@ -53,10 +55,12 @@ def compare(
 
     Returns:
         One entry per command: the step, label, `tests` (how many it should
-        run), `missed` (test IDs), `unfinished` (shards that didn't finish),
-        `not_run` (test IDs lost to them), `duplicated` (each test ID that
-        more than one finished shard ran, to those shards) and `unverified`
-        (why it can't be checked, or None).
+        run), `missed` (test IDs), `unfinished` (shards that recorded they
+        didn't finish), `not_run` (test IDs lost to them), `duplicated` (each
+        test ID that more than one finished shard ran, to those shards) and
+        `unverified` (why it can't be checked, or None). A shard that left no
+        record makes its command unverified: which tests it owned can't be
+        known, so they are neither missed nor not_run.
     """
     latest = latest_records(records)
     results = []
@@ -65,10 +69,13 @@ def compare(
             position = command["position"]
             ran = set()
             unfinished = []
+            missing = []  # shards that left no record at all
             shards_of = {}  # test ID -> the finished shards that ran it
             for shard in command["owners"]:
                 record = latest.get((step_key, position, shard))
-                if record is None or not record["finished"]:
+                if record is None:
+                    missing.append(shard)
+                elif not record["finished"]:
                     unfinished.append(shard)
                 else:
                     ran.update(record["ran"])
@@ -92,10 +99,17 @@ def compare(
                 },
                 "unverified": None,
             }
+            unverified = []
             if expected is None:
-                result["unverified"] = (
+                unverified.append(
                     f"shard {command['fallback'] + 1} recorded no test list"
                 )
+            if missing:
+                shards = ", ".join(str(shard + 1) for shard in missing)
+                noun = "shard" if len(missing) == 1 else "shards"
+                unverified.append(f"{noun} {shards} recorded nothing")
+            if unverified:
+                result["unverified"] = "; ".join(unverified)
             else:
                 not_ran = sorted(set(expected) - ran)
                 result["not_run" if unfinished else "missed"] = not_ran
@@ -121,7 +135,10 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     """The annotation for a build's results.
 
     Returns:
-        (its style: error, warning or success; its markdown).
+        (its style: error, warning or success; its markdown). Error unless
+        every test is proven run: a miss, an unfinished shard and a command
+        that can't be checked all fail the job; only duplicates stay a
+        warning.
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
@@ -156,7 +173,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
                 f"**{result['step']}**, {result['label']}: {result['unverified']}"
             )
     if lines:
-        style = "error" if missed else "warning"
+        style = "error" if missed or unfinished or unverified else "warning"
         return style, "\n".join(lines)
     steps = len({result["step"] for result in results})
     return "success", f"Every test ran: {tests} tests across {steps} sharded steps."
