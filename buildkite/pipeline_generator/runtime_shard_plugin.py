@@ -14,8 +14,10 @@ command the plan covers, it:
     fails, and puts the failures and summary in their own open group,
   - turns "no tests ran" into success when every test went to other shards,
   - records what it ran for the build's coverage check
-    (runtime_shard_coverage.py): the command's first shard collects every file
-    and also records the whole list of tests the command should run.
+    (runtime_shard_coverage.py): the command's first shard also records the
+    whole list of tests the command should run, collected by a separate pytest
+    it starts on the same worker, so its own run never imports the other
+    shards' files.
 
 Each job collects the same tests, so the parts of a split file add up to the
 file. Elsewhere (a setup command's pytest, a pytest a test starts) it does
@@ -32,6 +34,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import zlib
 
@@ -41,6 +44,9 @@ COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
 # The file the job's guard checks after a planned command: written once the
 # plugin has applied the plan, so a pytest that ran without it fails the job.
 APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
+# Set by the recording shard on the pytest it starts to list the command's
+# tests: the path that run writes the list to.
+INVENTORY_ENV = "RUNTIME_SHARD_INVENTORY"
 
 
 def _pytest_python():
@@ -105,6 +111,12 @@ import pytest  # noqa: E402  (the install above runs without pytest)
 
 def pytest_configure(config):
     # Popped, so a pytest that a test itself starts runs as written.
+    inventory = os.environ.pop(INVENTORY_ENV, None)
+    if inventory:
+        # A recording shard's collecting subprocess: no shard plan here, and
+        # it writes no coverage record of its own.
+        config.pluginmanager.register(_Inventory(inventory), "runtime_shard_inventory")
+        return
     packed = os.environ.pop(PLAN_ENV, None)
     if not packed:
         return
@@ -146,6 +158,19 @@ def _without_plugins(args):
     return kept
 
 
+class _Inventory:
+    """Writes the collected tests' IDs to the path in INVENTORY_ENV: the whole
+    list a recording shard's subprocess collected for its command."""
+
+    def __init__(self, path):
+        self.path = path
+
+    @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
+    def pytest_collection_modifyitems(self, session, config, items):
+        with open(self.path, "w") as f:
+            json.dump([item.nodeid for item in items], f)
+
+
 class ShardPlugin:
     def __init__(self, command, shard, shards, step_key=None):
         self.files = command["files"]  # file from rootdir -> its shard
@@ -168,24 +193,20 @@ class ShardPlugin:
         self.position = command.get("position")
         self.coverage_dir = os.environ.get(COVERAGE_DIR_ENV)
         # The first shard that runs the command says what the command should
-        # run: collected here, on the job's hardware, at the job's commit.
-        self.collects_all = bool(self.coverage_dir) and shard == self.fallback
+        # run: listed by a separate pytest it starts (_expected_inventory), on
+        # the job's hardware, at the job's commit.
+        self.records_expected = bool(self.coverage_dir) and shard == self.fallback
         self.expected = None
         self.planned = []  # the tests kept here
         self.ran = set()  # the tests pytest reported on here
 
-    def pytest_configure(self, config):
-        if self.collects_all:
-            # A file another shard runs must not stop this shard's own tests.
-            # The run still fails, as that file's own shard does.
-            config.option.continue_on_collection_errors = True
-
     def pytest_ignore_collect(self, collection_path, config):
-        """A file planned whole for another shard isn't even imported, unless
-        this shard is the one that records the whole command."""
+        """A file planned whole for another shard isn't even imported. The
+        recording shard's inventory comes from its own pytest, so no shard's
+        run imports another shard's file."""
         relative = os.path.relpath(str(collection_path), str(config.rootpath))
         shard = self.files.get(relative.replace(os.sep, "/"))
-        if shard is not None and shard != self.shard and not self.collects_all:
+        if shard is not None and shard != self.shard:
             self.dropped += 1
             self.elsewhere_files.setdefault(shard, set()).add(relative)
             return True
@@ -214,8 +235,8 @@ class ShardPlugin:
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
-        if self.collects_all:
-            self.expected = [item.nodeid for item in items]
+        if self.records_expected and not config.getoption("collectonly"):
+            self.expected = self._expected_inventory(config)
         for item in items:
             file = item.nodeid.split("::")[0]
             self.totals[file] = self.totals.get(file, 0) + 1
@@ -231,6 +252,60 @@ class ShardPlugin:
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
         self.planned = [item.nodeid for item in items]
+
+    def _expected_inventory(self, config):
+        """The command's full test list, collected by a second pytest on this
+        worker: the same python, arguments and environment as this run, but
+        with no shard plan, so a file of another shard cannot change what this
+        shard's own tests see, and the subprocess runs no shard plan and writes
+        no record of its own.
+
+        A failure — the collection could not run, or any file had an error —
+        leaves the list unknown (None): the coverage check then reports the
+        command unverified rather than compare against a partial list.
+        """
+        fd, path = tempfile.mkstemp(prefix="runtime-shard-inventory-", suffix=".json")
+        os.close(fd)
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in (PLAN_ENV, COMMAND_ENV, COVERAGE_DIR_ENV, APPLIED_ENV)
+        }
+        env[INVENTORY_ENV] = path
+        run = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                *config.invocation_params.args,
+                "--collect-only",
+                "--continue-on-collection-errors",
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            with open(path) as f:
+                inventory = json.load(f)
+        except (OSError, ValueError):
+            inventory = None
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        collected = run.returncode in (
+            pytest.ExitCode.OK,
+            pytest.ExitCode.NO_TESTS_COLLECTED,
+        )
+        if collected and isinstance(inventory, list):
+            return inventory
+        print(
+            "runtime-shard: couldn't collect the command's full test list "
+            f"(exit {run.returncode}); the coverage check will report the "
+            "command unverified",
+            file=sys.stderr,
+        )
+        return None
 
     def pytest_collection_finish(self, session):
         if session.config.getoption("collectonly"):
