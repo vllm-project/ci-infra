@@ -53,7 +53,7 @@ def test_a_test_with_any_outcome_counts_because_ran_is_any_report():
     assert coverage.compare(STEPS, records)[0]["missed"] == []
 
 
-def test_an_unfinished_shard_is_apart_from_misses():
+def test_an_unfinished_shard_is_apart_from_misses_but_fails_closed():
     records = [
         _record(0, ["a"], expected=["a", "b"]),
         _record(1, [], finished=False),
@@ -62,16 +62,37 @@ def test_an_unfinished_shard_is_apart_from_misses():
     assert result["missed"] == [] and result["unfinished"] == [1]
     assert result["not_run"] == ["b"]
     style, text = coverage.report([result])
-    assert style == "warning"
+    # Not a miss (the shard may have run them), but unproven: it fails.
+    assert style == "error"
     assert text == (
         "### Shards that didn't finish, so these tests may not have run\n"
         "**k**, Command (1/1): shard 2\n- `b`"
     )
 
 
-def test_a_shard_with_no_record_counts_as_unfinished():
+def test_a_shard_with_no_record_fails_closed():
+    # The shard left nothing: its tests may have run, so not a miss, but
+    # nothing proves coverage, so the check fails rather than passes blind.
     [result] = coverage.compare(STEPS, [_record(0, ["a"], expected=["a", "b"])])
-    assert result["unfinished"] == [1] and result["not_run"] == ["b"]
+    assert result["unfinished"] == [] and result["missed"] == []
+    assert result["not_run"] == []  # which tests it owned can't be known
+    assert result["unverified"] == "shard 2 recorded nothing"
+    style, text = coverage.report([result])
+    assert style == "error"
+    assert text == (
+        "### Couldn't check\n**k**, Command (1/1): shard 2 recorded nothing"
+    )
+
+
+def test_a_missing_record_next_to_an_unfinished_shard_hides_its_not_run():
+    # Shard 1 recorded it didn't finish; shard 2 left nothing. Shard 2's gap
+    # makes attribution unknowable, so the command reports unverified, not
+    # not_run tests that shard 2 may in fact have run.
+    records = [_record(0, ["a"], expected=["a", "b"], finished=False)]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unfinished"] == [0] and result["not_run"] == []
+    assert result["unverified"] == "shard 2 recorded nothing"
+    assert coverage.report([result])[0] == "error"
 
 
 def test_a_dead_first_shard_still_gives_its_list():
@@ -80,11 +101,11 @@ def test_a_dead_first_shard_still_gives_its_list():
     assert result["unfinished"] == [0] and result["not_run"] == ["a"]
 
 
-def test_no_expected_list_cannot_be_checked():
+def test_no_expected_list_cannot_be_checked_and_fails_closed():
     [result] = coverage.compare(STEPS, [_record(0, ["a"]), _record(1, ["b"])])
     assert result["unverified"] == "shard 1 recorded no test list"
     style, text = coverage.report([result])
-    assert style == "warning"
+    assert style == "error"
     assert text == (
         "### Couldn't check\n**k**, Command (1/1): shard 1 recorded no test list"
     )
@@ -92,7 +113,10 @@ def test_no_expected_list_cannot_be_checked():
 
 def test_nothing_uploaded_is_unverified_not_clean():
     [result] = coverage.compare(STEPS, [])
-    assert result["unverified"] and coverage.report([result])[0] == "warning"
+    assert result["unverified"] == (
+        "shard 1 recorded no test list; shards 1, 2 recorded nothing"
+    )
+    assert coverage.report([result])[0] == "error"
 
 
 def test_a_test_two_shards_ran_is_a_duplicate_naming_both():
@@ -188,7 +212,11 @@ def test_a_list_of_exactly_the_cap_has_no_more_line():
 
 
 def test_several_unfinished_shards_are_named_together():
-    [result] = coverage.compare(STEPS, [_record(0, [], expected=["a"], finished=False)])
+    records = [
+        _record(0, [], expected=["a"], finished=False),
+        _record(1, [], finished=False),
+    ]
+    [result] = coverage.compare(STEPS, records)
     assert "shard 1, 2\n" in coverage.report([result])[1]
 
 
@@ -273,11 +301,24 @@ def coverage_records(folder):
     return [json.loads(path.read_text()) for path in sorted(folder.iterdir())]
 
 
-def test_main_exits_clean_without_a_miss(monkeypatch):
+def test_main_fails_closed_with_no_records(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
-    monkeypatch.setattr(subprocess, "run", lambda command, check, **kwargs: None)
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append(command)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(coverage, "_read_records", lambda _: [])
-    assert coverage.main() == 0  # unverified warns but stays green
+    assert coverage.main() == 1  # no evidence: unverified fails, not passes
+    assert calls[1][:5] == [
+        "buildkite-agent",
+        "annotate",
+        "--context",
+        "runtime-shard-coverage",
+        "--style",
+    ]
+    assert calls[1][5] == "error"
 
 
 def test_read_records_finds_what_download_wrote(tmp_path):
