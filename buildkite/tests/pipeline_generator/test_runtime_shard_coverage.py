@@ -321,6 +321,27 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     assert calls[1][5] == "error"
 
 
+def test_main_annotates_under_the_context_override(monkeypatch):
+    """A second coverage job (a "Run more jobs" round) keeps its report apart
+    from the pipeline's: same script, its own annotation context."""
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setenv("RUNTIME_SHARD_COVERAGE_CONTEXT", "runtime-shard-coverage-2")
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append(command)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(coverage, "_read_records", lambda _: [])
+    assert coverage.main() == 1
+    assert calls[1][:4] == [
+        "buildkite-agent",
+        "annotate",
+        "--context",
+        "runtime-shard-coverage-2",
+    ]
+
+
 def test_read_records_finds_what_download_wrote(tmp_path):
     folder = tmp_path / ".runtime-shard-coverage" / "job"
     folder.mkdir(parents=True)

@@ -44,6 +44,9 @@ NO_LABEL = "\u200b"
 COVERAGE_KEY = "runtime-shard-coverage"
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
 COVERAGE_STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
+# The job annotates under its own key, so its report never replaces the
+# pipeline's coverage report or another round's.
+COVERAGE_CONTEXT_ENV = "RUNTIME_SHARD_COVERAGE_CONTEXT"
 
 
 def _round_key(prefix: str, round_number: int) -> str:
@@ -239,10 +242,14 @@ def coverage_step(
         f"{branch}/buildkite/pipeline_generator/runtime_shard_coverage.py"
     )
     script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
+    key = f"{COVERAGE_KEY}-{round_number}"
     return {
         "label": ":mag: Check every test ran",
-        "key": f"{COVERAGE_KEY}-{round_number}",
-        "env": {COVERAGE_STEPS_ENV: json.dumps(steps)},
+        "key": key,
+        "env": {
+            COVERAGE_STEPS_ENV: json.dumps(steps),
+            COVERAGE_CONTEXT_ENV: key,
+        },
         "agents": {"queue": queue},
         "commands": [
             f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
