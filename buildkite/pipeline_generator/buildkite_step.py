@@ -864,8 +864,7 @@ def shard_coverage_step(
     on what the shards wait on and then on their state: a timed-out or
     cancelled shard would end a step depending on it waiting_failed, and a
     shard that didn't finish is one of the things this job reports. The state
-    wait (unblock_jobs.COVERAGE_WAIT, shared with the "Run more jobs" coverage
-    jobs) has no deadline of its own: a build generated long before its
+    wait (unblock_jobs.COVERAGE_WAIT) has no deadline of its own: a build generated long before its
     shards run must still wait for them, so only this job's own timeout
     bounds it.
     """
@@ -921,7 +920,7 @@ def shard_coverage_step(
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=False,
-        timeout_in_minutes=COLLECT_AFTER_MINUTES + 30,
+        timeout_in_minutes=unblock_jobs.COVERAGE_TIMEOUT_MINUTES,
     )
 
 
