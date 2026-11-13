@@ -120,10 +120,13 @@ def _otel_setup_command() -> str:
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
         # Native AMD pods run from /vllm-workspace, which has no .git; their
-        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The CPU test image has no
+        # .git either and the docker plugin passes no checkout path in, so the
+        # last resort is the image's own copy. The fallback keeps the
         # assignment successful under `sh -e`; a missing helper stays fail-open.
         "$$(git rev-parse --show-toplevel 2>/dev/null || "
-        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-'
+        f'{runtime_shard.CONTAINER_WORKSPACE}}}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
