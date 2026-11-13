@@ -47,6 +47,29 @@ COVERAGE_KEY = "runtime-shard-coverage"
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
 COVERAGE_STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
 
+# Polls the sharded steps' states until every one has finished, retries
+# included; only the coverage job's own timeout bounds the wait, so a build
+# generated long before its shards run cannot outlive a generation-time
+# deadline. The pipeline's own coverage job uses the same string
+# (buildkite_step.py imports it), so the two paths cannot drift. `$$`: a bare
+# `$` would be interpolated at upload time, in the bootstrap's environment.
+COVERAGE_WAIT = (
+    "while :; do "
+    'pending=""; '
+    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
+    "done; "
+    '[ -z "$$pending" ] && { echo "every sharded step has finished"; break; }; '
+    'echo "waiting on $$pending ($${s:-state unknown})"; '
+    "sleep 30; "
+    "done"
+)
+
+# A round's shards start behind its upload, so the wait can be a long one; the
+# pipeline's own coverage job gets the same.
+COVERAGE_TIMEOUT_MINUTES = 210
+
 
 def _round_key(prefix: str, round_number: int) -> str:
     return prefix if round_number == 1 else f"{prefix}-{round_number}"
@@ -201,11 +224,13 @@ def coverage_step(
 
     Same check as the pipeline's own coverage job: the same script over the
     same artifacts the shards upload, fetched from VLLM_CI_BRANCH the same
-    way, and hard-failing. It waits on the picked sharded steps with
-    allow_dependency_failure, so a failed step is still checked; a cancelled
-    or timed-out step ends this job waiting_failed, which turns the build
-    red without a report, and unlike the pipeline's job there is no wait for
-    the steps' retries first.
+    way, hard-failing, and waiting the same way (COVERAGE_WAIT, shared with
+    buildkite_step.py). It waits on the picked steps' prerequisites with
+    allow_dependency_failure, not on the shards themselves: a cancelled or
+    timed-out shard would end this job waiting_failed, and an automatic retry
+    would start behind it. The command polls the shards' states instead,
+    through their retries, bounded only by this job's own timeout; a shard
+    that never finished is one of the things the check reports.
 
     Args:
         entries: The picked entries, each {"group": ..., "step": ...}.
@@ -223,18 +248,27 @@ def coverage_step(
             continue
         plan = json.loads(zlib.decompress(base64.b64decode(packed)))
         key = entry["step"]["key"]
-        depends_on.append(key)
         steps[key] = [
             {
                 "position": planned["position"],
                 "label": planned["label"],
                 "fallback": planned["fallback"],
                 "owners": _owners(planned),
+                # The comparison keeps a soft-failing step's failures a
+                # warning rather than failing the build on them.
+                "soft_fail": bool(entry["step"].get("soft_fail")),
             }
             for planned in plan["commands"]
         ]
     if not steps:
         return None
+    for entry in entries:
+        if entry["step"]["key"] not in steps:
+            continue
+        for dependency in entry["step"].get("depends_on") or []:
+            # A shard is never a prerequisite here, only what it waits on.
+            if dependency not in steps and dependency not in depends_on:
+                depends_on.append(dependency)
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -244,15 +278,20 @@ def coverage_step(
     return {
         "label": ":mag: Check every test ran",
         "key": f"{COVERAGE_KEY}-{round_number}",
-        "env": {COVERAGE_STEPS_ENV: json.dumps(steps)},
+        "env": {
+            COVERAGE_STEPS_ENV: json.dumps(steps),
+            "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
+        },
         "agents": {"queue": queue},
         "commands": [
+            COVERAGE_WAIT,
             f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
-            f" && python3 {script}"
+            f" && python3 {script}",
         ],
         "depends_on": depends_on,
         "allow_dependency_failure": True,
         "soft_fail": False,
+        "timeout_in_minutes": COVERAGE_TIMEOUT_MINUTES,
     }
 
 

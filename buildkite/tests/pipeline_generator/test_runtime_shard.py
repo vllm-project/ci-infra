@@ -16,6 +16,7 @@ import yaml
 import buildkite_step
 import runtime_shard as rs
 import runtime_shard_plugin
+import unblock_jobs
 from constants import AgentQueue
 from step import Step
 
@@ -2607,7 +2608,9 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     # On what they wait for, when that's in the build, and then on their state.
     assert job.depends_on == []
     assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "model-executor amd-model-executor"
-    assert int(job.env["CI_SELECTOR_COLLECT_DEADLINE"]) > time.time() + 170 * 60
+    # No generation-time deadline: the wait is bounded by the job's own
+    # timeout, so a build generated long before its shards run still waits.
+    assert "CI_SELECTOR_COLLECT_DEADLINE" not in job.env
     assert job.allow_dependency_failure is True and job.soft_fail is False
     steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
     assert sorted(steps) == ["amd-model-executor", "model-executor"]
@@ -2618,6 +2621,7 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert me["fallback"] == plan["commands"][0]["fallback"]
     assert me["label"] == plan["commands"][0]["label"]
     assert me["owners"] == rs.owners(plan["commands"][0])
+    assert me["soft_fail"] is False
     # Sharded steps upload their records; the AMD mirror too.
     assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.json"
     assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
@@ -2631,7 +2635,7 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
         "buildkite/pipeline_generator/runtime_shard_coverage.py"
     )
     assert job.commands == [
-        buildkite_step.COLLECT_WAIT,
+        unblock_jobs.COVERAGE_WAIT,
         f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}',
     ]
     # And their records land where each job can reach the checkout.
@@ -2642,6 +2646,20 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
         'RUNTIME_SHARD_COVERAGE_DIR="$${BUILDKITE_BUILD_CHECKOUT_PATH'
         in mirror.env["VLLM_TEST_COMMANDS"]
     )
+
+
+def test_coverage_job_propagates_a_steps_soft_fail(fake_global_config, checkout):
+    """A soft-failing sharded step keeps that in the spec, so the comparison
+    can keep its failures a warning."""
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    step.soft_fail = True
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+
+    job = buildkite_step.shard_coverage_step([group])
+
+    steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
+    assert [c["soft_fail"] for c in steps["model-executor"]] == [True, True]
 
 
 def test_coverage_job_leaves_out_deferred_steps_and_builds_without_shards(
