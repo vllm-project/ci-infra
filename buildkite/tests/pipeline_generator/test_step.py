@@ -1211,3 +1211,23 @@ def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
     monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
     step = Step(label=label, key=key, commands=["true"])
     assert buildkite_step.get_agent_queue(step) == queue
+
+
+def test_an_included_optional_step_runs_without_source_match(fake_global_config):
+    fake_global_config["include_step_keys"] = frozenset({"extra"})
+    extra = Step(label="Extra", key="extra", optional=True, commands=["t"])
+    other = Step(
+        label="Other",
+        key="other",
+        source_file_dependencies=["unrelated.py"],
+        commands=["t"],
+    )
+    assert buildkite_step._step_should_run(extra, ["changed.py"])
+    assert not buildkite_step._step_should_run(other, ["changed.py"])
+
+
+def test_noauto_still_defers_included_steps(fake_global_config, monkeypatch):
+    monkeypatch.setenv("NOAUTO", "1")
+    fake_global_config["include_step_keys"] = frozenset({"extra"})
+    extra = Step(label="Extra", key="extra", commands=["t"])
+    assert not buildkite_step._step_should_run(extra, ["changed.py"])

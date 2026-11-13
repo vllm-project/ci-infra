@@ -160,6 +160,12 @@ The generator relies on several environment variables, typically provided by Bui
 * `VLLM_CI_KERNREC`: Set to "1" to load the kernel-launch recorder (`buildkite/ci_selector/recorders/kernrec`) into every CUDA process of every GPU step and upload its `.kernrec/**` output as job artifacts. Off by default; meant for nightly and post-merge builds that feed the test selector.
 * `VLLM_CI_KERNREC_AMD`: Set to "1" to do the same on AMD steps with the ROCm backend. Independent of `VLLM_CI_KERNREC`: either backend can be recorded alone.
 * `VLLM_CI_FNREC`: Set to "1" to load the Python function recorder (`buildkite/ci_selector/recorders/fnrec`) into every Python process of every step, writing to its own `.fnrec/<job-id>`. Off by default; independent of `VLLM_CI_KERNREC`, same audience.
+* `VLLM_CI_INCLUDE_STEP_KEYS`: A non-empty JSON array of stable step keys to
+    add to the normal selection, including optional jobs and their dependencies.
+    For example, `["language-models-test-mteb"]`. Applies to this build only;
+    unknown or off-platform keys warn and discard the include request, keeping
+    the normal selection. Cannot be combined with
+    `VLLM_CI_ONLY_STEP_KEYS`. `NOAUTO=1` still defers all jobs.
 * `VLLM_CI_ONLY_STEP_KEYS`: A non-empty JSON array of stable step keys. When
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Generated AMD mirror keys such as
