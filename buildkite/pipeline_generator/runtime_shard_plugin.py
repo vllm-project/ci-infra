@@ -275,7 +275,9 @@ class ShardPlugin:
 
         A failure — the collection could not run, or any file had an error —
         leaves the list unknown (None): the coverage check then reports the
-        command unverified rather than compare against a partial list.
+        command unverified rather than compare against a partial list. The
+        inventory repeats collection-time option and plugin side effects,
+        including report writing.
         """
         fd, path = tempfile.mkstemp(prefix="runtime-shard-inventory-", suffix=".json")
         os.close(fd)
@@ -285,9 +287,13 @@ class ShardPlugin:
             if name not in (PLAN_ENV, COMMAND_ENV, COVERAGE_DIR_ENV, APPLIED_ENV)
         }
         env[INVENTORY_ENV] = path
-        # Match the pytest console script: -m pytest would otherwise prepend
-        # the invocation directory to sys.path and can import different code.
-        env["PYTHONSAFEPATH"] = "1"
+        # Match the live invocation: -m pytest prepends the working directory
+        # to sys.path; the console script does not. Suppress it only if the
+        # live invocation did not already have it there.
+        if os.path.realpath(sys.path[0] or ".") != os.path.realpath(
+            config.invocation_params.dir
+        ):
+            env["PYTHONSAFEPATH"] = "1"
         try:
             run = subprocess.run(
                 [

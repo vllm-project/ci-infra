@@ -511,6 +511,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
         "--style",
     ]
     assert calls[1][5] == "error" and "`gone`" in annotated[0]
+    assert "After retrying a failed shard, retry this coverage job too" in annotated[0]
     out = capsys.readouterr().out
     assert "missed: k: gone\n" in out and "### :x:" in out
 

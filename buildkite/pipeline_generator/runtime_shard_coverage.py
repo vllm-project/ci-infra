@@ -16,8 +16,8 @@ soft_failed; a passed step with missing evidence stays red. A definite miss
 stays red, though, since that means the sharding itself is broken. And only
 the current build's records count: a record from another build (or one too
 old to name its build) is stale evidence, ignored when the build's ID is
-known. Standard library only: it runs on a small CPU agent, fetched as a
-single file.
+known. Standard library only: it runs on a small CPU agent, with its source
+packed into the job environment at generation and decoded there.
 """
 
 import glob
@@ -297,6 +297,11 @@ def main() -> int:
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
     style, text = report(results)
+    if style == "error":
+        text += (
+            "\n\nAfter retrying a failed shard, retry this coverage job too "
+            "so it compares the new records."
+        )
     print(text)
     subprocess.run(
         [
