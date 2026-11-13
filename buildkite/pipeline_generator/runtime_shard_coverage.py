@@ -184,7 +184,7 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
     pattern = os.path.join(folder, ARTIFACTS)
     for path in glob.glob(pattern, recursive=True):
         # A shard killed mid-write leaves one bad file; skipping it makes that
-        # shard read as unfinished rather than stopping every step's check.
+        # shard's coverage unverified rather than stopping every step's check.
         try:
             with open(path) as f:
                 records.append(json.load(f))
