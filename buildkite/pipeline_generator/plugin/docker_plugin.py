@@ -127,6 +127,27 @@ amd_zen5_plugin_template = {
 }
 
 
+# Arm's CPU agents: one per instance, no GPUs and no /fsx. The HF cache is the
+# one run-cpu-test-arm.sh mounted for the agent user.
+arm_cpu_plugin_template = {
+    "image": "",
+    "always-pull": True,
+    "propagate-environment": True,
+    "shm-size": "4g",
+    "environment": [
+        "VLLM_USAGE_SOURCE=ci-test",
+        "VLLM_CPU_KVCACHE_SPACE=16",
+        "VLLM_CPU_CI_ENV=1",
+        "HF_TOKEN",
+        "CODECOV_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
+    ],
+    "volumes": [
+        "/var/lib/buildkite-agent/.cache/huggingface:/root/.cache/huggingface",
+    ],
+}
+
+
 def get_docker_plugin(step: Step, image: str):
     plugin = None
     if step.device == DeviceType.H200_18GB:
@@ -139,6 +160,8 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(b200_plugin_template)
     elif step.device == DeviceType.AMD_ZEN5_CPU:
         plugin = copy.deepcopy(amd_zen5_plugin_template)
+    elif step.device == DeviceType.ARM_CPU:
+        plugin = copy.deepcopy(arm_cpu_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image

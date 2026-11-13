@@ -28,6 +28,15 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     return image
 
 
+def get_arm64_cpu_image() -> str:
+    """The tag vLLM's `image_build_cpu_arm64.sh` pushes: `$REPO:<commit>-arm64-cpu`,
+    with no torch-nightly suffix, since that build never uses the nightly."""
+    global_config = get_global_config()
+    repositories = global_config["repositories"]
+    repo = repositories["main" if global_config["branch"] == "main" else "premerge"]
+    return f"{global_config['registries']}/{repo}:$BUILDKITE_COMMIT-arm64-cpu"
+
+
 def get_torch_nightly_image() -> str:
     global_config = get_global_config()
     commit = "$BUILDKITE_COMMIT"
