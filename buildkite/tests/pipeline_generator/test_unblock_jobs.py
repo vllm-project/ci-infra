@@ -296,8 +296,10 @@ def test_option_labels_drop_emoji_codes_and_job_placeholders():
     assert label(":docker: Build arm64 image") == "Build arm64 image"
 
 
-def _sharded_entry(key, group="g"):
-    entry = _entry(key, group)
+def _sharded_entry(key, group="g", depends_on=None, soft_fail=None):
+    entry = _entry(key, group, depends_on)
+    if soft_fail is not None:
+        entry["step"]["soft_fail"] = soft_fail
     plan = {
         "shards": 2,
         "key": key,
@@ -343,10 +345,15 @@ def test_main_adds_a_coverage_job_behind_a_sharded_pick(tmp_path, monkeypatch):
     assert [s["key"] for s in group["steps"]] == ["plain-b", "sharded-a"]
     assert job["label"] == ":mag: Check every test ran"
     assert job["key"] == "runtime-shard-coverage-1"
-    assert job["depends_on"] == ["sharded-a"]
+    # Not the shard itself: a cancelled one would end this job waiting_failed,
+    # and an automatic retry would run behind it. The command polls instead.
+    assert job["depends_on"] == []
     assert job["allow_dependency_failure"] is True
     assert job["soft_fail"] is False
+    assert job["timeout_in_minutes"] == unblock_jobs.COVERAGE_TIMEOUT_MINUTES
     assert job["agents"] == {"queue": "q"}
+    assert job["env"]["CI_SELECTOR_COLLECT_WAIT_FOR"] == "sharded-a"
+    assert "CI_SELECTOR_COLLECT_DEADLINE" not in job["env"]
     steps = json.loads(job["env"]["RUNTIME_SHARD_COVERAGE_STEPS"])
     assert steps == {
         "sharded-a": [
@@ -355,6 +362,7 @@ def test_main_adds_a_coverage_job_behind_a_sharded_pick(tmp_path, monkeypatch):
                 "label": "Command (1/1)",
                 "fallback": 0,
                 "owners": [0, 1],
+                "soft_fail": False,
             }
         ]
     }
@@ -365,7 +373,8 @@ def test_main_adds_a_coverage_job_behind_a_sharded_pick(tmp_path, monkeypatch):
         "/buildkite/pipeline_generator/runtime_shard_coverage.py"
     )
     assert job["commands"] == [
-        f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}'
+        unblock_jobs.COVERAGE_WAIT,
+        f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}',
     ]
 
 
@@ -393,7 +402,7 @@ def test_each_rounds_coverage_job_has_its_own_key(tmp_path, monkeypatch):
     assert (
         "/vllm-project/ci-infra/main"
         "/buildkite/pipeline_generator/runtime_shard_coverage.py"
-        in second["steps"][1]["commands"][0]
+        in second["steps"][1]["commands"][1]
     )
 
 
@@ -407,3 +416,52 @@ def test_no_coverage_job_without_a_sharded_pick(tmp_path, monkeypatch):
 
     (upload,) = agent.uploads
     assert [[s["key"] for s in g["steps"]] for g in upload["steps"]] == [["a"]]
+
+
+def test_coverage_wait_polls_without_a_deadline():
+    # Bounded only by the coverage job's own timeout: a build generated long
+    # before its shards run must not outlive a generation-time deadline.
+    assert "COLLECT_DEADLINE" not in unblock_jobs.COVERAGE_WAIT
+    assert "CI_SELECTOR_COLLECT_WAIT_FOR" in unblock_jobs.COVERAGE_WAIT
+    assert "sleep 30" in unblock_jobs.COVERAGE_WAIT
+
+
+def test_coverage_job_waits_on_prerequisites_and_polls_the_shards(
+    tmp_path, monkeypatch
+):
+    """Retry-aware like the pipeline's own coverage job: depending on a shard
+    would end this job waiting_failed when the shard is cancelled, and an
+    automatic retry would start behind it; the command polls their states."""
+    entries = [
+        _sharded_entry("sharded-a", depends_on=["image-build", "sharded-b"]),
+        _sharded_entry("sharded-b", depends_on=["image-build"]),
+    ]
+    (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
+        json.dumps({"source_job": "job-1", "queue": "q", "steps": entries})
+    )
+    agent = FakeAgent({"more-jobs": "sharded-a sharded-b"})
+
+    _run_round(tmp_path, monkeypatch, agent, 1)
+
+    (upload,) = agent.uploads
+    job = upload["steps"][1]
+    # image-build once, and no shard: the shards' states are polled instead.
+    assert job["depends_on"] == ["image-build"]
+    assert job["env"]["CI_SELECTOR_COLLECT_WAIT_FOR"] == "sharded-a sharded-b"
+    assert job["commands"][0] == unblock_jobs.COVERAGE_WAIT
+
+
+def test_coverage_job_propagates_a_steps_soft_fail(tmp_path, monkeypatch):
+    """The comparison keeps a soft-failing step's failures a warning."""
+    entries = [_sharded_entry("soft", soft_fail=True)]
+    (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
+        json.dumps({"source_job": "job-1", "queue": "q", "steps": entries})
+    )
+    agent = FakeAgent({"more-jobs-job-soft": "soft"})
+
+    _run_round(tmp_path, monkeypatch, agent, 1)
+
+    (upload,) = agent.uploads
+    job = upload["steps"][1]
+    steps = json.loads(job["env"]["RUNTIME_SHARD_COVERAGE_STEPS"])
+    assert [command["soft_fail"] for command in steps["soft"]] == [True]

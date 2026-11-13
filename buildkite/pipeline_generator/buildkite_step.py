@@ -39,6 +39,7 @@ from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_amd_enabled, kernrec_enabled
 import runtime_shard
+import unblock_jobs
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -860,10 +861,13 @@ def shard_coverage_step(
 
     Fails when a test is missed or coverage cannot be proven, so a successful
     shard cannot hide a missing record. Waits like a recorder's collect step,
-    on what the shards wait on and then
-    on their state (COLLECT_WAIT): a timed-out or cancelled shard would end a
-    step depending on it waiting_failed, and a shard that didn't finish is one
-    of the things this job reports.
+    on what the shards wait on and then on their state: a timed-out or
+    cancelled shard would end a step depending on it waiting_failed, and a
+    shard that didn't finish is one of the things this job reports. The state
+    wait (unblock_jobs.COVERAGE_WAIT, shared with the "Run more jobs" coverage
+    jobs) has no deadline of its own: a build generated long before its
+    shards run must still wait for them, so only this job's own timeout
+    bounds it.
     """
     steps = {}
     sharded = []
@@ -881,6 +885,9 @@ def shard_coverage_step(
                     "label": planned["label"],
                     "fallback": planned["fallback"],
                     "owners": runtime_shard.owners(planned),
+                    # The comparison keeps a soft-failing step's failures a
+                    # warning rather than failing the build on them.
+                    "soft_fail": bool(step.soft_fail),
                 }
                 for planned in plan["commands"]
             ]
@@ -904,13 +911,10 @@ def shard_coverage_step(
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
             "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
-            "CI_SELECTOR_COLLECT_DEADLINE": str(
-                int(time.time()) + COLLECT_AFTER_MINUTES * 60
-            ),
         },
         agents={"queue": queue.value},
         commands=[
-            COLLECT_WAIT,
+            unblock_jobs.COVERAGE_WAIT,
             f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
             f" && python3 {script}",
         ],
