@@ -246,9 +246,8 @@ def main() -> int:
             "buildkite-agent",
             "annotate",
             "--context",
-            # The job's own step key: the pipeline's job annotates under
-            # "runtime-shard-coverage" as before, and a "Run more jobs"
-            # round's job under its own key, next to it instead of over it.
+            # Use the job's own key so a retried or separately uploaded check
+            # cannot overwrite another check's annotation.
             os.getenv("BUILDKITE_STEP_KEY") or "runtime-shard-coverage",
             "--style",
             style,
