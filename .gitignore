@@ -60,3 +60,6 @@ dist/
 
 # Buildkite CLI's per-checkout state, written by `bk` on first use.
 .bk.yaml
+
+# macOS Finder metadata.
+.DS_Store

@@ -19,7 +19,7 @@ import urllib.request
 from pathlib import Path
 
 from ..coverage.source import COVERAGE_DIR, TABLE_NAME
-from ..coverage.table import load
+from ..coverage.table import Table, load
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec"
 URL_ENV = "CI_SELECTOR_FUNCTION_RECORD_URL"
@@ -29,6 +29,47 @@ TIMEOUT = 60
 def _get(url: str) -> bytes:
     with urllib.request.urlopen(url, timeout=TIMEOUT) as r:  # noqa: S310 - https, fixed host
         return r.read()
+
+
+def fetch(
+    url: str, commit: str | None = None, out: Path = COVERAGE_DIR
+) -> tuple[Table, str, str]:
+    """Download the table published for `commit`, or the one `latest.json`
+    names, into `out`, and return `(table, commit, build)`.
+
+    The table is parsed once, here, and checked before it replaces the one on
+    disk, so a bad download leaves the old one in place. A caller that goes on
+    to use the table takes the parsed one rather than reading the file again:
+    it is about 1 GB of JSON. A failed download raises; a table that must be
+    refused raises ValueError.
+    """
+    url = url.rstrip("/")
+    if commit:
+        build = "?"
+    else:
+        latest = json.loads(_get(f"{url}/latest.json"))
+        commit, build = latest["commit"], latest.get("build", "?")
+    out.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out) as tmp:
+        staged = Path(tmp) / TABLE_NAME
+        staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
+        table = load(staged)
+        if not table.available:
+            raise ValueError(table.unavailable)
+        # A mismatch means table and pointer were published out of step.
+        if table.commit and table.commit != commit:
+            raise ValueError(
+                f"asked for {commit[:10]}, table records "
+                f"{table.commit[:10]}; refusing it"
+            )
+        os.replace(staged, out / TABLE_NAME)
+    return table, commit, build
+
+
+def fetch_latest() -> Table:
+    """The latest published table, downloaded into coverage-data/ and parsed
+    once, for `ci-select` run without a table."""
+    return fetch(os.environ.get(URL_ENV, DEFAULT_URL), out=COVERAGE_DIR)[0]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -45,31 +86,8 @@ def main(argv: list[str] | None = None) -> int:
         "--out", type=Path, default=COVERAGE_DIR, help="directory to write into"
     )
     args = ap.parse_args(argv)
-    url = args.url.rstrip("/")
-
     try:
-        if args.commit:
-            commit, build = args.commit, "?"
-        else:
-            latest = json.loads(_get(f"{url}/latest.json"))
-            commit, build = latest["commit"], latest.get("build", "?")
-        args.out.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(dir=args.out) as tmp:
-            staged = Path(tmp) / TABLE_NAME
-            staged.write_bytes(_get(f"{url}/{commit}/{TABLE_NAME}"))
-            table = load(staged)
-            if not table.available:
-                print(f"error: {table.unavailable}", file=sys.stderr)
-                return 1
-            # A mismatch means table and pointer were published out of step.
-            if table.commit and table.commit != commit:
-                print(
-                    f"error: asked for {commit[:10]}, table records "
-                    f"{table.commit[:10]}; refusing it",
-                    file=sys.stderr,
-                )
-                return 1
-            os.replace(staged, args.out / TABLE_NAME)
+        table, commit, build = fetch(args.url, args.commit, args.out)
     except urllib.error.HTTPError as exc:
         what = "nothing published yet" if exc.code in (403, 404) else "download failed"
         print(f"error: {what}: HTTP {exc.code} for {exc.url}", file=sys.stderr)

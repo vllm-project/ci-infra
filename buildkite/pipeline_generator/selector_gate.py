@@ -304,7 +304,9 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
     data = os.path.join(workdir, "data")
     explain_path = os.path.join(workdir, "explain.json")
-    _run(run + ["ci-fetch-function-record", "--out", data], timeout=left())
+    # No function table is passed: ci-select downloads the latest one itself
+    # and parses it once (about 1 GB of JSON), instead of a separate fetch
+    # step that parsed it a first time only to check it.
     _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
     out = subprocess.run(
         run
@@ -317,8 +319,6 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             "--emit-keys",
             "--pipeline",
             pipeline,
-            "--table",
-            os.path.join(data, "table.json.gz"),
             "--kernel-table",
             os.path.join(data, "kernel_table.json.gz"),
             "--kernel-symbol-map",

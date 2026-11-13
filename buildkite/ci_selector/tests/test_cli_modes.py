@@ -98,3 +98,38 @@ def test_the_table_override_reads_the_path_it_is_given(tmp_path):
     # Reached the file rather than raising, and judged it on its contents.
     assert not table.available
     assert "re-merge" in table.unavailable
+
+
+@pytest.fixture
+def empty_coverage_dir(tmp_path, monkeypatch):
+    """No table named and none in coverage-data/: CI's fresh checkout."""
+    import ci_selector.coverage.source as source
+
+    monkeypatch.delenv(source.TABLE_ENV, raising=False)
+    monkeypatch.setattr(source, "COVERAGE_DIR", tmp_path / "coverage-data")
+    return tmp_path / "coverage-data"
+
+
+def test_a_table_already_fetched_is_used_rather_than_replaced(empty_coverage_dir):
+    """`ci-fetch-function-record --commit X`, then `ci-select`: the pinned
+    table on disk is used, and offline runs keep working."""
+    import gzip
+
+    from ci_selector.coverage.source import TABLE_NAME, coverage_table
+
+    # A version `load` refuses, so the reason shows this file was read.
+    empty_coverage_dir.mkdir()
+    (empty_coverage_dir / TABLE_NAME).write_bytes(
+        gzip.compress(b'{"version": 999, "rows": {}}')
+    )
+    assert "re-merge" in coverage_table(None).unavailable
+
+
+def test_with_no_table_at_hand_the_latest_is_used(empty_coverage_dir, monkeypatch):
+    """CI's case: a fresh checkout with no table on disk."""
+    import ci_selector.scripts.fetch_functions as fetch_functions
+    from ci_selector.coverage.source import coverage_table
+
+    sentinel = object()
+    monkeypatch.setattr(fetch_functions, "fetch_latest", lambda: sentinel)
+    assert coverage_table(None) is sentinel

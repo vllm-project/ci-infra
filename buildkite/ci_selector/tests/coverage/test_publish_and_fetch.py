@@ -204,3 +204,23 @@ class TestFetch:
         assert fetch_functions.main(["--url", base, "--out", str(out)]) == 1
         assert "refusing it" in capsys.readouterr().err
         assert not (out / TABLE_NAME).exists()
+
+    def test_fetch_hands_back_the_table_it_parsed(
+        self, table, tmp_path, monkeypatch, tmp_repo
+    ):
+        """`ci-select` run without a table uses the table `fetch` returns, so
+        it must be the one written to disk."""
+        base, commit = "https://b/ci/fnrec", tmp_repo.head()
+        self.serve(
+            monkeypatch,
+            {
+                f"{base}/latest.json": json.dumps(
+                    {"commit": commit, "build": "42"}
+                ).encode(),
+                f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
+            },
+        )
+        out = tmp_path / "out"
+        got, got_commit, build = fetch_functions.fetch(base, out=out)
+        assert (got_commit, build) == (commit, "42")
+        assert got.commit == commit and len(got) == len(load(out / TABLE_NAME))

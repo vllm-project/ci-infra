@@ -166,10 +166,10 @@ def main(argv: list[str] | None = None) -> int:
     sel = select(state, paths, base=base, head=head)
 
     if args._mode != "codemap":
-        from .coverage.source import fetch_kernel_records, fetch_table
+        from .coverage.source import coverage_table, fetch_kernel_records
         from .decide import decide
 
-        table = fetch_table(args.table)
+        table = coverage_table(args.table)
         if table.dead_interpreter:
             print(f"coverage: {table.dead_interpreter}", file=sys.stderr)
         kernels = fetch_kernel_records(args.kernel_table, args.kernel_symbol_map)

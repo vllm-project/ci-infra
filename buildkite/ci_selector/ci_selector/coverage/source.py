@@ -27,9 +27,12 @@ KERNEL_TABLE_ENV = "CI_SELECTOR_KERNEL_TABLE"
 KERNEL_MAP_ENV = "CI_SELECTOR_KERNEL_SYMBOL_MAP"
 
 
+TABLE_ENV = "CI_SELECTOR_TABLE"
+
+
 def table_path() -> Path:
     """Where a local table is expected. `CI_SELECTOR_TABLE` overrides it."""
-    override = os.environ.get("CI_SELECTOR_TABLE")
+    override = os.environ.get(TABLE_ENV)
     return Path(override) if override else COVERAGE_DIR / TABLE_NAME
 
 
@@ -49,6 +52,23 @@ def fetch_table(path: Path | None = None) -> Table:
             ),
         )
     return load(target)
+
+
+def coverage_table(path: Path | None = None) -> Table:
+    """The table to select with.
+
+    One named by `path` or CI_SELECTOR_TABLE, or one already in
+    coverage-data/, is read as it is. Otherwise the latest published one is
+    downloaded there and parsed once, here: CI's case, since its checkout is
+    fresh, with no separate fetch step parsing the ~1 GB file to check it.
+    A failed or refused download raises.
+    """
+    if path is not None or os.environ.get(TABLE_ENV) or table_path().is_file():
+        return fetch_table(path)
+    # Imported here: the fetch script imports this module for its paths.
+    from ..scripts.fetch_functions import fetch_latest
+
+    return fetch_latest()
 
 
 def kernel_paths() -> tuple[Path, Path]:

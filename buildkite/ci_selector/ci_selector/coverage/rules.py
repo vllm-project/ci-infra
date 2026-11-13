@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..codemap.state import PipelineData
 from ..handwritten import TESTS_SCOPE
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, ran_changed_lines, row_shows_use
@@ -96,21 +97,38 @@ class RowKeys:
 
     @classmethod
     def resolve(cls, table: Table, repo: Path, ref: str) -> RowKeys:
-        from ci_selector.codemap.worktree import state_for
+        """Resolve the table's rows against the pipeline yaml at `ref`, the
+        commit the rows were recorded at.
 
-        return cls.resolve_from_state(set(table._rows), state_for(repo, ref))
+        Reads the yaml and nothing else: matching rows to steps needs only the
+        steps, not the import graph a whole `RepoState` there would build.
+        """
+        from ci_selector.codemap.pipeline.buildkite import (
+            load_pipeline_configs,
+            load_steps,
+        )
+        from ci_selector.codemap.worktree import worktree_at
+
+        tree = worktree_at(repo, ref)
+        pipelines = [
+            PipelineData(config, load_steps(tree, config), {})
+            for config in load_pipeline_configs(tree)
+        ]
+        return cls.resolve_from_pipelines(set(table._rows), pipelines)
 
     @classmethod
-    def resolve_from_state(cls, rows: set[str], state) -> RowKeys:
-        """`resolve` against a state the caller already holds.
+    def resolve_from_pipelines(
+        cls, rows: set[str], pipelines: list[PipelineData]
+    ) -> RowKeys:
+        """`resolve` against pipelines the caller already holds.
 
-        The kernel record resolves at the PR's base, whose state `decide`
-        was handed, so this costs nothing where `resolve` builds a worktree.
+        The kernel and library records resolve at the PR's base, whose state
+        `decide` was handed, so they pass its pipelines and build nothing.
         `rows` is the table's row keys, whichever table.
         """
         spellings: dict[str, str] = {}
         match_rate: dict[str, float] = {}
-        for pipeline in state.pipelines:
+        for pipeline in pipelines:
             idents = set()
             for step in pipeline.steps:
                 ident = step.buildkite_key or step.label
@@ -122,7 +140,7 @@ class RowKeys:
         resolved = cls.from_match_rates(match_rate, spellings)
         resolved.steps = {
             step.step_id: step
-            for pipeline in state.pipelines
+            for pipeline in pipelines
             if pipeline.config.name in resolved.owners
             for step in pipeline.steps
         }
