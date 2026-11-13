@@ -2468,10 +2468,14 @@ def test_a_failed_inventory_prints_a_bounded_tail_of_its_output(
     )
     assert shard._expected_inventory(config) is None
     err = capsys.readouterr().err
-    assert "ERROR tests/pkg/test_b.py - ValueError: broken" in err
-    shown = [line for line in err.splitlines() if line.startswith("noise line")]
-    assert len(shown) == plugin.INVENTORY_TAIL_LINES
-    assert shown[-1] == "noise line 199"
+    assert err == (
+        "runtime-shard: couldn't collect the command's full test list (exit 1); "
+        "the coverage check will report the command unverified"
+        "\n--- last lines of its output ---\n...\n"
+        + "\n".join(f"noise line {i}" for i in range(160, 200))
+        + "\n--- last lines of its error output ---\n"
+        "ERROR tests/pkg/test_b.py - ValueError: broken\n"
+    )
 
 
 def test_stderr_inventory_tail_is_kept_and_exact_limit_is_not_truncated(
