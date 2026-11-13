@@ -2,7 +2,7 @@
 """The build's check that no test dropped out of its shards.
 
 Each shard of a runtime-sharded step records what it ran
-(runtime_shard_plugin.py), and the first shard that runs a command also records
+(runtime_shard_plugin.py), and the command's least-loaded owner also records
 every test the command should run. This job compares them and posts one
 annotation, failing closed: red whenever coverage is not proven. That is a
 miss (a test no shard ran although every shard finished), a shard that
@@ -10,12 +10,14 @@ didn't finish (its tests may not have run, so they are listed apart from
 misses), and a command it cannot check (a shard left no record, or none
 recorded the test list). Yellow only for a test that two finished shards both
 ran: it costs a shard's time but loses no test. A soft-fail step is allowed
-to fail, so an explicitly unfinished shard stays yellow; missing evidence is
-still an error. A definite miss stays red, though, since that means the
-sharding itself is broken. And only the current build's records count: a
-record from another build (or one too old to name its build) is stale
-evidence, ignored when the build's ID is known. Standard library only: it
-runs on a small CPU agent, fetched as a single file.
+to fail, so an explicitly unfinished shard stays yellow. Missing evidence is
+also yellow only when Buildkite reports the step's final outcome as
+soft_failed; a passed step with missing evidence stays red. A definite miss
+stays red, though, since that means the sharding itself is broken. And only
+the current build's records count: a record from another build (or one too
+old to name its build) is stale evidence, ignored when the build's ID is
+known. Standard library only: it runs on a small CPU agent, fetched as a
+single file.
 """
 
 import glob
@@ -153,9 +155,10 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         (its style: error, warning or success; its markdown). Error unless
         every test is proven run: a miss, an unfinished shard and a command
         that can't be checked all fail the job; only duplicates stay a
-        warning. A soft-fail step is the exception only for an explicitly
-        unfinished shard: its build already allows that failure. Unverified
-        evidence still fails, as does a definite miss.
+        warning. A soft-fail step is the exception for an unfinished shard or
+        unverified evidence after Buildkite's final soft_failed outcome: its
+        build already allows that failure. Missing evidence after a passed
+        step still fails, as does a definite miss.
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
@@ -194,9 +197,9 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
                 f"**{result['step']}**, {result['label']}: {result['unverified']}{soft}"
             )
     if lines:
-        blocking = list(unverified) + [
-            result for result in unfinished if not result["soft_fail"]
-        ]
+        blocking = [
+            result for result in unverified if not result.get("soft_failed", False)
+        ] + [result for result in unfinished if not result["soft_fail"]]
         style = "error" if missed or blocking else "warning"
         return style, "\n".join(lines)
     steps = len({result["step"] for result in results})
@@ -217,6 +220,35 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _relax_soft_failed_unverified(results: List[Dict[str, Any]]) -> None:
+    """Do not turn a step's existing soft failure into a hard coverage failure.
+
+    A passed soft-fail step still has to prove its coverage. Only Buildkite's
+    final soft_failed outcome relaxes missing evidence; an unavailable or
+    different outcome keeps the hard failure.
+    """
+    outcomes = {}
+    for result in results:
+        if not result["soft_fail"] or not result["unverified"]:
+            continue
+        step = result["step"]
+        if step not in outcomes:
+            try:
+                run = subprocess.run(
+                    ["buildkite-agent", "step", "get", "outcome", "--step", step],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                outcomes[step] = (
+                    run.returncode == 0 and run.stdout.strip() == "soft_failed"
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                outcomes[step] = False
+        result["soft_failed"] = outcomes[step]
+
+
 def main() -> int:
     steps = json.loads(os.environ[STEPS_ENV])
     with tempfile.TemporaryDirectory() as folder:
@@ -232,6 +264,7 @@ def main() -> int:
         records = _read_records(folder)
     # Without the variable (a local run) every record counts, as before.
     results = compare(steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID"))
+    _relax_soft_failed_unverified(results)
     for result in results:
         for name in ("missed", "not_run"):
             for nodeid in result[name]:
@@ -251,8 +284,9 @@ def main() -> int:
             os.getenv("BUILDKITE_STEP_KEY") or "runtime-shard-coverage",
             "--style",
             style,
-            text,
         ],
+        input=text,
+        text=True,
         check=False,
     )
     return 1 if style == "error" else 0

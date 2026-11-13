@@ -913,9 +913,9 @@ def shard_coverage_step(
     on what the shards wait on and then on their state: a timed-out or
     cancelled shard would end a step depending on it waiting_failed, and a
     shard that didn't finish is one of the things this job reports. The state
-    wait (unblock_jobs.COVERAGE_WAIT) has no deadline of its own: a build generated long before its
-    shards run must still wait for them, so only this job's own timeout
-    bounds it.
+    wait (unblock_jobs.COVERAGE_WAIT) has no generation-time deadline: a build
+    generated long before its shards run must still wait for them, so only
+    this job's own timeout bounds it, including their queue time.
     """
     steps = {}
     sharded = []
@@ -933,8 +933,8 @@ def shard_coverage_step(
                     "label": planned["label"],
                     "fallback": planned["fallback"],
                     "owners": runtime_shard.owners(planned),
-                    # The comparison keeps a soft-failing step's failures a
-                    # warning rather than failing the build on them.
+                    # Only a final soft-failed outcome relaxes unverified
+                    # evidence; a passed step still has to prove coverage.
                     "soft_fail": bool(step.soft_fail),
                 }
                 for planned in plan["commands"]

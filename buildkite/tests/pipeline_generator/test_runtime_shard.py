@@ -16,7 +16,6 @@ import yaml
 import buildkite_step
 import runtime_shard as rs
 import runtime_shard_plugin
-import unblock_jobs
 from constants import AgentQueue
 from step import Step
 
@@ -2443,6 +2442,7 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     assert captured["cwd"] == str(tmp_path)
     assert captured["timeout"] == plugin.INVENTORY_TIMEOUT_SECONDS
+    assert captured["env"]["PYTHONSAFEPATH"] == "1"
 
 
 def test_a_failed_inventory_prints_a_bounded_tail_of_its_output(
@@ -2640,7 +2640,16 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
         "buildkite/pipeline_generator/runtime_shard_coverage.py"
     )
     assert job.commands == [
-        unblock_jobs.COVERAGE_WAIT,
+        "while :; do "
+        'pending=""; '
+        "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+        's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+        'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
+        "done; "
+        '[ -z "$$pending" ] && { echo "every sharded step has finished"; break; }; '
+        'echo "waiting on $$pending ($${s:-state unknown})"; '
+        "sleep 30; "
+        "done",
         f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}',
     ]
     # And their records land where each job can reach the checkout.

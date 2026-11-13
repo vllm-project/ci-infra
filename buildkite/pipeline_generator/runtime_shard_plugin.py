@@ -8,13 +8,13 @@ command the plan covers, it:
   - skips collecting the files planned for other shards,
   - keeps this job's tests: its files, and its part of each file split by
     test. A collected file the plan doesn't name (one the generator could
-    not see) runs in the first shard that runs the command, so no test can
+    not see) runs in the least-loaded owner that runs the command, so no test can
     drop out of every shard,
   - opens a Buildkite log group per file, opens the group of a file that
     fails, and puts the failures and summary in their own open group,
   - turns "no tests ran" into success when every test went to other shards,
   - records what it ran for the build's coverage check
-    (runtime_shard_coverage.py): the command's first shard also records the
+    (runtime_shard_coverage.py): the command's least-loaded owner also records the
     whole list of tests the command should run, collected by a separate pytest
     it starts on the same worker, so its own run never imports the other
     shards' files.
@@ -198,9 +198,9 @@ class ShardPlugin:
         self.step_key = step_key
         self.position = command.get("position")
         self.coverage_dir = os.environ.get(COVERAGE_DIR_ENV)
-        # The first shard that runs the command says what the command should
-        # run: listed by a separate pytest it starts (_expected_inventory), on
-        # the job's hardware, at the job's commit.
+        # The least-loaded owner that runs the command says what the command
+        # should run: listed by a separate pytest it starts
+        # (_expected_inventory), on the job's hardware, at the job's commit.
         self.records_expected = bool(self.coverage_dir) and shard == self.fallback
         self.expected = None
         self.planned = []  # the tests kept here
@@ -208,8 +208,8 @@ class ShardPlugin:
 
     def pytest_ignore_collect(self, collection_path, config):
         """A file planned whole for another shard isn't even imported. The
-        recording shard's inventory comes from its own pytest, so no shard's
-        run imports another shard's file."""
+        inventory uses an isolated pytest, so the live shard does not import
+        other shards' files to build that list."""
         relative = os.path.relpath(str(collection_path), str(config.rootpath))
         shard = self.files.get(relative.replace(os.sep, "/"))
         if shard is not None and shard != self.shard:
@@ -278,6 +278,9 @@ class ShardPlugin:
             if name not in (PLAN_ENV, COMMAND_ENV, COVERAGE_DIR_ENV, APPLIED_ENV)
         }
         env[INVENTORY_ENV] = path
+        # Match the pytest console script: -m pytest would otherwise prepend
+        # the invocation directory to sys.path and can import different code.
+        env["PYTHONSAFEPATH"] = "1"
         try:
             run = subprocess.run(
                 [

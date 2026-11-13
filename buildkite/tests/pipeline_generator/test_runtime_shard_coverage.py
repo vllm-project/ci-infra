@@ -259,6 +259,36 @@ def test_a_soft_fail_step_unverified_fails_closed():
     assert "shard 2 recorded nothing (soft-fail step)" in text
 
 
+def test_main_only_relaxes_unverified_evidence_for_a_soft_failed_step(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
+    monkeypatch.setattr(
+        coverage,
+        "_read_records",
+        lambda _: [_record(0, ["a"], expected=["a", "b"])],
+    )
+    outcomes = iter(["soft_failed\n", "passed\n", None, OSError("agent unavailable")])
+    styles = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "step", "get"]:
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return subprocess.CompletedProcess(
+                command, int(outcome is None), stdout=outcome or ""
+            )
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            styles.append(command[command.index("--style") + 1])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 0
+    assert coverage.main() == 1
+    assert coverage.main() == 1
+    assert coverage.main() == 1
+    assert styles == ["warning", "error", "error", "error"]
+
+
 def test_soft_fail_defaults_to_false_so_todays_behavior_is_kept():
     [result] = coverage.compare(STEPS, [_record(0, ["a"], expected=["a", "b"])])
     assert result["soft_fail"] is False
@@ -384,10 +414,13 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
     )
     (folder / "1.json").write_text(json.dumps(_record(1, [])))
     calls = []
+    annotated = []
 
     def fake_run(command, check, **kwargs):
         assert check is False  # an agent hiccup must not hide the result
         calls.append(command)
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
@@ -403,7 +436,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
         "runtime-shard-coverage",
         "--style",
     ]
-    assert calls[1][5] == "error" and "`gone`" in calls[1][6]
+    assert calls[1][5] == "error" and "`gone`" in annotated[0]
     out = capsys.readouterr().out
     assert "missed: k: gone\n" in out and "### :x:" in out
 
@@ -567,7 +600,7 @@ def test_the_script_end_to_end_with_an_agent_on_the_path(tmp_path):
     agent = bin_dir / "buildkite-agent"
     agent.write_text(
         f"""#!/bin/sh
-if [ "$1" = artifact ]; then cp -r {tmp_path}/artifacts/. "$4"; else echo "$@" >> {tmp_path}/annotated; fi
+if [ "$1" = artifact ]; then cp -r {tmp_path}/artifacts/. "$4"; else echo "$@" >> {tmp_path}/annotated; cat >> {tmp_path}/annotated; fi
 """
     )
     agent.chmod(agent.stat().st_mode | stat.S_IEXEC)
@@ -584,3 +617,22 @@ if [ "$1" = artifact ]; then cp -r {tmp_path}/artifacts/. "$4"; else echo "$@" >
     assert run.returncode == 1, run.stderr
     assert "--style error" in (tmp_path / "annotated").read_text()
     assert "gone" in (tmp_path / "annotated").read_text()
+
+
+def test_a_large_annotation_is_passed_on_stdin_not_as_an_argument(monkeypatch):
+    text = "x" * 140_000
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setattr(coverage, "_read_records", lambda _: [])
+    monkeypatch.setattr(coverage, "report", lambda _: ("warning", text))
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 0
+    command, kwargs = calls[-1]
+    assert text not in command
+    assert kwargs["input"] == text
+    assert kwargs["text"] is True
