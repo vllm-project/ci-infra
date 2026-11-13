@@ -347,6 +347,9 @@ def test_main_adds_a_coverage_job_behind_a_sharded_pick(tmp_path, monkeypatch):
     assert job["allow_dependency_failure"] is True
     assert job["soft_fail"] is False
     assert job["agents"] == {"queue": "q"}
+    # Its own annotation context: a round's report must not overwrite the
+    # pipeline's coverage report, nor another round's.
+    assert job["env"]["RUNTIME_SHARD_COVERAGE_CONTEXT"] == "runtime-shard-coverage-1"
     steps = json.loads(job["env"]["RUNTIME_SHARD_COVERAGE_STEPS"])
     assert steps == {
         "sharded-a": [
