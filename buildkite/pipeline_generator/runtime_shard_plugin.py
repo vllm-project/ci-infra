@@ -204,6 +204,7 @@ class ShardPlugin:
         self.records_expected = bool(self.coverage_dir) and shard == self.fallback
         self.expected = None
         self.planned = None  # tests kept here after collection; None if unknown
+        self.collection_failed = False
         self.ran = set()  # the tests pytest reported on here
 
     def pytest_ignore_collect(self, collection_path, config):
@@ -257,7 +258,13 @@ class ShardPlugin:
             self.dropped += len(drop)
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
-        self.planned = [item.nodeid for item in items]
+        if not self.collection_failed:
+            # An empty assignment is meaningful only when collection completed.
+            self.planned = [item.nodeid for item in items]
+
+    def pytest_collectreport(self, report):
+        if report.failed:
+            self.collection_failed = True
 
     def _expected_inventory(self, config):
         """The command's full test list, collected by a second pytest on this
@@ -346,6 +353,8 @@ class ShardPlugin:
         if session.config.getoption("collectonly"):
             self.coverage_dir = None
             return
+        if self.collection_failed:
+            self.planned = None
         # Before any test: a shard that dies leaves this, marked unfinished.
         self._write_record(finished=False)
         # Looked up here: it registers after -p plugins are configured.

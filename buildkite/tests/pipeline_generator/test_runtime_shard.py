@@ -2528,6 +2528,12 @@ def test_a_collection_error_in_a_later_shard_still_stops_it(tmp_path):
     assert run.returncode == 2  # pytest's "interrupted"
 
 
+def test_a_collection_error_before_assignment_records_an_unknown_plan(tmp_path):
+    _project(tmp_path, {"pkg/test_b.py": "raise ValueError\n"})
+    _, record = _covered_run(tmp_path, 1, "job-1")
+    assert record["expected"] is None and record["planned"] is None
+
+
 def test_a_stopped_run_is_not_finished(tmp_path):
     _project(
         tmp_path,
