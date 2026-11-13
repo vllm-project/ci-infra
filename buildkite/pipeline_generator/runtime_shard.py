@@ -9,7 +9,9 @@ pipeline, from the vLLM checkout it runs in:
             --ignore options.
   timings   main's median time per file for the step (ci.vllm.ai), with
             per-test medians for a file over one shard's budget, and its
-            median setup per job.
+            median setup per job. Read from a snapshot of that endpoint,
+            refreshed hourly in S3 and downloaded once per run; the endpoint
+            itself only for a step the snapshot lacks, or with no snapshot.
   plan      whole files into the fewest shards that keep each job, setup and
             tests, within the budget, largest file first (at most 10). A file
             over the budget is split by test function, using its per-test
@@ -28,6 +30,7 @@ generator runs on the small CPU queue's python3.
 
 import base64
 import fnmatch
+import gzip
 import json
 import math
 import os
@@ -41,11 +44,21 @@ import urllib.parse
 import urllib.request
 import zlib
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 from constants import AgentQueue
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
+# The endpoint's answers for every step main ran lately, published hourly by
+# the alerting worker (vllm-dashboard alerting/timings_snapshot.py), so a slow
+# dashboard database no longer leaves steps unsharded.
+SNAPSHOT_BUCKET_URL = "https://vllm-ci-timings.s3.amazonaws.com"
+SNAPSHOT_POINTER = "ci/timings/latest.json"
+SNAPSHOT_TIMEOUT_SECONDS = 15
+# An entry older than this is still used; its annotation says how old it is.
+SNAPSHOT_STALE_HOURS = 24
+_snapshot: Optional[Dict] = None  # "<step key>|<queue>" -> entry; {} if none
 # A first read can take over 15 s when the endpoint's cache is cold; the retry
 # waits longer.
 TIMINGS_TIMEOUTS_SECONDS = (15, 30)
@@ -319,15 +332,55 @@ def discover(command: str, cwd: str, root: str) -> Dict:
     return {"files": files, "selected": selected}
 
 
+def _snapshot_entries() -> Dict:
+    """The timings snapshot's entries, downloaded on the first call of the
+    run; {} if it can't be read, so every step asks the endpoint as before."""
+    global _snapshot
+    if _snapshot is not None:
+        return _snapshot
+    _snapshot = {}
+    try:
+        url = f"{SNAPSHOT_BUCKET_URL}/{SNAPSHOT_POINTER}"
+        with urllib.request.urlopen(url, timeout=SNAPSHOT_TIMEOUT_SECONDS) as response:
+            pointer = json.load(response)
+        url = f"{SNAPSHOT_BUCKET_URL}/{pointer['path']}"
+        with urllib.request.urlopen(url, timeout=SNAPSHOT_TIMEOUT_SECONDS) as response:
+            snapshot = json.loads(gzip.decompress(response.read()))
+        tests_over_ms = (MAX_SHARD_SECONDS - MAX_SETUP_SECONDS) * 1000
+        if snapshot.get("tests_over_ms") != tests_over_ms:
+            raise ValueError(f"made with testsOverMs {snapshot.get('tests_over_ms')}, "
+                             f"not {tests_over_ms}")
+        if not isinstance(snapshot.get("entries"), dict):
+            raise ValueError("no entries")
+        _snapshot = snapshot["entries"]
+        print(f"runtime-shard: timings snapshot of {snapshot.get('published_at')}, "
+              f"{len(_snapshot)} steps", file=sys.stderr)
+    except Exception as error:  # S3 down, no snapshot yet, bad body
+        print(f"runtime-shard: no timings snapshot ({error}); each step asks "
+              "the endpoint", file=sys.stderr)
+    return _snapshot
+
+
 def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     """Main's per-file medians for the step on `queue`, with per-test medians
-    for the files over one shard's budget; None if the endpoint has none or is
-    down.
+    for the files over one shard's budget; None if there are none or the
+    endpoint is down.
 
-    A read that times out or fails gets one longer retry. After
-    MAX_TIMINGS_FAILURES steps in a row fail, the rest of the run skips the
-    endpoint, so an outage costs a few reads instead of two per step.
+    The snapshot's answer, whatever its age, when it has the step. Otherwise
+    the endpoint: a read that times out or fails gets one longer retry, and
+    after MAX_TIMINGS_FAILURES steps in a row fail, the rest of the run skips
+    the endpoint, so an outage costs a few reads instead of two per step.
     """
+    entry = _snapshot_entries().get(f"{step_key}|{queue.value}")
+    # An entry that isn't a stored answer falls through to the endpoint.
+    response = entry.get("response", False) if isinstance(entry, dict) else False
+    if response is None or (isinstance(response, dict)
+                            and isinstance(response.get("files"), list)):
+        if response is None:
+            print(f"runtime-shard: no timings for {step_key} (snapshot of "
+                  f"{entry.get('fetched_at')}: no passing main build)", file=sys.stderr)
+            return None
+        return dict(response, snapshotFetchedAt=entry.get("fetched_at"))
     global _timings_failures
     if _timings_failures >= MAX_TIMINGS_FAILURES:
         print(f"runtime-shard: no timings for {step_key} (endpoint skipped after "
@@ -630,7 +683,8 @@ def plan(
         # Fewer shards would be slower or mix commands past the budget.
         "fewest": _mixed_within(units, shard_of, loads, max_shard_seconds),
         "timingSource": {
-            k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
+            k: (timings or {}).get(k)
+            for k in ("buildNumber", "buildNumbers", "snapshotFetchedAt")
         },
     }
 
@@ -647,7 +701,8 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         return (
             f"**Runtime sharding for `{step_key}`:** its {result['files']} files "
             f"fit in one job ({result['estimates'][0] / 60:.1f} min of tests, "
-            f"{setup / 60:.1f} min of setup)." + _setup_warning(setup)
+            f"{setup / 60:.1f} min of setup)."
+            + _snapshot_note(result) + _setup_warning(setup)
         )
     estimates = ", ".join(f"{s / 60:.1f}" for s in result["estimates"])
     source = result["timingSource"]
@@ -706,7 +761,35 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             f" :warning: At least one job is still over "
             f"{MAX_SHARD_SECONDS / 60:.0f} min with its setup."
         )
-    return text + _setup_warning(setup)
+    return text + _snapshot_note(result) + _setup_warning(setup)
+
+
+def _snapshot_hours(result: Optional[Dict]) -> Optional[float]:
+    """How old the plan's snapshot timings are; None if not from it."""
+    fetched_at = ((result or {}).get("timingSource") or {}).get("snapshotFetchedAt")
+    try:
+        fetched = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    age = datetime.now(timezone.utc) - fetched.replace(tzinfo=timezone.utc)
+    return age.total_seconds() / 3600
+
+
+def snapshot_stale(result: Optional[Dict]) -> bool:
+    hours = _snapshot_hours(result)
+    return hours is not None and hours > SNAPSHOT_STALE_HOURS
+
+
+def _snapshot_note(result: Dict) -> str:
+    """Where the plan's timings came from, if the snapshot, and their age."""
+    fetched_at = result.get("timingSource", {}).get("snapshotFetchedAt")
+    if not fetched_at:
+        return ""
+    note = f" Timings from the snapshot fetched {fetched_at}."
+    if snapshot_stale(result):
+        note += (f" :warning: That is {_snapshot_hours(result):.0f} h old: the "
+                 "hourly refresh on the alerting worker is failing.")
+    return note
 
 
 def setup_too_long(result: Optional[Dict]) -> bool:

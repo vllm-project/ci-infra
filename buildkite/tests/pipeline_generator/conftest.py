@@ -1,6 +1,7 @@
 import pytest
 
 import buildkite_step
+import runtime_shard
 import selector_gate
 import step as step_module
 
@@ -10,6 +11,13 @@ def _selector_off(monkeypatch):
     """The selector is on by default and would clone ci-infra and run for
     real. Tests that exercise it turn it back on themselves."""
     monkeypatch.setenv(selector_gate.SELECTOR_ENV_VAR, "off")
+
+
+@pytest.fixture(autouse=True)
+def _no_timings_snapshot(monkeypatch):
+    """Read as already downloaded and empty, so no test reaches S3; the
+    snapshot tests set their own."""
+    monkeypatch.setattr(runtime_shard, "_snapshot", {})
 
 
 @pytest.fixture
