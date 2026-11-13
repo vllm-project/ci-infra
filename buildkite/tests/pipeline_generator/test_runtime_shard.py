@@ -2158,7 +2158,15 @@ COVERED_FILES = {
 }
 
 
-def _covered_run(tmp_path, shard, job, command="pytest -v pkg", retry=None, fallback=0):
+def _covered_run(
+    tmp_path,
+    shard,
+    job,
+    command="pytest -v pkg",
+    retry=None,
+    fallback=0,
+    extra_env=None,
+):
     """One job's run with records on. Returns (the run, its record)."""
     files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
     planned = _command_plan(command, "Command (1/1)", files)
@@ -2167,6 +2175,7 @@ def _covered_run(tmp_path, shard, job, command="pytest -v pkg", retry=None, fall
     env = {
         "RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records"),
         "BUILDKITE_JOB_ID": job,
+        **(extra_env or {}),
     }
     if retry is not None:
         env["BUILDKITE_RETRY_COUNT"] = str(retry)
@@ -2340,7 +2349,7 @@ def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsy
 
     monkeypatch.setattr(plugin.subprocess, "run", dies)
     config = types.SimpleNamespace(
-        invocation_params=types.SimpleNamespace(args=["-v", "pkg"])
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
     )
     assert shard._expected_inventory(config) is None
     assert capsys.readouterr().err == (
@@ -2348,6 +2357,103 @@ def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsy
         "(out of processes); the coverage check will report the command "
         "unverified\n"
     )
+
+
+def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, capsys):
+    """A hung inventory collection is bounded: after the timeout the shard's
+    own run goes on without the list, so the coverage check reports the
+    command unverified."""
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+
+    def hangs(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            cmd=args[0], timeout=plugin.INVENTORY_TIMEOUT_SECONDS
+        )
+
+    monkeypatch.setattr(plugin.subprocess, "run", hangs)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    err = capsys.readouterr().err
+    assert (
+        "runtime-shard: couldn't collect the command's full test list "
+        f"(timed out after {plugin.INVENTORY_TIMEOUT_SECONDS} seconds); the "
+        "coverage check will report the command unverified\n"
+    ) == err
+
+
+def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
+    """The inventory's pytest runs in the command's own directory — its
+    conftest.py and rootdir resolve as they did for the command — and cannot
+    run longer than the inventory timeout."""
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured.update(kwargs)
+        with open(kwargs["env"][plugin.INVENTORY_ENV], "w") as f:
+            json.dump(["tests/pkg/test_a.py::test_1"], f)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(plugin.subprocess, "run", fake_run)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
+    assert captured["cwd"] == str(tmp_path)
+    assert captured["timeout"] == plugin.INVENTORY_TIMEOUT_SECONDS
+
+
+def test_a_failed_inventory_prints_a_bounded_tail_of_its_output(
+    tmp_path, monkeypatch, capsys
+):
+    """When the inventory's collection fails, the shard's log gets the end of
+    its output — where pytest names the file that broke — bounded so a huge
+    collection log cannot bury the job's own."""
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    noise = "".join(f"noise line {i}\n" for i in range(200))
+    error = "ERROR tests/pkg/test_b.py - ValueError: broken\n"
+
+    def failed(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, noise, error)
+
+    monkeypatch.setattr(plugin.subprocess, "run", failed)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    err = capsys.readouterr().err
+    assert "ERROR tests/pkg/test_b.py - ValueError: broken" in err
+    shown = [line for line in err.splitlines() if line.startswith("noise line")]
+    assert len(shown) == plugin.INVENTORY_TAIL_LINES
+    assert shown[-1] == "noise line 199"
+
+
+def test_the_coverage_record_names_its_build(tmp_path, monkeypatch):
+    """Each record carries its build's id, so the coverage check can filter
+    out records a stale job wrote; off Buildkite there is no build and the id
+    is null."""
+    monkeypatch.delenv("BUILDKITE_BUILD_ID", raising=False)
+    _project(tmp_path, COVERED_FILES)
+    _, record = _covered_run(
+        tmp_path, 0, "job-0", extra_env={"BUILDKITE_BUILD_ID": "build-123"}
+    )
+    assert record["build_id"] == "build-123"
+    _, record = _covered_run(tmp_path, 1, "job-1")
+    assert record["build_id"] is None
 
 
 def test_a_collection_error_in_a_later_shard_still_stops_it(tmp_path):
