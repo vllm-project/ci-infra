@@ -7,8 +7,17 @@ import sys
 import runtime_shard_coverage as coverage
 
 
-def _record(shard, ran, expected=None, position=0, finished=True, retry=0, at=1.0):
-    return {
+def _record(
+    shard,
+    ran,
+    expected=None,
+    position=0,
+    finished=True,
+    retry=0,
+    at=1.0,
+    build_id=None,
+):
+    record = {
         "step": "k",
         "position": position,
         "shard": shard,
@@ -19,10 +28,24 @@ def _record(shard, ran, expected=None, position=0, finished=True, retry=0, at=1.
         "planned": ran,
         "ran": ran,
     }
+    if build_id is not None:
+        record["build_id"] = build_id
+    return record
 
 
 STEPS = {
     "k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0, 1]}]
+}
+SOFT_STEPS = {
+    "k": [
+        {
+            "position": 0,
+            "label": "Command (1/1)",
+            "fallback": 0,
+            "owners": [0, 1],
+            "soft_fail": True,
+        }
+    ]
 }
 
 
@@ -203,6 +226,68 @@ def test_contract_with_the_generator():
     assert coverage.MAX_IDS_SHOWN == 30
 
 
+def test_a_soft_fail_step_missed_test_is_still_an_error():
+    # Soft fail lets the step's tests fail, not the sharding: a test no
+    # finished shard ran is a definite miss, so it stays red.
+    records = [_record(0, ["a"], expected=["a", "b"]), _record(1, [])]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["missed"] == ["b"] and result["soft_fail"] is True
+    style, text = coverage.report([result])
+    assert style == "error"
+    assert "### :x: 1 tests ran in no shard" in text
+
+
+def test_a_soft_fail_step_unfinished_shard_is_warning_only():
+    # The step may fail, so a shard that didn't finish proves nothing new:
+    # it reads as a warning, matching the build's soft-fail semantics.
+    records = [
+        _record(0, ["a"], expected=["a", "b"]),
+        _record(1, [], finished=False),
+    ]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["unfinished"] == [1] and result["not_run"] == ["b"]
+    style, text = coverage.report([result])
+    assert style == "warning"
+    assert "**k**, Command (1/1): shard 2 (soft-fail step)" in text
+
+
+def test_a_soft_fail_step_unverified_is_warning_only():
+    [result] = coverage.compare(SOFT_STEPS, [_record(0, ["a"], expected=["a", "b"])])
+    assert result["unverified"] == "shard 2 recorded nothing"
+    style, text = coverage.report([result])
+    assert style == "warning"
+    assert "shard 2 recorded nothing (soft-fail step)" in text
+
+
+def test_soft_fail_defaults_to_false_so_todays_behavior_is_kept():
+    [result] = coverage.compare(STEPS, [_record(0, ["a"], expected=["a", "b"])])
+    assert result["soft_fail"] is False
+    assert coverage.report([result])[0] == "error"
+
+
+def test_a_hard_steps_gap_stays_an_error_next_to_a_soft_fail_steps_gap():
+    steps = {
+        "soft": [
+            {
+                "position": 0,
+                "label": "Soft",
+                "fallback": 0,
+                "owners": [0],
+                "soft_fail": True,
+            }
+        ],
+        "hard": [{"position": 0, "label": "Hard", "fallback": 0, "owners": [0]}],
+    }
+    records = [
+        dict(_record(0, [], expected=["a"], finished=False), step="soft"),
+        dict(_record(0, [], expected=["a"], finished=False), step="hard"),
+    ]
+    soft, hard = coverage.compare(steps, records)
+    assert soft["unfinished"] == [0] and hard["unfinished"] == [0]
+    assert coverage.report([soft])[0] == "warning"  # the soft-fail step alone
+    assert coverage.report([soft, hard])[0] == "error"
+
+
 def test_a_list_of_exactly_the_cap_has_no_more_line():
     expected = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN)]
     [result] = coverage.compare(
@@ -243,6 +328,52 @@ def test_the_annotation_caps_its_lists_and_points_at_the_log():
     _, text = coverage.report([result])
     assert text.count("- `t") == coverage.MAX_IDS_SHOWN
     assert text.endswith("- and 5 more, listed in this job's log")
+
+
+def test_records_from_another_build_are_ignored_when_the_build_is_known():
+    # A stale artifact from an earlier build must not pass this build's
+    # check: with every record foreign, nothing is proven, so unverified.
+    records = [
+        _record(0, ["a", "b"], expected=["a", "b"], build_id="old-build"),
+        _record(1, [], build_id="old-build"),
+    ]
+    [result] = coverage.compare(STEPS, records, build_id="this-build")
+    assert result["unverified"] == (
+        "shard 1 recorded no test list; shards 1, 2 recorded nothing"
+    )
+    assert coverage.report([result])[0] == "error"
+
+
+def test_a_record_without_a_build_id_is_stale_when_the_build_is_known():
+    # Records from before the field existed can't be told from stale ones,
+    # so they don't count either.
+    records = [_record(0, ["a", "b"], expected=["a", "b"]), _record(1, [])]
+    [result] = coverage.compare(STEPS, records, build_id="this-build")
+    assert result["unverified"] is not None and result["missed"] == []
+
+
+def test_only_the_current_builds_records_count():
+    records = [
+        _record(0, ["a"], expected=["a", "b"], build_id="this-build"),
+        _record(1, ["b"], build_id="this-build"),
+        # A newer-looking stale record that ran nothing must not displace
+        # this build's shard 1 record and read as a miss.
+        _record(1, [], build_id="old-build", at=2.0),
+    ]
+    [result] = coverage.compare(STEPS, records, build_id="this-build")
+    assert result["missed"] == [] and result["duplicated"] == {}
+    assert result["unverified"] is None
+    assert coverage.report([result])[0] == "success"
+
+
+def test_without_a_build_id_every_record_counts():
+    # compare() stays backward compatible: no build ID, no filtering.
+    records = [
+        _record(0, ["a", "b"], expected=["a", "b"], build_id="old-build"),
+        _record(1, []),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["missed"] == [] and result["unverified"] is None
 
 
 def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
@@ -321,6 +452,66 @@ def test_main_fails_closed_with_no_records(monkeypatch):
         "--style",
     ]
     assert calls[1][5] == "error"
+
+
+def test_main_checks_only_the_current_builds_records(monkeypatch):
+    # main passes BUILDKITE_BUILD_ID, so a stale record can't cover for or
+    # accuse this build's shards: only the current build's records count.
+    records = [
+        _record(0, ["a"], expected=["a", "b"], build_id="this-build"),
+        _record(1, ["b"], build_id="this-build"),
+        # A newer-looking stale record that ran nothing: unfiltered it would
+        # displace shard 1's record and read as a miss.
+        _record(1, [], build_id="old-build", at=2.0),
+    ]
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append(command)
+
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setenv("BUILDKITE_BUILD_ID", "this-build")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    assert coverage.main() == 0
+    assert calls[1][5] == "success"
+
+
+def test_main_fails_closed_when_every_record_is_from_another_build(monkeypatch):
+    records = [
+        _record(0, ["a", "b"], expected=["a", "b"], build_id="old-build"),
+        _record(1, [], build_id="old-build"),
+    ]
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append(command)
+
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setenv("BUILDKITE_BUILD_ID", "this-build")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    assert coverage.main() == 1  # nothing proven for this build
+    assert calls[1][5] == "error"
+
+
+def test_main_without_a_build_id_uses_every_record(monkeypatch):
+    # A local run has no BUILDKITE_BUILD_ID: compare() sees every record.
+    records = [
+        _record(0, ["a", "b"], expected=["a", "b"], build_id="old-build"),
+        _record(1, []),
+    ]
+    calls = []
+
+    def fake_run(command, check, **kwargs):
+        calls.append(command)
+
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.delenv("BUILDKITE_BUILD_ID", raising=False)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    assert coverage.main() == 0
+    assert calls[1][5] == "success"
 
 
 def test_main_annotates_under_its_step_key(monkeypatch):
