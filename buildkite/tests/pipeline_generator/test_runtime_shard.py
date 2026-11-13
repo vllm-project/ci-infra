@@ -385,6 +385,29 @@ def test_plan_step_reads_each_commands_timing_when_their_previews_match(
     assert result["estimates"] == [930]
 
 
+def test_plan_step_sends_unplanned_tests_to_the_least_loaded_owner(
+    tmp_path, monkeypatch
+):
+    """The fallback shard runs the tests no plan names and collects the
+    command's full inventory for coverage; the least-loaded owner pays for
+    it, not always shard 0."""
+    files = {f"pkg/test_{name}.py": "def test_x(): pass\n" for name in "abc"}
+    _project(tmp_path, files)
+    command = "pytest -v pkg"
+    timings = _timings(
+        command, {"pkg/test_a.py": 800, "pkg/test_b.py": 800, "pkg/test_c.py": 100}
+    )
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    result, _ = rs.plan_step(
+        "k", [command], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
+    )
+    assert result["estimates"] == [900, 800]
+    planned = result["commands"][0]
+    assert rs.owners(planned) == [0, 1]
+    # The coverage job reads this same field to find the command's inventory.
+    assert planned["fallback"] == 1
+
+
 def test_plan_splits_a_file_over_the_budget_by_test_function():
     timings = _with_tests(
         _timings(TESTS[0], {"big.py": 2000}),
@@ -1664,10 +1687,13 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         run = _run(tmp_path, command, plan, shard)
         assert run.returncode == 0, run.stdout + run.stderr
         ran += _ran(run.stdout)
-        if shard == 0:  # what the plan doesn't name runs in the first shard
-            assert "not in the plan, so run in shard 1: tests/pkg/test_new.py" in (
-                run.stdout
-            )
+        # What the plan doesn't name runs in the least-loaded shard.
+        fallback = plan["commands"][0]["fallback"]
+        if shard == fallback:
+            assert (
+                f"not in the plan, so run in shard {fallback + 1}: "
+                "tests/pkg/test_new.py"
+            ) in run.stdout
         else:
             assert "test_new" not in run.stdout
         # A file's group says when it holds only part of the file.
