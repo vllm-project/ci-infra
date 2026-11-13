@@ -311,9 +311,11 @@ def test_our_replica_behaves_like_the_generators_own_rule():
     """The `_step_should_run` replica, against upstream's real code.
 
     Upstream needs a few things we have to supply: its global config, a step
-    type, and its AMD-device test, which we substitute with our own
+    type, and its AMD-GPU test, which we substitute with our own
     `family_of_device`. So this checks the branch structure and its order, not
-    those substituted parts, which have their own guards. The three branches we
+    those substituted parts, which have their own guards. Its broader
+    `is_amd_device` is not substituted: the replica imports that one, since our
+    family table files the amd_cpu build lane under cpu. The three branches we
     deliberately do not model (NOAUTO, only_step_keys, nightly) are pinned off
     here rather than left to chance.
 
@@ -332,6 +334,7 @@ def test_our_replica_behaves_like_the_generators_own_rule():
     from ci_selector.handwritten import (
         AMD_ALWAYS_RUN_STEP_KEYS,
         AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
+        AMD_ROCM_STACK_FILES,
         IMAGE_BUILD_KEY_PREFIX,
     )
     from ci_selector.validate.generator_replica import step_should_run
@@ -346,7 +349,9 @@ def test_our_replica_behaves_like_the_generators_own_rule():
         "AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES": list(
             AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
         ),
+        "AMD_ROCM_STACK_FILES": AMD_ROCM_STACK_FILES,
         "is_amd_gpu_device": lambda d: family_of_device(d) == "amd",
+        "is_amd_device": amd_mod.is_amd_device,
         "_source_file_dependencies_match": (
             buildkite_step._source_file_dependencies_match
         ),
@@ -357,8 +362,15 @@ def test_our_replica_behaves_like_the_generators_own_rule():
 
     amd_script = AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES[0]
     keys = [None, "lora", "image-build", "image-build-amd", *AMD_ALWAYS_RUN_STEP_KEYS]
-    devices = [None, "h100", "mi300_1", "cpu-small"]
-    diffs = [[], ["vllm/x.py"], ["tests/t.py"], [amd_script], ["docs/a.md"]]
+    devices = [None, "h100", "mi300_1", "amd_cpu", "cpu-small"]
+    diffs = [
+        [],
+        ["vllm/x.py"],
+        ["tests/t.py"],
+        [amd_script],
+        ["docs/a.md"],
+        *([path] for path in AMD_ROCM_STACK_FILES),
+    ]
     checked = 0
     for key, device, dind, optional, deps, diff, run_all in itertools.product(
         keys, devices, (False, True), (False, True), DEP_SETS, diffs, (False, True)
