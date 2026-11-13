@@ -259,6 +259,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
         calls.append(command)
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
     monkeypatch.setattr(coverage, "_read_records", lambda _: coverage_records(folder))
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert coverage.main() == 1
@@ -303,6 +304,7 @@ def coverage_records(folder):
 
 def test_main_fails_closed_with_no_records(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
     calls = []
 
     def fake_run(command, check, **kwargs):
@@ -321,11 +323,12 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     assert calls[1][5] == "error"
 
 
-def test_main_annotates_under_the_context_override(monkeypatch):
+def test_main_annotates_under_its_step_key(monkeypatch):
     """A second coverage job (a "Run more jobs" round) keeps its report apart
-    from the pipeline's: same script, its own annotation context."""
+    from the pipeline's: same script, and the agent sets BUILDKITE_STEP_KEY
+    to the job's own key."""
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
-    monkeypatch.setenv("RUNTIME_SHARD_COVERAGE_CONTEXT", "runtime-shard-coverage-2")
+    monkeypatch.setenv("BUILDKITE_STEP_KEY", "runtime-shard-coverage-2")
     calls = []
 
     def fake_run(command, check, **kwargs):

@@ -22,9 +22,6 @@ import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
-# The annotation's context, overridable so a second coverage job (a "Run more
-# jobs" round) reports next to the pipeline's one instead of replacing it.
-CONTEXT_ENV = "RUNTIME_SHARD_COVERAGE_CONTEXT"
 ARTIFACTS = ".runtime-shard-coverage/*/*.json"
 # Buildkite refuses an annotation over 1 MiB; the log keeps the whole list.
 MAX_IDS_SHOWN = 30
@@ -224,7 +221,10 @@ def main() -> int:
             "buildkite-agent",
             "annotate",
             "--context",
-            os.getenv(CONTEXT_ENV) or "runtime-shard-coverage",
+            # The job's own step key: the pipeline's job annotates under
+            # "runtime-shard-coverage" as before, and a "Run more jobs"
+            # round's job under its own key, next to it instead of over it.
+            os.getenv("BUILDKITE_STEP_KEY") or "runtime-shard-coverage",
             "--style",
             style,
             text,
