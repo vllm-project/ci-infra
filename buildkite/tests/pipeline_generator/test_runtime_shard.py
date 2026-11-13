@@ -2364,6 +2364,11 @@ def test_an_inventory_subprocess_that_cannot_start_leaves_the_shard_running(tmp_
     assert "couldn't collect the command's full test list" in run.stderr
 
 
+def test_inventory_timeout_is_positive_and_finite():
+    timeout = runtime_shard_plugin.INVENTORY_TIMEOUT_SECONDS
+    assert isinstance(timeout, (int, float)) and timeout > 0 and timeout != float("inf")
+
+
 def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsys):
     import runtime_shard_plugin as plugin
 

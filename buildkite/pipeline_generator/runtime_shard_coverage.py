@@ -10,8 +10,8 @@ didn't finish (its tests may not have run, so they are listed apart from
 misses), and a command it cannot check (a shard left no record, or none
 recorded the test list). Yellow only for a test that two finished shards both
 ran: it costs a shard's time but loses no test. A soft-fail step is allowed
-to fail, so its gaps in evidence (an unfinished shard, an unverified command)
-stay yellow too. A definite miss stays red, though, since that means the
+to fail, so an explicitly unfinished shard stays yellow; missing evidence is
+still an error. A definite miss stays red, though, since that means the
 sharding itself is broken. And only the current build's records count: a
 record from another build (or one too old to name its build) is stale
 evidence, ignored when the build's ID is known. Standard library only: it
@@ -153,9 +153,9 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         (its style: error, warning or success; its markdown). Error unless
         every test is proven run: a miss, an unfinished shard and a command
         that can't be checked all fail the job; only duplicates stay a
-        warning. A soft-fail step is the exception: its build already allows
-        failure, so its unfinished and unverified evidence warns. A definite
-        miss still fails, since the sharding itself is then broken.
+        warning. A soft-fail step is the exception only for an explicitly
+        unfinished shard: its build already allows that failure. Unverified
+        evidence still fails, as does a definite miss.
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
@@ -194,8 +194,8 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
                 f"**{result['step']}**, {result['label']}: {result['unverified']}{soft}"
             )
     if lines:
-        blocking = [
-            result for result in unfinished + unverified if not result["soft_fail"]
+        blocking = list(unverified) + [
+            result for result in unfinished if not result["soft_fail"]
         ]
         style = "error" if missed or blocking else "warning"
         return style, "\n".join(lines)
