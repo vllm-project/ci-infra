@@ -784,9 +784,11 @@ def plan_step(
                 planned["prefix"] = prefix
                 planned["label"] = f"Command ({position + 1}/{len(commands)})"
                 planned["position"] = position
-                # A test the plan doesn't name runs in the first shard that
-                # runs the command at all.
-                planned["fallback"] = owners(planned)[0]
+                # A test the plan doesn't name runs in the least-loaded shard
+                # that runs the command at all; that shard also collects the
+                # command's full inventory, a cost shard 0 shouldn't always pay.
+                runs = owners(planned)
+                planned["fallback"] = min(runs, key=result["estimates"].__getitem__)
     except Exception as error:  # never block the step on its sharding
         result, reason = None, str(error)
     return result, summary(step_key, result, reason)
