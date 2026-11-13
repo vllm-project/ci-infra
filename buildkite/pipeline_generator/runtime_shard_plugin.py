@@ -272,19 +272,31 @@ class ShardPlugin:
             if name not in (PLAN_ENV, COMMAND_ENV, COVERAGE_DIR_ENV, APPLIED_ENV)
         }
         env[INVENTORY_ENV] = path
-        run = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "pytest",
-                *config.invocation_params.args,
-                "--collect-only",
-                "--continue-on-collection-errors",
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            run = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    *config.invocation_params.args,
+                    "--collect-only",
+                    "--continue-on-collection-errors",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as error:
+            # The spawn itself failed (say, the worker is out of processes):
+            # no list, and the shard's own run must go on without it.
+            os.unlink(path)
+            print(
+                "runtime-shard: couldn't collect the command's full test list "
+                f"({error}); the coverage check will report the command "
+                "unverified",
+                file=sys.stderr,
+            )
+            return None
         try:
             with open(path) as f:
                 inventory = json.load(f)
