@@ -25,10 +25,23 @@ docker_plugin_template = {
     ],
 }
 
+# MIG jobs share a host's CPUs (56 slices on 152-176 cores) with no isolation,
+# so every job's PyTorch/OpenMP pools sized themselves to all cores and peak
+# load slowed CPU-bound startup (e.g. CUDA graph capture) 20-50x. Cap each job
+# near its fair share; vLLM sizes its pools from the cgroup quota, and the
+# thread variables cap the libraries that read only the core count.
+MIG_JOB_CPUS = "4"
+MIG_JOB_THREAD_ENV = [
+    f"OMP_NUM_THREADS={MIG_JOB_CPUS}",
+    f"MKL_NUM_THREADS={MIG_JOB_CPUS}",
+    f"TORCHINDUCTOR_COMPILE_THREADS={MIG_JOB_CPUS}",
+]
+
 h200_18gb_plugin_template = {
     "image": "",
     "always-pull": True,
     "propagate-environment": True,
+    "cpus": MIG_JOB_CPUS,
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
@@ -39,6 +52,7 @@ h200_18gb_plugin_template = {
         "BUILDKITE_ANALYTICS_TOKEN",
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
+        *MIG_JOB_THREAD_ENV,
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
@@ -51,6 +65,7 @@ h200_35gb_plugin_template = {
     "image": "",
     "always-pull": True,
     "propagate-environment": True,
+    "cpus": MIG_JOB_CPUS,
     "environment": [
         "VLLM_USAGE_SOURCE=ci-test",
         "NCCL_CUMEM_HOST_ENABLE=0",
@@ -61,6 +76,7 @@ h200_35gb_plugin_template = {
         "BUILDKITE_ANALYTICS_TOKEN",
         "CUDA_VISIBLE_DEVICES",
         "NVIDIA_VISIBLE_DEVICES",
+        *MIG_JOB_THREAD_ENV,
     ],
     "volumes": [
         "/dev/shm:/dev/shm",
