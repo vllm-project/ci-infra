@@ -5,17 +5,21 @@ and writes them to DEFERRED_FILE instead, next to a copy of this script, both
 uploaded as artifacts of the bootstrap job. The pipeline gets one input step
 listing them as checkboxes under their group names, and a job behind it that runs this script: it uploads the jobs
 picked in the input, with the deferred jobs they depend on, and a new input
-step for whatever is left, so more can be picked later.
+step for whatever is left, so more can be picked later. A picked sharded job
+also gets a coverage job of its own: the pipeline's one skips deferred steps,
+so nothing would check its shards ran every test otherwise.
 
 Runs on a plain CPU agent, so it uses the standard library only.
 """
 
+import base64
 import json
 import os
 import re
 import subprocess
 import sys
-from typing import Any, Dict, List, Set, Tuple
+import zlib
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 DEFERRED_DIR = "deferred"
 DEFERRED_FILE = "deferred_steps.json"
@@ -32,6 +36,14 @@ GROUP = ":heavy_plus_sign: Run more jobs"
 # The label of every checkbox after the first in a list. Buildkite rejects a
 # blank one ("can't be blank"), whitespace included, so a zero-width space.
 NO_LABEL = "\u200b"
+
+
+# The pipeline's coverage job for the steps it kept is "runtime-shard-coverage"
+# (shard_coverage_step in buildkite_step.py); each round's job adds its round
+# number so it clashes with neither that one nor another round's.
+COVERAGE_KEY = "runtime-shard-coverage"
+PLAN_ENV = "RUNTIME_SHARD_PLAN"
+COVERAGE_STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
 
 
 def _round_key(prefix: str, round_number: int) -> str:
@@ -171,6 +183,77 @@ def _grouped(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [{"group": group, "steps": steps} for group, steps in groups.items()]
 
 
+def _owners(planned: Dict[str, Any]) -> List[int]:
+    """The shards that run any of a planned command's tests."""
+    shards = set(planned["files"].values())
+    for split in planned["split"].values():
+        shards.update(split["shards"].values())
+    return sorted(shards)
+
+
+def coverage_step(
+    entries: List[Dict[str, Any]], round_number: int, queue: str
+) -> Optional[Dict[str, Any]]:
+    """The job that checks the picked sharded steps ran every test, or None
+    when no picked step is sharded.
+
+    Same check as the pipeline's own coverage job: the same script over the
+    same artifacts the shards upload, fetched from VLLM_CI_BRANCH the same
+    way, and hard-failing. It waits on the picked sharded steps with
+    allow_dependency_failure, so a failed step is still checked; a cancelled
+    or timed-out step ends this job waiting_failed, which turns the build
+    red without a report, and unlike the pipeline's job there is no wait for
+    the steps' retries first.
+
+    Args:
+        entries: The picked entries, each {"group": ..., "step": ...}.
+        round_number: This selection's round, for the job's key.
+        queue: The agent queue to run on.
+
+    Returns:
+        The job as a pipeline step, or None.
+    """
+    steps = {}
+    depends_on = []
+    for entry in entries:
+        packed = (entry["step"].get("env") or {}).get(PLAN_ENV)
+        if not packed:
+            continue
+        plan = json.loads(zlib.decompress(base64.b64decode(packed)))
+        key = entry["step"]["key"]
+        depends_on.append(key)
+        steps[key] = [
+            {
+                "position": planned["position"],
+                "label": planned["label"],
+                "fallback": planned["fallback"],
+                "owners": _owners(planned),
+            }
+            for planned in plan["commands"]
+        ]
+    if not steps:
+        return None
+    branch = os.getenv("VLLM_CI_BRANCH") or "main"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        f"{branch}/buildkite/pipeline_generator/runtime_shard_coverage.py"
+    )
+    script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
+    return {
+        "label": ":mag: Check every test ran",
+        "key": f"{COVERAGE_KEY}-{round_number}",
+        "env": {COVERAGE_STEPS_ENV: json.dumps(steps)},
+        "agents": {"queue": queue},
+        "commands": [
+            f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
+            f" && python3 {script}"
+        ],
+        "depends_on": depends_on,
+        "allow_dependency_failure": True,
+        "soft_fail": False,
+    }
+
+
 def _meta_data_keys() -> Set[str]:
     return set(
         subprocess.run(
@@ -217,6 +300,9 @@ def main(argv: List[str]) -> None:
     selected, remaining = pick(entries, picked)
 
     groups = _grouped(selected)
+    coverage = coverage_step(selected, round_number, deferred["queue"])
+    if coverage:
+        groups.append(coverage)
     if remaining:
         groups.append(
             more_jobs_group(

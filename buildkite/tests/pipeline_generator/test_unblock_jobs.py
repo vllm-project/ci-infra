@@ -4,6 +4,7 @@ import subprocess
 import pytest
 
 import buildkite_step
+import runtime_shard
 import unblock_jobs
 from buildkite_step import BuildkiteCommandStep, BuildkiteGroupStep
 from pipeline_generator import write_deferred_steps
@@ -293,3 +294,116 @@ def test_option_labels_drop_emoji_codes_and_job_placeholders():
     )
     assert label(":amd: (MI300) V1 Attention Shard %N") == "(MI300) V1 Attention"
     assert label(":docker: Build arm64 image") == "Build arm64 image"
+
+
+def _sharded_entry(key, group="g"):
+    entry = _entry(key, group)
+    plan = {
+        "shards": 2,
+        "key": key,
+        "commands": [
+            {
+                "position": 0,
+                "label": "Command (1/1)",
+                "fallback": 0,
+                "files": {"tests/test_a.py": 0, "tests/test_b.py": 1},
+                "split": {
+                    "tests/test_b.py": {
+                        "shards": {
+                            "tests/test_b.py::t1": 0,
+                            "tests/test_b.py::t2": 1,
+                        }
+                    }
+                },
+            }
+        ],
+    }
+    entry["step"]["env"] = {runtime_shard.PLAN_ENV: runtime_shard.pack(plan)}
+    return entry
+
+
+def _run_round(tmp_path, monkeypatch, agent, round_number):
+    monkeypatch.setattr(unblock_jobs.subprocess, "run", agent.run)
+    unblock_jobs.main(["unblock_jobs.py", str(round_number), str(tmp_path)])
+
+
+def test_main_adds_a_coverage_job_behind_a_sharded_pick(tmp_path, monkeypatch):
+    # The plain entry first: a sharded pick later in the list is still found.
+    entries = [_entry("plain-b"), _sharded_entry("sharded-a")]
+    (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
+        json.dumps({"source_job": "job-1", "queue": "q", "steps": entries})
+    )
+    agent = FakeAgent({"more-jobs": "sharded-a plain-b"})
+    monkeypatch.setenv("VLLM_CI_BRANCH", "agent/coverage-deferred")
+
+    _run_round(tmp_path, monkeypatch, agent, 1)
+
+    (upload,) = agent.uploads
+    group, job = upload["steps"]
+    assert [s["key"] for s in group["steps"]] == ["plain-b", "sharded-a"]
+    assert job["label"] == ":mag: Check every test ran"
+    assert job["key"] == "runtime-shard-coverage-1"
+    assert job["depends_on"] == ["sharded-a"]
+    assert job["allow_dependency_failure"] is True
+    assert job["soft_fail"] is False
+    assert job["agents"] == {"queue": "q"}
+    steps = json.loads(job["env"]["RUNTIME_SHARD_COVERAGE_STEPS"])
+    assert steps == {
+        "sharded-a": [
+            {
+                "position": 0,
+                "label": "Command (1/1)",
+                "fallback": 0,
+                "owners": [0, 1],
+            }
+        ]
+    }
+    script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
+    url = (
+        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
+        "agent/coverage-deferred"
+        "/buildkite/pipeline_generator/runtime_shard_coverage.py"
+    )
+    assert job["commands"] == [
+        f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}'
+    ]
+
+
+def test_each_rounds_coverage_job_has_its_own_key(tmp_path, monkeypatch):
+    entries = [_sharded_entry("a"), _sharded_entry("b")]
+    (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
+        json.dumps({"source_job": "job-1", "queue": "q", "steps": entries})
+    )
+    agent = FakeAgent({"more-jobs-job-a": "a"})
+    # Without VLLM_CI_BRANCH the script comes from main.
+    monkeypatch.delenv("VLLM_CI_BRANCH", raising=False)
+
+    _run_round(tmp_path, monkeypatch, agent, 1)
+    agent.meta_data["more-jobs-2-job-b"] = "b"
+    _run_round(tmp_path, monkeypatch, agent, 2)
+
+    first, second = agent.uploads
+    assert first["steps"][1]["key"] == "runtime-shard-coverage-1"
+    assert json.loads(first["steps"][1]["env"]["RUNTIME_SHARD_COVERAGE_STEPS"]) != {}
+    assert second["steps"][1]["key"] == "runtime-shard-coverage-2"
+    # Each round checks only what it uploaded.
+    assert list(
+        json.loads(second["steps"][1]["env"]["RUNTIME_SHARD_COVERAGE_STEPS"])
+    ) == ["b"]
+    assert (
+        "/vllm-project/ci-infra/main"
+        "/buildkite/pipeline_generator/runtime_shard_coverage.py"
+        in second["steps"][1]["commands"][0]
+    )
+
+
+def test_no_coverage_job_without_a_sharded_pick(tmp_path, monkeypatch):
+    (tmp_path / unblock_jobs.DEFERRED_FILE).write_text(
+        json.dumps({"source_job": "job-1", "queue": "q", "steps": [_entry("a")]})
+    )
+    agent = FakeAgent({"more-jobs-job-a": "a"})
+
+    _run_round(tmp_path, monkeypatch, agent, 1)
+
+    (upload,) = agent.uploads
+    assert [[s["key"] for s in g["steps"]] for g in upload["steps"]] == [["a"]]
