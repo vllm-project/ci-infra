@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 import yaml
@@ -36,6 +37,29 @@ import unblock_jobs
 # Set to "0" to upload the whole pipeline at once, as before.
 EARLY_IMAGE_UPLOAD_ENV_VAR = "VLLM_CI_EARLY_IMAGE_UPLOAD"
 EARLY_IMAGE_PIPELINE_FILE = "pipeline-images.yaml"
+# The images that go up before the test selector answers: the CUDA image (the
+# selector's floor, so every non-docs build needs it) with its smoke test, and
+# the AMD image with the AMD base steps, which keep today's always-run rules.
+# The other images (CPU, XPU, HPU, arm64, ...) go up with the pipeline, and
+# only when a selected step depends on them.
+EARLY_IMAGE_KEYS = (
+    frozenset({"image-build", "image-build-smoke-test", "image-build-amd"})
+    | AMD_ALWAYS_RUN_STEP_KEYS
+)
+# Set on the bootstrap step to the key of a step that runs
+# `pipeline-generator --images_only` beside it. Buildkite holds the steps a job
+# uploads until that job exits, so images uploaded by bootstrap wait out the
+# test selector; a separate step that uploads them and exits lets them start
+# minutes sooner.
+IMAGES_STEP_ENV_VAR = "VLLM_CI_IMAGES_STEP"
+# Build meta-data the images step sets, last, to the comma-separated keys it
+# uploaded: empty when it uploaded none (docs-only change, upload failed or did
+# not apply), so bootstrap keeps them in its own pipeline.
+EARLY_IMAGES_META_KEY = "vllm-ci-early-images"
+# How long bootstrap waits, after the selector, for the images step to decide.
+# Past that, bootstrap uploads the images itself.
+IMAGES_STEP_TIMEOUT_SECONDS = 600
+IMAGES_STEP_POLL_SECONDS = 5
 
 
 def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
@@ -63,6 +87,27 @@ class PipelineGenerator:
         init_global_config(pipeline_config_path)
         self.output_file_path = output_file_path
 
+    def generate_images_only(self):
+        """The images step: upload EARLY_IMAGE_KEYS and exit, so they start
+        while bootstrap is still running the test selector. Then record what
+        went up in EARLY_IMAGES_META_KEY for bootstrap. Never fails the build:
+        whatever it does not upload, bootstrap uploads with its pipeline."""
+        keys: FrozenSet[str] = frozenset()
+        try:
+            if _skips_ci_as_docs_only(get_global_config()):
+                print("All changes are doc-only: no images to build.")
+            else:
+                steps = []
+                for job_dir in get_global_config()["job_dirs"]:
+                    steps.extend(read_steps_from_job_dir(job_dir))
+                keys = upload_image_steps_early(
+                    steps, os.path.dirname(self.output_file_path)
+                )
+        except Exception as error:  # noqa: BLE001 - bootstrap uploads them instead
+            print(f"Images step failed, bootstrap will upload the images: {error}")
+        finally:
+            _set_meta_data(EARLY_IMAGES_META_KEY, ",".join(sorted(keys)))
+
     def generate(self):
         global_config = get_global_config()
         included = global_config.get("include_step_keys")
@@ -86,27 +131,21 @@ class PipelineGenerator:
         global_config["include_step_keys"] = included
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
-        if (
-            global_config["docs_only_disable"] == "0"
-            and not global_config["run_all"]
-            and global_config["only_step_keys"] is None
-            and not included
-        ):
-            if is_docs_only_change(global_config["list_file_diff"]):
-                print("List file diff: ", global_config["list_file_diff"])
-                print("All changes are doc-only, skipping CI.")
-                subprocess.run(
-                    [
-                        "buildkite-agent",
-                        "annotate",
-                        ":memo: CI skipped — doc-only changes",
-                    ],
-                    check=True,
-                )
-                output_dir_path = os.path.dirname(self.output_file_path)
-                with open(os.path.join(output_dir_path, ".docs_only"), "w") as f:
-                    f.write("true")
-                return
+        if _skips_ci_as_docs_only(global_config):
+            print("List file diff: ", global_config["list_file_diff"])
+            print("All changes are doc-only, skipping CI.")
+            subprocess.run(
+                [
+                    "buildkite-agent",
+                    "annotate",
+                    ":memo: CI skipped — doc-only changes",
+                ],
+                check=True,
+            )
+            output_dir_path = os.path.dirname(self.output_file_path)
+            with open(os.path.join(output_dir_path, ".docs_only"), "w") as f:
+                f.write("true")
+            return
 
         if platform:
             reason = (
@@ -116,8 +155,14 @@ class PipelineGenerator:
             )
             _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
-        early_keys = upload_image_steps_early(
-            steps, os.path.dirname(self.output_file_path)
+        all_steps = list(steps)
+        images_step = _images_step_key()
+        # With an images step, it uploads them; bootstrap only learns which,
+        # once it needs to know, right before its own upload.
+        early_keys = (
+            frozenset()
+            if images_step
+            else upload_image_steps_early(steps, os.path.dirname(self.output_file_path))
         )
         record = _selector_decision(steps)
         scheduled = None
@@ -204,6 +249,10 @@ class PipelineGenerator:
                 ),
             )
 
+        if images_step:
+            early_keys = images_from_step(
+                images_step, all_steps, os.path.dirname(self.output_file_path)
+            )
         if early_keys:
             # Already in the build: a second upload of a key would fail it.
             buildkite_group_steps = _without_keys(buildkite_group_steps, early_keys)
@@ -235,17 +284,120 @@ class PipelineGenerator:
         return
 
 
-def _is_image_step(step: Step) -> bool:
-    # The steps _step_should_run always runs: they build the images every
-    # test depends on, whatever the diff or the test selector says.
-    return bool(step.key) and (
-        step.key.startswith("image-build") or step.key in AMD_ALWAYS_RUN_STEP_KEYS
+def _skips_ci_as_docs_only(global_config: dict) -> bool:
+    """Whether the build runs nothing: a doc-only change, unless RUN_ALL or a
+    list of steps asks for them (VLLM_CI_ONLY_STEP_KEYS, or the extra jobs of
+    `/ci run --include`)."""
+    return (
+        global_config["docs_only_disable"] == "0"
+        and not global_config["run_all"]
+        and global_config["only_step_keys"] is None
+        and not global_config.get("include_step_keys")
+        and is_docs_only_change(global_config["list_file_diff"])
     )
 
 
+def _is_image_step(step: Step) -> bool:
+    # The images nearly every build needs, whatever the test selector says.
+    return bool(step.key) and step.key in EARLY_IMAGE_KEYS
+
+
+def _images_step_key() -> Optional[str]:
+    """The images step's key, when bootstrap runs beside one in a job."""
+    if not os.getenv("BUILDKITE_JOB_ID"):
+        return None
+    return os.getenv(IMAGES_STEP_ENV_VAR) or None
+
+
+def _set_meta_data(key: str, value: str) -> None:
+    try:
+        subprocess.run(
+            ["buildkite-agent", "meta-data", "set", key, value],
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"Could not set meta-data {key}: {error}")
+
+
+def _get_meta_data(key: str) -> Optional[str]:
+    """The build's meta-data value, or None when it is not set (or the agent
+    cannot be asked)."""
+    try:
+        exists = subprocess.run(
+            ["buildkite-agent", "meta-data", "exists", key], check=False, timeout=60
+        )
+        if exists.returncode != 0:
+            return None
+        result = subprocess.run(
+            ["buildkite-agent", "meta-data", "get", key],
+            check=False,
+            timeout=60,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _step_outcome(step_key: str) -> str:
+    """The step's outcome ("passed", "hard_failed", ...), or "" while it has
+    none or when the agent cannot tell."""
+    try:
+        result = subprocess.run(
+            ["buildkite-agent", "step", "get", "outcome", "--step", step_key],
+            check=False,
+            timeout=60,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _keys_from_meta_data(value: str) -> FrozenSet[str]:
+    return frozenset(key for key in value.split(",") if key)
+
+
+def images_from_step(
+    step_key: str, steps: List[Step], output_dir: str
+) -> FrozenSet[str]:
+    """The image keys the images step uploaded, for bootstrap to leave out of
+    its pipeline. Waits for the step to record them. If it finishes without
+    recording, or has not by IMAGES_STEP_TIMEOUT_SECONDS, bootstrap uploads
+    the images itself (a later upload of the same keys by the images step is
+    then rejected, which fails only that step's upload); if that upload fails
+    because the images step got there first, its record says so."""
+    waited = 0.0
+    while True:
+        value = _get_meta_data(EARLY_IMAGES_META_KEY)
+        if value is not None:
+            keys = _keys_from_meta_data(value)
+            print(
+                f"The images step uploaded: {', '.join(sorted(keys))}"
+                if keys
+                else "The images step uploaded no images; they go up with the pipeline"
+            )
+            return keys
+        if _step_outcome(step_key) or waited >= IMAGES_STEP_TIMEOUT_SECONDS:
+            break
+        time.sleep(IMAGES_STEP_POLL_SECONDS)
+        waited += IMAGES_STEP_POLL_SECONDS
+    print(f"No record from the images step {step_key}: uploading the images here")
+    keys = upload_image_steps_early(steps, output_dir)
+    if keys:
+        return keys
+    value = _get_meta_data(EARLY_IMAGES_META_KEY)
+    return _keys_from_meta_data(value) if value is not None else frozenset()
+
+
 def upload_image_steps_early(steps: List[Step], output_dir: str) -> FrozenSet[str]:
-    """Upload the image build steps before the rest of the pipeline is
-    generated, and return their keys.
+    """Upload the early image builds (EARLY_IMAGE_KEYS) before the rest of the
+    pipeline is generated, and return their keys.
 
     The test selector takes minutes per build, and the image builds wait for
     the pipeline upload that follows it although they never depend on its
