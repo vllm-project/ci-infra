@@ -5,21 +5,17 @@ and writes them to DEFERRED_FILE instead, next to a copy of this script, both
 uploaded as artifacts of the bootstrap job. The pipeline gets one input step
 listing them as checkboxes under their group names, and a job behind it that runs this script: it uploads the jobs
 picked in the input, with the deferred jobs they depend on, and a new input
-step for whatever is left, so more can be picked later. A picked sharded job
-also gets a coverage job of its own: the pipeline's one skips deferred steps,
-so nothing would check its shards ran every test otherwise.
+step for whatever is left, so more can be picked later.
 
 Runs on a plain CPU agent, so it uses the standard library only.
 """
 
-import base64
 import json
 import os
 import re
 import subprocess
 import sys
-import zlib
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 DEFERRED_DIR = "deferred"
 DEFERRED_FILE = "deferred_steps.json"
@@ -37,22 +33,9 @@ GROUP = ":heavy_plus_sign: Run more jobs"
 # blank one ("can't be blank"), whitespace included, so a zero-width space.
 NO_LABEL = "\u200b"
 
-
-# The pipeline's coverage job for the steps it kept is "runtime-shard-coverage"
-# (shard_coverage_step in buildkite_step.py); each round's job adds its round
-# number so it clashes with neither that one nor another round's. The key is
-# also the job's annotation context: the coverage script annotates under
-# BUILDKITE_STEP_KEY.
-COVERAGE_KEY = "runtime-shard-coverage"
-PLAN_ENV = "RUNTIME_SHARD_PLAN"
-COVERAGE_STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
-
-# Polls the sharded steps' states until every one has finished, retries
-# included; only the coverage job's own timeout bounds the wait, so a build
-# generated long before its shards run cannot outlive a generation-time
-# deadline. The pipeline's own coverage job uses the same string
-# (buildkite_step.py imports it), so the two paths cannot drift. `$$`: a bare
-# `$` would be interpolated at upload time, in the bootstrap's environment.
+# Shared with buildkite_step.py's coverage job. Poll through automatic retries;
+# only that job's own timeout bounds the wait, not a generation-time deadline.
+# `$$` keeps these variables for the uploaded job rather than the bootstrap.
 COVERAGE_WAIT = (
     "while :; do "
     'pending=""; '
@@ -65,9 +48,6 @@ COVERAGE_WAIT = (
     "sleep 30; "
     "done"
 )
-
-# A round's shards start behind its upload, so the wait can be a long one; the
-# pipeline's own coverage job gets the same.
 COVERAGE_TIMEOUT_MINUTES = 210
 
 
@@ -208,93 +188,6 @@ def _grouped(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [{"group": group, "steps": steps} for group, steps in groups.items()]
 
 
-def _owners(planned: Dict[str, Any]) -> List[int]:
-    """The shards that run any of a planned command's tests."""
-    shards = set(planned["files"].values())
-    for split in planned["split"].values():
-        shards.update(split["shards"].values())
-    return sorted(shards)
-
-
-def coverage_step(
-    entries: List[Dict[str, Any]], round_number: int, queue: str
-) -> Optional[Dict[str, Any]]:
-    """The job that checks the picked sharded steps ran every test, or None
-    when no picked step is sharded.
-
-    Same check as the pipeline's own coverage job: the same script over the
-    same artifacts the shards upload, fetched from VLLM_CI_BRANCH the same
-    way, hard-failing, and waiting the same way (COVERAGE_WAIT, shared with
-    buildkite_step.py). It waits on the picked steps' prerequisites with
-    allow_dependency_failure, not on the shards themselves: a cancelled or
-    timed-out shard would end this job waiting_failed, and an automatic retry
-    would start behind it. The command polls the shards' states instead,
-    through their retries, bounded only by this job's own timeout; a shard
-    that never finished is one of the things the check reports.
-
-    Args:
-        entries: The picked entries, each {"group": ..., "step": ...}.
-        round_number: This selection's round, for the job's key.
-        queue: The agent queue to run on.
-
-    Returns:
-        The job as a pipeline step, or None.
-    """
-    steps = {}
-    depends_on = []
-    for entry in entries:
-        packed = (entry["step"].get("env") or {}).get(PLAN_ENV)
-        if not packed:
-            continue
-        plan = json.loads(zlib.decompress(base64.b64decode(packed)))
-        key = entry["step"]["key"]
-        steps[key] = [
-            {
-                "position": planned["position"],
-                "label": planned["label"],
-                "fallback": planned["fallback"],
-                "owners": _owners(planned),
-                # The comparison keeps a soft-failing step's failures a
-                # warning rather than failing the build on them.
-                "soft_fail": bool(entry["step"].get("soft_fail")),
-            }
-            for planned in plan["commands"]
-        ]
-    if not steps:
-        return None
-    for entry in entries:
-        if entry["step"]["key"] not in steps:
-            continue
-        for dependency in entry["step"].get("depends_on") or []:
-            # A shard is never a prerequisite here, only what it waits on.
-            if dependency not in steps and dependency not in depends_on:
-                depends_on.append(dependency)
-    branch = os.getenv("VLLM_CI_BRANCH") or "main"
-    url = (
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/pipeline_generator/runtime_shard_coverage.py"
-    )
-    script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
-    return {
-        "label": ":mag: Check every test ran",
-        "key": f"{COVERAGE_KEY}-{round_number}",
-        "env": {
-            COVERAGE_STEPS_ENV: json.dumps(steps),
-            "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
-        },
-        "agents": {"queue": queue},
-        "commands": [
-            COVERAGE_WAIT,
-            f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
-            f" && python3 {script}",
-        ],
-        "depends_on": depends_on,
-        "allow_dependency_failure": True,
-        "soft_fail": False,
-        "timeout_in_minutes": COVERAGE_TIMEOUT_MINUTES,
-    }
-
-
 def _meta_data_keys() -> Set[str]:
     return set(
         subprocess.run(
@@ -341,9 +234,6 @@ def main(argv: List[str]) -> None:
     selected, remaining = pick(entries, picked)
 
     groups = _grouped(selected)
-    coverage = coverage_step(selected, round_number, deferred["queue"])
-    if coverage:
-        groups.append(coverage)
     if remaining:
         groups.append(
             more_jobs_group(
