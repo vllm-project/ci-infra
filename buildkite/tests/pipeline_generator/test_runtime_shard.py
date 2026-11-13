@@ -2192,7 +2192,8 @@ def test_the_first_shard_records_the_whole_command_and_each_what_it_ran(tmp_path
     assert (first["step"], first["position"], first["shard"]) == ("k", 0, 0)
     assert first["retry"] == 2 and first["finished"] is True
     assert first["finished_at"] > 1_000_000_000
-    # It collected the other shard's file but did not run its test.
+    # Its inventory subprocess imported the other shard's file; the shard's own
+    # run did not, and did not run its test.
     assert (tmp_path / "tests" / "imported_b").exists()
     assert _ran(run.stdout) == shown[:2]
 
@@ -2204,12 +2205,49 @@ def test_the_first_shard_records_the_whole_command_and_each_what_it_ran(tmp_path
     assert _ran(run.stdout) == shown[2:]
 
 
-def test_only_the_first_shard_imports_other_shards_files(tmp_path):
+def test_the_recording_shards_run_does_not_import_other_shards_files(tmp_path):
+    """The recording shard lists the command's tests from a separate pytest it
+    starts, so an import side effect of another shard's file cannot reach this
+    shard's own tests."""
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": (
+                "import os\n"
+                "def test_1():\n"
+                "    assert 'OTHER_SHARD_IMPORTED' not in os.environ\n"
+            ),
+            "pkg/test_b.py": (
+                "import os\n"
+                "os.environ['OTHER_SHARD_IMPORTED'] = '1'\n"
+                "def test_1(): pass\n"
+            ),
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 0, run.stdout
+    assert _ran(run.stdout) == ["pkg/test_a.py::test_1"]
+    # The expected list still covers the whole command, and the inventory's
+    # pytest wrote no record of its own.
+    assert record["expected"] == [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    assert [p.name for p in (tmp_path / "records").rglob("*.json")] == ["0.json"]
+
+
+def test_only_the_recording_shards_inventory_covers_other_shards_files(tmp_path):
     _project(tmp_path, COVERED_FILES)
-    _covered_run(tmp_path, 1, "job-1", fallback=1)  # shard 2 is the command's first
+    _, first = _covered_run(tmp_path, 1, "job-1", fallback=1)  # shard 2 records
+    assert first["expected"] == [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_a.py::test_2",
+        "tests/pkg/test_b.py::test_1",
+    ]
     assert (tmp_path / "tests" / "imported_b").exists()
     (tmp_path / "tests" / "imported_b").unlink()
-    # And shard 1 is then an ordinary shard: test_b.py is another shard's file.
+    # And shard 1 is then an ordinary shard: test_b.py is another shard's file,
+    # and no inventory runs here.
     run, record = _covered_run(tmp_path, 0, "job-0", fallback=1)
     assert record["expected"] is None and not (tmp_path / "tests" / "imported_b").exists()
     assert run.returncode == 0
@@ -2224,16 +2262,19 @@ def test_no_coverage_directory_means_no_records_and_no_extra_collection(tmp_path
     assert not (tmp_path / "records").exists()
 
 
-def test_a_broken_file_of_another_shard_does_not_stop_the_first_shards_tests(tmp_path):
+def test_an_inventory_that_cannot_collect_leaves_the_command_unverified(tmp_path):
+    """A file of another shard that cannot be imported fails the inventory's
+    collection, so the expected list stays unavailable: the coverage check
+    reports the command as unverified rather than compare against a partial
+    list. The recording shard's own tests are unaffected, and pass."""
     _project(
         tmp_path,
         {"pkg/test_a.py": "def test_1(): pass\n", "pkg/test_b.py": "raise ValueError\n"},
     )
     run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 0, run.stdout  # test_b.py is shard 2's
+    assert record["expected"] is None
     assert record["ran"] == ["tests/pkg/test_a.py::test_1"] and record["finished"] is True
-    # The run stays red, as it would unsharded.
-    assert run.returncode != 0
-    assert "ValueError" in run.stdout
 
 
 def test_a_collection_error_in_a_later_shard_still_stops_it(tmp_path):
