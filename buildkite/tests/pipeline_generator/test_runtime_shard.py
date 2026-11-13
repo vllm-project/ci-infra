@@ -2663,23 +2663,21 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert job.label == ":mag: Check every test ran" and (
         job.timeout_in_minutes == buildkite_step.COLLECT_AFTER_MINUTES + 30
     )
+    assert job.retry == buildkite_step.ensure_infra_failure_retry(None)
     script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
-    url = (
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/main/"
-        "buildkite/pipeline_generator/runtime_shard_coverage.py"
-    )
     assert job.commands == [
         "while :; do "
         'pending=""; '
         "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
         's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-        'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
+        'case "$$s" in finished|ignored|*_failed|timed_out|canceled|cancelled|expired|broken|skipped) ;; '
+        '*) pending="$$k"; break;; esac; '
         "done; "
-        '[ -z "$$pending" ] && { echo "every sharded step has finished"; break; }; '
+        '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
         'echo "waiting on $$pending ($${s:-state unknown})"; '
         "sleep 30; "
         "done",
-        f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}" && python3 {script}',
+        f'printf \'%s\' "$$RUNTIME_SHARD_COVERAGE_SCRIPT" > {script} && python3 {script}',
     ]
     # And their records land where each job can reach the checkout.
     coverage_setup = rs.shard_job_setup("/workdir")[-1]
@@ -2730,18 +2728,46 @@ def test_coverage_job_leaves_out_deferred_steps_and_builds_without_shards(
     assert job.depends_on == ["image-build"]  # once, though both wait on it
 
 
-def test_coverage_job_fetches_the_script_from_the_staged_branch(
-    fake_global_config, checkout, monkeypatch
-):
+def test_coverage_job_embeds_the_generator_script(fake_global_config, checkout):
     fake_global_config["run_all"] = True
-    monkeypatch.setenv("VLLM_CI_BRANCH", "agent/x")
     [step] = _render(_step(automatic_shard=True))
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
     job = buildkite_step.shard_coverage_step([group])
-    assert "/ci-infra/agent/x/buildkite/pipeline_generator/runtime_shard_coverage.py" in (
-        job.commands[1]
-    )
+    with open(
+        os.path.join(
+            os.path.dirname(buildkite_step.__file__), "runtime_shard_coverage.py"
+        )
+    ) as f:
+        assert job.env["RUNTIME_SHARD_COVERAGE_SCRIPT"] == f.read()
+    assert "raw.githubusercontent.com" not in job.commands[1]
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_PREMERGE.value
     fake_global_config["branch"] = "main"
     job = buildkite_step.shard_coverage_step([group])
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_POSTMERGE.value
+
+
+def test_coverage_wait_stops_when_shards_cannot_run(
+    fake_global_config, checkout, tmp_path
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    wait = buildkite_step.shard_coverage_step([group]).commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text('#!/bin/sh\nprintf "%s\\n" "$STEP_STATE"\n')
+    agent.chmod(0o755)
+    for state in ("waiting_failed", "timed_out", "canceled"):
+        run = subprocess.run(
+            ["bash", "-c", wait],
+            env=dict(
+                os.environ,
+                PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+                CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+                STEP_STATE=state,
+            ),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        assert run.returncode == 0
+        assert run.stdout == "every sharded step has stopped\n"

@@ -33,23 +33,6 @@ GROUP = ":heavy_plus_sign: Run more jobs"
 # blank one ("can't be blank"), whitespace included, so a zero-width space.
 NO_LABEL = "\u200b"
 
-# Shared with buildkite_step.py's coverage job. Poll through automatic retries;
-# only that job's own timeout bounds the wait, not a generation-time deadline.
-# `$$` keeps these variables for the uploaded job rather than the bootstrap.
-COVERAGE_WAIT = (
-    "while :; do "
-    'pending=""; '
-    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-    'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
-    "done; "
-    '[ -z "$$pending" ] && { echo "every sharded step has finished"; break; }; '
-    'echo "waiting on $$pending ($${s:-state unknown})"; '
-    "sleep 30; "
-    "done"
-)
-COVERAGE_TIMEOUT_MINUTES = 210
-
 
 def _round_key(prefix: str, round_number: int) -> str:
     return prefix if round_number == 1 else f"{prefix}-{round_number}"

@@ -60,7 +60,8 @@ def compare(
 
     Args:
         steps: The step key to its planned commands, from the generator.
-        records: Every record the build's shards uploaded.
+        records: Every record the build's shards uploaded. Their planned IDs
+            attribute missed tests to finished or unfinished shards when known.
         build_id: The current build's ID. When given, only records naming it
             count: a record from another build, or one old enough to carry no
             build ID, is stale evidence and ignored. When None, every record
@@ -69,8 +70,10 @@ def compare(
     Returns:
         One entry per command: the step, label, `soft_fail` (whether the step
         may fail without failing the build), `tests` (how many it should
-        run), `missed` (test IDs), `unfinished` (shards that recorded they
-        didn't finish), `not_run` (test IDs lost to them), `duplicated` (each
+        run), `missed` (test IDs from a finished shard or with no possible
+        unfinished owner), `unfinished` (shards that recorded they didn't
+        finish), `not_run` (test IDs assigned to unfinished shards or whose
+        ownership is unknown), `duplicated` (each
         test ID that more than one finished shard ran, to those shards) and
         `unverified` (why it can't be checked, or None). A shard that left no
         record makes its command unverified: which tests it owned can't be
@@ -86,15 +89,26 @@ def compare(
             ran = set()
             unfinished = []
             missing = []  # shards that left no record at all
+            finished_planned = set()
+            unfinished_planned = set()
+            unknown_unfinished_plan = False
             shards_of = {}  # test ID -> the finished shards that ran it
             for shard in command["owners"]:
                 record = latest.get((step_key, position, shard))
                 if record is None:
                     missing.append(shard)
-                elif not record["finished"]:
+                    continue
+                planned = record.get("planned")
+                if not record["finished"]:
                     unfinished.append(shard)
+                    if isinstance(planned, list):
+                        unfinished_planned.update(planned)
+                    else:
+                        unknown_unfinished_plan = True
                 else:
                     ran.update(record["ran"])
+                    if isinstance(planned, list):
+                        finished_planned.update(planned)
                     for nodeid in set(record["ran"]):
                         shards_of.setdefault(nodeid, []).append(shard)
             # The expected list is written before any test runs, so a shard
@@ -127,9 +141,16 @@ def compare(
                 unverified.append(f"{noun} {shards} recorded nothing")
             if unverified:
                 result["unverified"] = "; ".join(unverified)
+            elif unfinished:
+                for nodeid in sorted(set(expected) - ran):
+                    if nodeid in finished_planned:
+                        result["missed"].append(nodeid)
+                    elif nodeid in unfinished_planned or unknown_unfinished_plan:
+                        result["not_run"].append(nodeid)
+                    else:
+                        result["missed"].append(nodeid)
             else:
-                not_ran = sorted(set(expected) - ran)
-                result["not_run" if unfinished else "missed"] = not_ran
+                result["missed"] = sorted(set(expected) - ran)
             results.append(result)
     return results
 
@@ -168,9 +189,12 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     lines = []
     if missed:
         count = sum(len(result["missed"]) for result in missed)
-        lines.append(
-            f"### :x: {count} tests ran in no shard, though every shard finished"
-        )
+        if unfinished:
+            lines.append(f"### :x: {count} tests ran in no finished shard")
+        else:
+            lines.append(
+                f"### :x: {count} tests ran in no shard, though every shard finished"
+            )
         for result in missed:
             lines.append(f"**{result['step']}**, {result['label']}:")
             lines.extend(_ids(result["missed"]))

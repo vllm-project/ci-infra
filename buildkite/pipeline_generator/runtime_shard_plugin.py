@@ -203,7 +203,7 @@ class ShardPlugin:
         # (_expected_inventory), on the job's hardware, at the job's commit.
         self.records_expected = bool(self.coverage_dir) and shard == self.fallback
         self.expected = None
-        self.planned = []  # the tests kept here
+        self.planned = None  # tests kept here after collection; None if unknown
         self.ran = set()  # the tests pytest reported on here
 
     def pytest_ignore_collect(self, collection_path, config):

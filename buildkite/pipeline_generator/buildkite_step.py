@@ -39,7 +39,6 @@ from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_amd_enabled, kernrec_enabled
 import runtime_shard
-import unblock_jobs
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -816,6 +815,24 @@ COLLECT_WAIT = (
     "done"
 )
 
+# Polls each sharded step until every one reaches a terminal state, including
+# a failed dependency that means it cannot run. Only the job's timeout bounds
+# the wait, including shard queue time; there is no generation-time deadline.
+COVERAGE_WAIT = (
+    "while :; do "
+    'pending=""; '
+    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    'case "$$s" in finished|ignored|*_failed|timed_out|canceled|cancelled|expired|broken|skipped) ;; '
+    '*) pending="$$k"; break;; esac; '
+    "done; "
+    '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
+    'echo "waiting on $$pending ($${s:-state unknown})"; '
+    "sleep 30; "
+    "done"
+)
+COVERAGE_TIMEOUT_MINUTES = COLLECT_AFTER_MINUTES + 30
+
 
 def _collect_step(
     groups: "List[BuildkiteGroupStep]",
@@ -909,13 +926,11 @@ def shard_coverage_step(
     when nothing in this build is sharded.
 
     Fails when a test is missed or coverage cannot be proven, so a successful
-    shard cannot hide a missing record. Waits like a recorder's collect step,
-    on what the shards wait on and then on their state: a timed-out or
-    cancelled shard would end a step depending on it waiting_failed, and a
-    shard that didn't finish is one of the things this job reports. The state
-    wait (unblock_jobs.COVERAGE_WAIT) has no generation-time deadline: a build
-    generated long before its shards run must still wait for them, so only
-    this job's own timeout bounds it, including their queue time.
+    shard cannot hide a missing record. The comparison source is embedded at
+    generation, so the job runs the same revision as the plugin without a
+    runtime download. The wait stops on every terminal shard state, including
+    failed dependencies, and only this job's timeout bounds it, including
+    shard queue time.
     """
     steps = {}
     sharded = []
@@ -941,11 +956,11 @@ def shard_coverage_step(
             ]
     if not steps:
         return None
-    branch = os.getenv("VLLM_CI_BRANCH") or "main"
-    url = (
-        "https://raw.githubusercontent.com/vllm-project/ci-infra/"
-        f"{branch}/buildkite/pipeline_generator/runtime_shard_coverage.py"
+    source_path = os.path.join(
+        os.path.dirname(__file__), "runtime_shard_coverage.py"
     )
+    with open(source_path) as f:
+        coverage_source = f.read()
     script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
@@ -959,17 +974,18 @@ def shard_coverage_step(
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
             "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
+            "RUNTIME_SHARD_COVERAGE_SCRIPT": coverage_source,
         },
         agents={"queue": queue.value},
         commands=[
-            unblock_jobs.COVERAGE_WAIT,
-            f'curl -sSfL --retry 3 --max-time 60 -o {script} "{url}"'
-            f" && python3 {script}",
+            COVERAGE_WAIT,
+            f'printf \'%s\' "$$RUNTIME_SHARD_COVERAGE_SCRIPT" > {script} && python3 {script}',
         ],
         depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=False,
-        timeout_in_minutes=unblock_jobs.COVERAGE_TIMEOUT_MINUTES,
+        timeout_in_minutes=COVERAGE_TIMEOUT_MINUTES,
+        retry=ensure_infra_failure_retry(None),
     )
 
 

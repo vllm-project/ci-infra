@@ -16,6 +16,7 @@ def _record(
     retry=0,
     at=1.0,
     build_id=None,
+    planned=None,
 ):
     record = {
         "step": "k",
@@ -25,7 +26,7 @@ def _record(
         "finished": finished,
         "finished_at": at,
         "expected": expected,
-        "planned": ran,
+        "planned": ran if planned is None else planned,
         "ran": ran,
     }
     if build_id is not None:
@@ -79,7 +80,7 @@ def test_a_test_with_any_outcome_counts_because_ran_is_any_report():
 def test_an_unfinished_shard_is_apart_from_misses_but_fails_closed():
     records = [
         _record(0, ["a"], expected=["a", "b"]),
-        _record(1, [], finished=False),
+        _record(1, [], finished=False, planned=["b"]),
     ]
     [result] = coverage.compare(STEPS, records)
     assert result["missed"] == [] and result["unfinished"] == [1]
@@ -91,6 +92,30 @@ def test_an_unfinished_shard_is_apart_from_misses_but_fails_closed():
         "### Shards that didn't finish, so these tests may not have run\n"
         "**k**, Command (1/1): shard 2\n- `b`"
     )
+
+
+def test_a_finished_shards_miss_is_not_hidden_by_an_unfinished_shard():
+    records = [
+        _record(0, [], expected=["a", "b"], planned=["a"]),
+        _record(1, [], finished=False, planned=["b"]),
+    ]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["missed"] == ["a"] and result["not_run"] == ["b"]
+    assert result["unfinished"] == [1]
+    style, text = coverage.report([result])
+    assert style == "error"
+    assert text.startswith("### :x: 1 tests ran in no finished shard\n")
+
+
+def test_an_unknown_unfinished_plan_does_not_invent_a_definite_miss():
+    unknown = _record(1, [], finished=False)
+    unknown["planned"] = None
+    records = [
+        _record(0, [], expected=["a", "b"], planned=[]),
+        unknown,
+    ]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["missed"] == [] and result["not_run"] == ["a", "b"]
 
 
 def test_a_shard_with_no_record_fails_closed():
@@ -119,7 +144,10 @@ def test_a_missing_record_next_to_an_unfinished_shard_hides_its_not_run():
 
 
 def test_a_dead_first_shard_still_gives_its_list():
-    records = [_record(0, [], expected=["a", "b"], finished=False), _record(1, ["b"])]
+    records = [
+        _record(0, [], expected=["a", "b"], finished=False, planned=["a", "b"]),
+        _record(1, ["b"]),
+    ]
     [result] = coverage.compare(STEPS, records)
     assert result["unfinished"] == [0] and result["not_run"] == ["a"]
 
@@ -242,7 +270,7 @@ def test_a_soft_fail_step_unfinished_shard_is_warning_only():
     # it reads as a warning, matching the build's soft-fail semantics.
     records = [
         _record(0, ["a"], expected=["a", "b"]),
-        _record(1, [], finished=False),
+        _record(1, [], finished=False, planned=["b"]),
     ]
     [result] = coverage.compare(SOFT_STEPS, records)
     assert result["unfinished"] == [1] and result["not_run"] == ["b"]
@@ -339,8 +367,14 @@ def test_a_hard_steps_gap_stays_an_error_next_to_a_soft_fail_steps_gap():
         "hard": [{"position": 0, "label": "Hard", "fallback": 0, "owners": [0]}],
     }
     records = [
-        dict(_record(0, [], expected=["a"], finished=False), step="soft"),
-        dict(_record(0, [], expected=["a"], finished=False), step="hard"),
+        dict(
+            _record(0, [], expected=["a"], finished=False, planned=["a"]),
+            step="soft",
+        ),
+        dict(
+            _record(0, [], expected=["a"], finished=False, planned=["a"]),
+            step="hard",
+        ),
     ]
     soft, hard = coverage.compare(steps, records)
     assert soft["unfinished"] == [0] and hard["unfinished"] == [0]
@@ -358,7 +392,7 @@ def test_a_list_of_exactly_the_cap_has_no_more_line():
 
 def test_several_unfinished_shards_are_named_together():
     records = [
-        _record(0, [], expected=["a"], finished=False),
+        _record(0, [], expected=["a"], finished=False, planned=["a"]),
         _record(1, [], finished=False),
     ]
     [result] = coverage.compare(STEPS, records)
