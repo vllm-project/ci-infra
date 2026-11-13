@@ -1081,6 +1081,16 @@ def test_generator_ignores_the_flag_where_it_cannot_shard(
     assert checkout == []
 
 
+
+def test_generator_shards_an_arm_cpu_step_in_the_arm64_cpu_image(
+    fake_global_config, checkout
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(device="arm_cpu", automatic_shard=True))
+    assert step.parallelism == 3
+    [plugin] = step.plugins
+    assert plugin["docker#v5.2.0"]["image"] == "test-image-arm64-cpu"
+
 def test_generator_shards_on_a_recording_build_too(
     fake_global_config, checkout, monkeypatch
 ):

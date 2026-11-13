@@ -16,6 +16,7 @@ from step import Step
         docker_plugin.h200_35gb_plugin_template,
         docker_plugin.h200_plugin_template,
         docker_plugin.b200_plugin_template,
+        docker_plugin.arm_cpu_plugin_template,
     ],
 )
 def test_standard_docker_templates_forward_buildkite_analytics_token(template):
@@ -65,3 +66,16 @@ def test_standard_k8s_templates_inject_buildkite_analytics_token(template):
             }
         },
     }
+
+
+def test_arm_cpu_plugin_has_no_gpus_and_mounts_the_agent_hf_cache(
+    fake_global_config,
+):
+    plugin = docker_plugin.get_docker_plugin(
+        Step(label="Arm CPU", device="arm_cpu"), "example/image:latest"
+    )
+
+    assert "gpus" not in plugin
+    assert plugin["volumes"] == [
+        "/var/lib/buildkite-agent/.cache/huggingface:/root/.cache/huggingface"
+    ]
