@@ -526,6 +526,11 @@ MIRROR_OVERRIDABLE = {
     # Listed, never honored: the generator passes the parent's parallelism, so
     # a mirror asking for its own is silently ignored upstream.
     "parallelism",
+    # Runtime sharding of the mirror's own tests (_runtime_shard_mode reads
+    # amd["automatic_shard"]): which tests run is unchanged, so selection needs
+    # nothing from it. Unlisted, preflight forced every sharded AMD mirror
+    # (179 on vllm/ci #100805, a two-mirror yaml edit).
+    "automatic_shard",
 }
 
 # The env var the generator reads. Absent means "your rules"; present means

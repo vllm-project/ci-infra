@@ -189,6 +189,9 @@ def test_every_mirror_key_the_generator_reads_is_modelled():
     keys = mirror_override_keys(
         buildkite_step.convert_group_step_to_buildkite_step,
         buildkite_step._get_amd_mirror_effective_step,
+        # Reads amd["automatic_shard"]; left out of the scan, the key went
+        # unmodelled and preflight forced every sharded AMD mirror.
+        buildkite_step._runtime_shard_mode,
     )
     # Guard the guard: an upstream rename would empty the scan, and an empty
     # set is a subset of anything.
