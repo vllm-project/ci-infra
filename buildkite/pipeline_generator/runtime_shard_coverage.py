@@ -9,8 +9,13 @@ miss (a test no shard ran although every shard finished), a shard that
 didn't finish (its tests may not have run, so they are listed apart from
 misses), and a command it cannot check (a shard left no record, or none
 recorded the test list). Yellow only for a test that two finished shards both
-ran: it costs a shard's time but loses no test. Standard library only: it runs
-on a small CPU agent, fetched as a single file.
+ran: it costs a shard's time but loses no test. A soft-fail step is allowed
+to fail, so its gaps in evidence (an unfinished shard, an unverified command)
+stay yellow too. A definite miss stays red, though, since that means the
+sharding itself is broken. And only the current build's records count: a
+record from another build (or one too old to name its build) is stale
+evidence, ignored when the build's ID is known. Standard library only: it
+runs on a small CPU agent, fetched as a single file.
 """
 
 import glob
@@ -45,16 +50,23 @@ def latest_records(records: List[Dict[str, Any]]) -> Dict[Tuple, Dict[str, Any]]
 
 
 def compare(
-    steps: Dict[str, List[Dict[str, Any]]], records: List[Dict[str, Any]]
+    steps: Dict[str, List[Dict[str, Any]]],
+    records: List[Dict[str, Any]],
+    build_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Compare what each sharded command should run with what its shards ran.
 
     Args:
         steps: The step key to its planned commands, from the generator.
         records: Every record the build's shards uploaded.
+        build_id: The current build's ID. When given, only records naming it
+            count: a record from another build, or one old enough to carry no
+            build ID, is stale evidence and ignored. When None, every record
+            counts (how local runs and older callers behave).
 
     Returns:
-        One entry per command: the step, label, `tests` (how many it should
+        One entry per command: the step, label, `soft_fail` (whether the step
+        may fail without failing the build), `tests` (how many it should
         run), `missed` (test IDs), `unfinished` (shards that recorded they
         didn't finish), `not_run` (test IDs lost to them), `duplicated` (each
         test ID that more than one finished shard ran, to those shards) and
@@ -62,6 +74,8 @@ def compare(
         record makes its command unverified: which tests it owned can't be
         known, so they are neither missed nor not_run.
     """
+    if build_id is not None:
+        records = [record for record in records if record.get("build_id") == build_id]
     latest = latest_records(records)
     results = []
     for step_key, commands in steps.items():
@@ -88,6 +102,7 @@ def compare(
             result = {
                 "step": step_key,
                 "label": command["label"],
+                "soft_fail": bool(command.get("soft_fail", False)),
                 "tests": len(expected or []),
                 "missed": [],
                 "unfinished": unfinished,
@@ -138,7 +153,9 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         (its style: error, warning or success; its markdown). Error unless
         every test is proven run: a miss, an unfinished shard and a command
         that can't be checked all fail the job; only duplicates stay a
-        warning.
+        warning. A soft-fail step is the exception: its build already allows
+        failure, so its unfinished and unverified evidence warns. A definite
+        miss still fails, since the sharding itself is then broken.
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
@@ -158,7 +175,10 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         lines.append("### Shards that didn't finish, so these tests may not have run")
         for result in unfinished:
             shards = ", ".join(str(shard + 1) for shard in result["unfinished"])
-            lines.append(f"**{result['step']}**, {result['label']}: shard {shards}")
+            soft = " (soft-fail step)" if result["soft_fail"] else ""
+            lines.append(
+                f"**{result['step']}**, {result['label']}: shard {shards}{soft}"
+            )
             lines.extend(_ids(result["not_run"]))
     if duplicated:
         # Costs a shard's time and can hide order-dependent tests, but loses none.
@@ -169,11 +189,15 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     if unverified:
         lines.append("### Couldn't check")
         for result in unverified:
+            soft = " (soft-fail step)" if result["soft_fail"] else ""
             lines.append(
-                f"**{result['step']}**, {result['label']}: {result['unverified']}"
+                f"**{result['step']}**, {result['label']}: {result['unverified']}{soft}"
             )
     if lines:
-        style = "error" if missed or unfinished or unverified else "warning"
+        blocking = [
+            result for result in unfinished + unverified if not result["soft_fail"]
+        ]
+        style = "error" if missed or blocking else "warning"
         return style, "\n".join(lines)
     steps = len({result["step"] for result in results})
     return "success", f"Every test ran: {tests} tests across {steps} sharded steps."
@@ -206,7 +230,8 @@ def main() -> int:
             env=dict(os.environ, BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS="true"),
         )
         records = _read_records(folder)
-    results = compare(steps, records)
+    # Without the variable (a local run) every record counts, as before.
+    results = compare(steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID"))
     for result in results:
         for name in ("missed", "not_run"):
             for nodeid in result[name]:
