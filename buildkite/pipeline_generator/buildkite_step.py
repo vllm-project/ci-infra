@@ -1259,6 +1259,7 @@ def _shard_at_generation(
         result is None
         or result["overBudget"]
         or runtime_shard.setup_too_long(result)
+        or runtime_shard.snapshot_stale(result)
     ):
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
