@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 
 import pytest
@@ -1853,6 +1854,9 @@ def test_the_first_shard_records_the_whole_command_and_each_what_it_ran(tmp_path
 
     run, first = _covered_run(tmp_path, 0, "job-0", retry=2)
     assert run.returncode == 0, run.stdout
+    # The inventory's pytest runs quietly: none of its output leaks into the
+    # shard's own log.
+    assert run.stdout.count("test session starts") == 1
     assert first["expected"] == every
     assert first["ran"] == every[:2] and first["planned"] == every[:2]
     assert (first["step"], first["position"], first["shard"]) == ("k", 0, 0)
@@ -1941,10 +1945,80 @@ def test_an_inventory_that_cannot_collect_leaves_the_command_unverified(tmp_path
     assert run.returncode == 0, run.stdout  # test_b.py is shard 2's
     assert record["expected"] is None
     assert record["ran"] == ["tests/pkg/test_a.py::test_1"] and record["finished"] is True
+    assert (
+        "runtime-shard: couldn't collect the command's full test list (exit 1); "
+        "the coverage check will report the command unverified\n"
+    ) in run.stderr
+
+
+def test_the_inventory_is_the_tests_the_command_selects(tmp_path):
+    """The command's -m/-k deselection applies in the inventory's collection
+    too: the expected list is what the command selects, not every test in its
+    files."""
+    _project(tmp_path, COVERED_FILES)  # test_a: test_1, test_2; test_b: test_1
+    run, record = _covered_run(tmp_path, 0, "job-0", command="pytest -v pkg -k test_1")
+    assert run.returncode == 0, run.stdout
+    assert record["expected"] == [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    assert record["ran"] == ["tests/pkg/test_a.py::test_1"]
+
+
+def test_an_inventory_subprocess_that_cannot_start_leaves_the_shard_running(tmp_path):
+    """If the inventory's pytest cannot even start (spawning it raises), the
+    shard's own tests still run and pass, and the expected list stays
+    unavailable so the coverage check reports the command unverified."""
+    _project(tmp_path, COVERED_FILES)
+    (tmp_path / "tests" / "break_inventory.py").write_text(
+        "import runtime_shard_plugin\n"
+        "def pytest_configure(config):\n"
+        "    def dies(*args, **kwargs):\n"
+        "        raise OSError('out of processes')\n"
+        "    runtime_shard_plugin.subprocess.run = dies\n"
+    )
+    command = "pytest -v pkg"
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "key": "k", "commands": [_command_plan(command, "C", files)]}
+    env = {
+        "RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records"),
+        "BUILDKITE_JOB_ID": "job-0",
+    }
+    run = _run(
+        tmp_path, command, plan, 0, wrapper_args=("-p", "break_inventory"), extra_env=env
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert _ran(run.stdout) == ["pkg/test_a.py::test_1", "pkg/test_a.py::test_2"]
+    record = json.loads((tmp_path / "records" / "job-0" / "0.json").read_text())
+    assert record["expected"] is None and record["finished"] is True
+    assert "couldn't collect the command's full test list" in run.stderr
+
+
+def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsys):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+
+    def dies(*args, **kwargs):
+        raise OSError("out of processes")
+
+    monkeypatch.setattr(plugin.subprocess, "run", dies)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"])
+    )
+    assert shard._expected_inventory(config) is None
+    assert capsys.readouterr().err == (
+        "runtime-shard: couldn't collect the command's full test list "
+        "(out of processes); the coverage check will report the command "
+        "unverified\n"
+    )
 
 
 def test_a_collection_error_in_a_later_shard_still_stops_it(tmp_path):
-    # Only the recording shard continues; the file's own shard fails as before.
+    # The file's own shard fails as before; the recording shard's run never
+    # imports it (covered by the inventory tests above).
     _project(
         tmp_path,
         {"pkg/test_a.py": "def test_1(): pass\n", "pkg/test_b.py": "raise ValueError\n"},
