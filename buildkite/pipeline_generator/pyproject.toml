@@ -30,6 +30,7 @@ py-modules = [
     "runtime_shard_plugin",
     "unblock_jobs",
     "selector_gate",
+    "step_definitions",
 ]
 
 [tool.setuptools.packages.find]

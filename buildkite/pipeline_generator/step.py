@@ -36,6 +36,9 @@ class Step(BaseModel):
     # Plan this step's tests into shards from main's timings (runtime_shard.py).
     # Unset follows the pipeline config's automatic_shard_default.
     automatic_shard: Optional[bool] = None
+    # Set by read_steps_from_job_dir; _declared: the step lists its own yaml.
+    source_file: Optional[str] = Field(default=None, exclude=True)
+    source_file_declared: bool = Field(default=False, exclude=True)
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
@@ -90,6 +93,11 @@ def read_steps_from_job_dir(job_dir: str):
                 data = yaml.safe_load(f)
             group_depends_on = data.get("depends_on")
             file_steps = parse_steps_from_yaml(data)
+            for step in file_steps:
+                step.source_file = os.path.relpath(yaml_path)
+                step.source_file_declared = step.source_file in (
+                    step.source_file_dependencies or []
+                )
             if group_depends_on:
                 for step in file_steps:
                     if not step.depends_on:

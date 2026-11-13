@@ -498,6 +498,9 @@ KNOWN_STEP_FIELDS = {
     # `device`), so it cannot gate execution; forcing the step for it built
     # the Zen image on every PR.
     "agents",
+    # Set by the generator's loader, never written in yaml.
+    "source_file",
+    "source_file_declared",
 }
 
 # mirror.<hw> fields the generator honors (ci-infra buildkite_step.py).
