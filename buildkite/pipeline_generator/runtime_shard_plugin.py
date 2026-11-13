@@ -47,6 +47,12 @@ APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
 # Set by the recording shard on the pytest it starts to list the command's
 # tests: the path that run writes the list to.
 INVENTORY_ENV = "RUNTIME_SHARD_INVENTORY"
+# A recording shard's inventory collection is bounded: a hung collection
+# must not hang the shard's own run.
+INVENTORY_TIMEOUT_SECONDS = 300
+# A failed inventory prints only this much of its output: enough to name the
+# file that broke, not enough to bury the job's own log.
+INVENTORY_TAIL_LINES = 40
 
 
 def _pytest_python():
@@ -283,9 +289,23 @@ class ShardPlugin:
                     "--continue-on-collection-errors",
                 ],
                 env=env,
+                cwd=config.invocation_params.dir,
                 capture_output=True,
                 text=True,
+                timeout=INVENTORY_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired as error:
+            # A hung collection must not hang the shard's own run: no list,
+            # and the run goes on without it.
+            os.unlink(path)
+            print(
+                "runtime-shard: couldn't collect the command's full test list "
+                f"(timed out after {INVENTORY_TIMEOUT_SECONDS} seconds); the "
+                "coverage check will report the command unverified"
+                + _output_tail(error.output, error.stderr),
+                file=sys.stderr,
+            )
+            return None
         except OSError as error:
             # The spawn itself failed (say, the worker is out of processes):
             # no list, and the shard's own run must go on without it.
@@ -314,7 +334,7 @@ class ShardPlugin:
         print(
             "runtime-shard: couldn't collect the command's full test list "
             f"(exit {run.returncode}); the coverage check will report the "
-            "command unverified",
+            "command unverified" + _output_tail(run.stdout, run.stderr),
             file=sys.stderr,
         )
         return None
@@ -351,6 +371,9 @@ class ShardPlugin:
             "step": self.step_key,
             "position": self.position,
             "shard": self.shard,
+            # The build the record belongs to, so the coverage check can
+            # ignore records a stale job wrote; null off Buildkite.
+            "build_id": os.environ.get("BUILDKITE_BUILD_ID"),
             "retry": int(os.environ.get("BUILDKITE_RETRY_COUNT") or 0),
             "finished": finished,
             "finished_at": time.time(),
@@ -445,3 +468,17 @@ class ShardPlugin:
 
 def _plural(count, noun):
     return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _output_tail(stdout, stderr):
+    """The end of a failed inventory collection's output, bounded: pytest
+    names the file that broke at the end of its traceback."""
+    parts = []
+    for label, text in (("output", stdout), ("error output", stderr)):
+        if not text:
+            continue
+        lines = text.splitlines()
+        if len(lines) > INVENTORY_TAIL_LINES:
+            lines = ["..."] + lines[-INVENTORY_TAIL_LINES:]
+        parts.append(f"\n--- last lines of its {label} ---\n" + "\n".join(lines))
+    return "".join(parts)
