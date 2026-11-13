@@ -21,11 +21,13 @@ not look the same downstream.
 from __future__ import annotations
 
 import ast
+import re
 import io
 import subprocess
 import symtable
 import tokenize
 import types
+from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from inspect import CO_OPTIMIZED
@@ -93,6 +95,11 @@ class FileQuery:
     # its change must have executed (coverage/lines.py). A function absent
     # here is read at function grain.
     line_probes: dict[str, frozenset[int]] = field(default_factory=dict)
+    # Names standing in for changed Triton kernels: the launchers a row can
+    # hold. Drop evidence only, like a proxy file: a step that calls a
+    # launcher may never reach the changed kernel (another branch, another
+    # kernel), so it may keep a step but never adds one.
+    launcher_names: frozenset[str] = frozenset()
 
     @property
     def names(self) -> frozenset[str]:
@@ -445,6 +452,12 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
             placed, by = _platforms_reached(before, base_lines, after, head_lines)
             if placed and _resolves_alike(before, base_lines, after, head_lines, shown):
                 platform, guards = placed, by
+        launcher_names: frozenset[str] = frozenset()
+        if shown.endswith(".py") and not note:
+            changed_names = base_names | head_names
+            base_names = _via_triton_launchers(_read(repo, base, base_side), base_names)
+            head_names = _via_triton_launchers(_read(repo, head, head_side), head_names)
+            launcher_names = (base_names | head_names) - changed_names
         query.files.append(
             FileQuery(
                 path=shown,
@@ -458,6 +471,7 @@ def build(repo: Path, base: str, head: str | None = None) -> Query:
                 note=note,
                 platform=platform,
                 platform_guards=guards,
+                launcher_names=launcher_names,
             )
         )
     return query
@@ -1209,3 +1223,143 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# ---- Triton kernels ---------------------------------------------------------
+# A `@triton.jit` function is compiled for the GPU on its first launch and its
+# body never runs as Python, so no row can ever record it: every changed
+# kernel is a name no row holds, and an unknown name keeps every step that
+# reaches the file. What a row can hold is the Python that launches it,
+# `kernel[grid](...)`. So a changed kernel is read as its launchers in the same
+# file, and a kernel only other kernels call is read as theirs. A kernel with
+# no launcher in its own file keeps its own name, and the hold that comes with
+# it: its launcher's file may not be in the set a step is weighed on.
+
+_TRITON_DECORATORS = re.compile(r"(?:^|\.)(?:jit|autotune|heuristics)\b")
+
+
+def _is_triton_kernel(node: ast.AST) -> bool:
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return False
+    for dec in node.decorator_list:
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        text = ast.unparse(target)
+        if _TRITON_DECORATORS.search(text) and (
+            text.startswith(("triton.", "tl.")) or text in ("jit", "autotune", "heuristics")
+        ):
+            return True
+    return False
+
+
+def triton_launchers(source: str) -> dict[str, frozenset[str]]:
+    """Each top-level Triton kernel in `source` -> the qualnames of the Python
+    functions in the same file that launch it, directly or through the
+    kernels that call it. A launch inside a nested function names that
+    function and every function around it, which is never less than the
+    recorder saw run. Kernels nothing in the file launches are absent."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return {}
+    kernels = {n.name for n in tree.body if _is_triton_kernel(n)}
+    if not kernels:
+        return {}
+    launched_by: dict[str, set[str]] = defaultdict(set)  # kernel -> launcher qualnames
+    called_by: dict[str, set[str]] = defaultdict(set)  # kernel -> kernels calling it
+
+    def aliases_in(fn: ast.AST) -> dict[str, set[str]]:
+        """`fn_ = kernel_a` (or `kernel_a if c else kernel_b`) inside a
+        function: the local name launches whichever kernel it was bound to."""
+        out: dict[str, set[str]] = defaultdict(set)
+        for node in ast.walk(fn):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            bound = {
+                n.id for n in ast.walk(node.value) if isinstance(n, ast.Name) and n.id in kernels
+            }
+            if not bound:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for tgt in targets:
+                if isinstance(tgt, ast.Name):
+                    out[tgt.id] |= bound
+        return out
+
+    def kernels_of(call: ast.Call, aliases: dict[str, set[str]]) -> set[str]:
+        f = call.func
+        base = None
+        if isinstance(f, ast.Subscript) and isinstance(f.value, ast.Name):
+            base = f.value.id  # kernel[grid](...)
+        elif isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name) and f.attr == "run":
+            base = f.value.id
+        elif isinstance(f, ast.Name) and f.id in kernels:
+            return {f.id}  # a plain call: a device function inside a kernel
+        if base is None:
+            return set()
+        if base in kernels:
+            return {base}
+        return set(aliases.get(base, ()))
+
+    def walk(node, scope: list[tuple[str, str]], in_kernel: str | None, aliases) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if not scope and child.name in kernels:
+                    walk(child, [("def", child.name)], child.name, {})
+                else:
+                    walk(child, scope + [("def", child.name)], in_kernel, aliases_in(child))
+                continue
+            if isinstance(child, ast.ClassDef):
+                walk(child, scope + [("class", child.name)], in_kernel, {})
+                continue
+            if isinstance(child, ast.Call):
+                for k in kernels_of(child, aliases):
+                    if in_kernel:
+                        if k != in_kernel:
+                            called_by[k].add(in_kernel)
+                    elif any(kind == "def" for kind, _ in scope):
+                        launched_by[k] |= _qualnames(scope)
+            walk(child, scope, in_kernel, aliases)
+
+    walk(tree, [], None, {})
+    out: dict[str, frozenset[str]] = {}
+    for k in kernels:
+        seen, todo, names = {k}, [k], set()
+        while todo:
+            cur = todo.pop()
+            names |= launched_by.get(cur, set())
+            for caller in called_by.get(cur, set()) - seen:
+                seen.add(caller)
+                todo.append(caller)
+        if names:
+            out[k] = frozenset(names)
+    return out
+
+
+def _qualnames(scope: list[tuple[str, str]]) -> set[str]:
+    """The recorder's qualname for each function in a scope chain, the
+    innermost and every one enclosing it, spelled as CPython spells
+    `co_qualname`: `outer.<locals>.inner`, `Cls.method`."""
+    names: set[str] = set()
+    parts: list[str] = []
+    prev = None
+    for kind, name in scope:
+        if prev == "def":
+            parts.append("<locals>")
+        parts.append(name)
+        prev = kind
+        if kind == "def":
+            names.add(".".join(parts))
+    return names
+
+
+def _via_triton_launchers(source: str | None, names: frozenset[str]) -> frozenset[str]:
+    """`names` with each changed Triton kernel replaced by its launchers."""
+    if not source or not names:
+        return names
+    launchers = triton_launchers(source)
+    if not launchers:
+        return names
+    out = set()
+    for name in names:
+        out |= launchers.get(name, {name})
+    return frozenset(out)
