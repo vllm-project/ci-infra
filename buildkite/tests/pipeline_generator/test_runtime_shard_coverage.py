@@ -668,26 +668,27 @@ def test_a_record_without_a_build_id_is_stale_when_the_build_is_known():
     assert result["unverified"] is not None and result["missed"] == []
 
 
-def test_artifact_download_failure_is_an_infrastructure_retry(monkeypatch):
-    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+def test_no_matching_artifacts_preserves_soft_fail_outcome(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
     annotated = []
     styles = []
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "artifact", "download"]:
             return subprocess.CompletedProcess(command, 1, stdout="")
+        if command[:3] == ["buildkite-agent", "step", "get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
             styles.append(command[command.index("--style") + 1])
         return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert coverage.main() == 93
-    assert styles == ["error"]
-    assert annotated[0] == (
-        "Coverage artifact download failed (exit 1); coverage could not be checked."
-    )
-    assert "recorded nothing" not in annotated[0]
+    assert coverage.main() == 0
+    assert styles == ["warning"]
+    assert "artifact download failed" not in annotated[0]
+    assert "recorded nothing" in annotated[0]
+    assert "After the retried shard finishes" not in annotated[0]
 
 
 def test_only_the_current_builds_records_count():

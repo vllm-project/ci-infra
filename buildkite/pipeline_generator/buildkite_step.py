@@ -967,8 +967,6 @@ def shard_coverage_step(
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
     retry = ensure_infra_failure_retry(None)
-    # Artifact download failures get one retry; missing tests still use exit 1.
-    retry["automatic"].append({"exit_status": 93, "limit": 1})
     depends_on = []
     for dep in (d for s in sharded for d in (s.depends_on or [])):
         if dep not in depends_on:
