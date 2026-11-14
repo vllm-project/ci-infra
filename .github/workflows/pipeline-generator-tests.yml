@@ -40,5 +40,8 @@ jobs:
           python -m pip install -r requirements.txt
           python -m pip install pytest ./buildkite/pipeline_generator
 
+      - name: Check installed generator
+        run: python -I -c 'import runtime_shard_coverage'
+
       - name: Run tests
         run: python -m pytest buildkite/tests
