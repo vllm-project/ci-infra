@@ -795,43 +795,46 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
 # tails are blocked or hung jobs.
 COLLECT_AFTER_MINUTES = 180
 
-# Polls each recording step's state through the agent until all have finished
-# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
-# upload time, in the bootstrap's environment. An unreadable state (an older
-# agent, a step that is not there) reads as unfinished, so the step waits to
-# the deadline rather than collecting early.
-COLLECT_WAIT = (
-    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
-    'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
-    'pending=""; '
-    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-    'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
-    "done; "
-    '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
-    'echo "waiting on $$pending ($${s:-state unknown}); collecting at the latest at '
-    '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
-    "sleep 300; "
-    "done"
-)
+def _wait_for_steps(
+    terminal_states: str, sleep_seconds: int, deadline_env: str, finished_message: str
+) -> str:
+    """Poll step states, then let the caller handle anything still unfinished."""
+    return (
+        f'deadline="$${deadline_env}"; '
+        "while :; do "
+        'pending=""; '
+        "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+        's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+        f'case "$$s" in {terminal_states}) ;; '
+        '*) pending="$$k"; break;; esac; '
+        "done; "
+        f'[ -z "$$pending" ] && {{ echo "{finished_message}"; break; }}; '
+        '[ "$$(date +%s)" -ge "$$deadline" ] && '
+        '{ echo "wait deadline reached with $$pending '
+        '($${s:-state unknown}); continuing"; break; }; '
+        'echo "waiting on $$pending ($${s:-state unknown}); deadline '
+        '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
+        f"sleep {sleep_seconds}; "
+        "done"
+    )
 
-# Polls each sharded step until every one reaches a terminal state, including
-# a canceled soft-fail step that a dependent coverage job would otherwise skip.
-# The wait has no generation-time deadline; the job's timeout includes queue time.
-COVERAGE_WAIT = (
-    "while :; do "
-    'pending=""; '
-    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-    'case "$$s" in finished|ignored|canceled) ;; '
-    '*) pending="$$k"; break;; esac; '
-    "done; "
-    '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
-    'echo "waiting on $$pending ($${s:-state unknown})"; '
-    "sleep 30; "
-    "done"
+
+# At the deadline, collection folds the available recordings and coverage
+# checks the available evidence. Coverage still fails anything left unproven.
+COLLECT_WAIT = _wait_for_steps(
+    "finished|ignored|canceled|waiting_failed",
+    300,
+    "CI_SELECTOR_COLLECT_DEADLINE",
+    "every recording step has finished",
+)
+COVERAGE_WAIT = _wait_for_steps(
+    "finished|ignored|canceled|waiting_failed",
+    30,
+    "RUNTIME_SHARD_COVERAGE_DEADLINE",
+    "every sharded step has stopped",
 )
 COVERAGE_TIMEOUT_MINUTES = 360
+COVERAGE_WAIT_MINUTES = COVERAGE_TIMEOUT_MINUTES - 15
 
 
 def _collect_step(
@@ -929,8 +932,9 @@ def shard_coverage_step(
     shard cannot hide a missing record. The comparison source is packed at
     generation, so the job runs the same revision as the plugin without a
     runtime download. Polling rather than depending on the shards means a
-    canceled soft-fail shard cannot suppress the whole check. The polling
-    agent is held through shard queue time, bounded by this job's timeout.
+    canceled soft-fail shard cannot suppress the whole check. At the wait
+    deadline, the checker runs and fails any coverage still unproven, including
+    a soft-fail step whose final outcome is not yet known.
     """
     steps = {}
     sharded = []
@@ -963,10 +967,11 @@ def shard_coverage_step(
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
     retry = ensure_infra_failure_retry(None)
-    # Do not retry a timeout into another wait; agent loss still gets one retry.
-    for rule in retry["automatic"]:
-        if rule.get("exit_status") == -1:
-            rule["signal_reason"] = "agent_stop"
+    # Match timeout cancellation first; other agent losses keep the normal retry.
+    retry["automatic"] = [
+        {"exit_status": -1, "signal_reason": "cancel", "limit": 0},
+        *retry["automatic"],
+    ]
     depends_on = []
     for dep in (d for s in sharded for d in (s.depends_on or [])):
         if dep not in depends_on:
@@ -977,6 +982,9 @@ def shard_coverage_step(
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
             "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
+            "RUNTIME_SHARD_COVERAGE_DEADLINE": str(
+                int(time.time()) + COVERAGE_WAIT_MINUTES * 60
+            ),
             "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),
         },
         agents={"queue": queue.value},

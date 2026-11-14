@@ -2681,24 +2681,15 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
     assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 360
     assert job.retry["automatic"] == [
-        {"exit_status": -1, "signal_reason": "agent_stop", "limit": 1},
+        {"exit_status": -1, "signal_reason": "cancel", "limit": 0},
+        {"exit_status": -1, "limit": 1},
         {"exit_status": 255, "limit": 1},
         {"exit_status": 94, "limit": 1},
         {"exit_status": buildkite_step.HOOK_FAILURE_EXIT_STATUSES, "limit": 1},
     ]
-    assert job.commands[0] == (
-        "while :; do "
-        'pending=""; '
-        "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-        's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-        'case "$$s" in finished|ignored|canceled) ;; '
-        '*) pending="$$k"; break;; esac; '
-        "done; "
-        '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
-        'echo "waiting on $$pending ($${s:-state unknown})"; '
-        "sleep 30; "
-        "done"
-    )
+    assert 'deadline="$$RUNTIME_SHARD_COVERAGE_DEADLINE"' in job.commands[0]
+    assert "finished|ignored|canceled|waiting_failed" in job.commands[0]
+    assert "sleep 30" in job.commands[0]
     assert job.commands[1] == (
         'python3 -I -c \'import base64,json,os,zlib;'
         'exec(json.loads(zlib.decompress(base64.b64decode('
@@ -2789,17 +2780,21 @@ def test_coverage_wait_stops_when_shards_cannot_run(
     fake_global_config["run_all"] = True
     [step] = _render(_step(automatic_shard=True))
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    wait = buildkite_step.shard_coverage_step([group]).commands[0].replace("$$", "$")
+    job = buildkite_step.shard_coverage_step([group])
+    wait = job.commands[0].replace("$$", "$")
     agent = tmp_path / "buildkite-agent"
     agent.write_text('#!/bin/sh\nprintf "%s\\n" "$STEP_STATE"\n')
     agent.chmod(0o755)
-    for state in ("finished", "ignored", "canceled"):
+    for state in ("finished", "ignored", "canceled", "waiting_failed"):
         run = subprocess.run(
             ["bash", "-c", wait],
             env=dict(
                 os.environ,
                 PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
                 CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+                RUNTIME_SHARD_COVERAGE_DEADLINE=job.env[
+                    "RUNTIME_SHARD_COVERAGE_DEADLINE"
+                ],
                 STEP_STATE=state,
             ),
             capture_output=True,
@@ -2808,3 +2803,39 @@ def test_coverage_wait_stops_when_shards_cannot_run(
         )
         assert run.returncode == 0
         assert run.stdout == "every sharded step has stopped\n"
+
+
+def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
+    fake_global_config, checkout, tmp_path
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    before = int(time.time())
+    job = buildkite_step.shard_coverage_step([group])
+    after = int(time.time())
+    deadline = int(job.env["RUNTIME_SHARD_COVERAGE_DEADLINE"])
+    assert before + 345 * 60 <= deadline <= after + 345 * 60
+    assert job.timeout_in_minutes == 360
+    wait = job.commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text('#!/bin/sh\nprintf "%s\\n" running\n')
+    agent.chmod(0o755)
+    date = tmp_path / "date"
+    date.write_text(f'#!/bin/sh\n[ "$1" = "+%s" ] && {{ echo {deadline}; }} || exec /bin/date "$@"\n')
+    date.chmod(0o755)
+    run = subprocess.run(
+        ["bash", "-c", wait],
+        env=dict(
+            os.environ,
+            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+            RUNTIME_SHARD_COVERAGE_DEADLINE=str(deadline),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    assert run.returncode == 0
+    assert "deadline" in run.stdout and "model-executor" in run.stdout
+    assert len(job.commands) == 2  # the checker runs next, even after the wait
