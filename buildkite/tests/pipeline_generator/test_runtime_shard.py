@@ -2443,6 +2443,18 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
     assert captured["cwd"] == str(tmp_path)
     assert captured["timeout"] == plugin.INVENTORY_TIMEOUT_SECONDS
     assert captured["env"]["PYTHONSAFEPATH"] == "1"
+    monkeypatch.setenv("FNREC_OUT", str(tmp_path / "fnrec"))
+    monkeypatch.setenv("FNREC_OTHER", "metadata")
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "trace")
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "span")
+    assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
+    for name in (
+        "FNREC_OUT",
+        "FNREC_OTHER",
+        "CI_INFRA_TRACE_ID",
+        "CI_INFRA_COMMAND_SPAN_ID",
+    ):
+        assert name not in captured["env"]
     monkeypatch.setattr(plugin, "_INITIAL_SYS_PATH_ENTRY", str(tmp_path))
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     assert "PYTHONSAFEPATH" not in captured["env"]
@@ -2668,7 +2680,11 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
     assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
     assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 360
-    assert job.retry == buildkite_step.ensure_infra_failure_retry(None)
+    assert [rule["exit_status"] for rule in job.retry["automatic"]] == [
+        255,
+        94,
+        buildkite_step.HOOK_FAILURE_EXIT_STATUSES,
+    ]
     assert job.commands[0] == (
         "while :; do "
         'pending=""; '

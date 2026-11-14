@@ -279,14 +279,23 @@ class ShardPlugin:
         leaves the list unknown (None): the coverage check then reports the
         command unverified rather than compare against a partial list. The
         inventory repeats collection-time option and plugin side effects,
-        including report writing.
+        including report writing. Recorder metadata and trace IDs are stripped
+        so the inventory cannot alter the job's own test counts or timings.
         """
         fd, path = tempfile.mkstemp(prefix="runtime-shard-inventory-", suffix=".json")
         os.close(fd)
         env = {
             name: value
             for name, value in os.environ.items()
-            if name not in (PLAN_ENV, COMMAND_ENV, COVERAGE_DIR_ENV, APPLIED_ENV)
+            if name not in (
+                PLAN_ENV,
+                COMMAND_ENV,
+                COVERAGE_DIR_ENV,
+                APPLIED_ENV,
+                "CI_INFRA_TRACE_ID",
+                "CI_INFRA_COMMAND_SPAN_ID",
+            )
+            and not name.startswith("FNREC_")
         }
         env[INVENTORY_ENV] = path
         # Match the live invocation: -m pytest prepends the working directory

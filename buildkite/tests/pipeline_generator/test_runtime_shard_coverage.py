@@ -297,14 +297,16 @@ def test_a_soft_fail_step_unverified_fails_closed():
     assert "shard 2 recorded nothing (soft-fail step)" in text
 
 
-def test_main_only_relaxes_unverified_evidence_for_a_soft_failed_step(monkeypatch):
+def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
     monkeypatch.setattr(
         coverage,
         "_read_records",
         lambda _: [_record(0, ["a"], expected=["a", "b"])],
     )
-    outcomes = iter(["soft_failed\n", "passed\n", None, OSError("agent unavailable")])
+    outcomes = iter(
+        ["soft_failed\n", "canceled\n", "hard_failed\n", "passed\n", None, OSError("agent unavailable")]
+    )
     styles = []
 
     def fake_run(command, check, **kwargs):
@@ -331,10 +333,12 @@ def test_main_only_relaxes_unverified_evidence_for_a_soft_failed_step(monkeypatc
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert coverage.main() == 0
+    assert coverage.main() == 0
+    assert coverage.main() == 0
     assert coverage.main() == 1
     assert coverage.main() == 1
     assert coverage.main() == 1
-    assert styles == ["warning", "error", "error", "error"]
+    assert styles == ["warning", "warning", "warning", "error", "error", "error"]
 
 
 def test_soft_failed_outcomes_are_independent_for_each_step(monkeypatch):

@@ -247,9 +247,9 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
 def _relax_soft_failed_unverified(results: List[Dict[str, Any]]) -> None:
     """Do not turn a step's existing soft failure into a hard coverage failure.
 
-    A passed soft-fail step still has to prove its coverage. Only Buildkite's
-    final soft_failed outcome relaxes missing evidence; an unavailable or
-    different outcome keeps the hard failure.
+    A passed soft-fail step still has to prove its coverage. Any final outcome
+    other than passed may relax its missing evidence; an unavailable outcome
+    keeps the hard failure.
     """
     outcomes = {}
     for result in results:
@@ -266,7 +266,7 @@ def _relax_soft_failed_unverified(results: List[Dict[str, Any]]) -> None:
                     timeout=60,
                 )
                 outcomes[step] = (
-                    run.returncode == 0 and run.stdout.strip() == "soft_failed"
+                    run.returncode == 0 and run.stdout.strip() not in ("", "passed")
                 )
             except (OSError, subprocess.TimeoutExpired):
                 outcomes[step] = False

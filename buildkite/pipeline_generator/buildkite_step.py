@@ -964,6 +964,11 @@ def shard_coverage_step(
     script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+    retry = ensure_infra_failure_retry(None)
+    # A timeout must not start another six-hour wait on a second small-CPU agent.
+    retry["automatic"] = [
+        rule for rule in retry["automatic"] if rule.get("exit_status") != -1
+    ]
     depends_on = []
     for dep in (d for s in sharded for d in (s.depends_on or [])):
         if dep in runnable_keys and dep not in depends_on:
@@ -987,7 +992,7 @@ def shard_coverage_step(
         allow_dependency_failure=True,
         soft_fail=False,
         timeout_in_minutes=COVERAGE_TIMEOUT_MINUTES,
-        retry=ensure_infra_failure_retry(None),
+        retry=retry,
     )
 
 
