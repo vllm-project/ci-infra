@@ -305,7 +305,15 @@ def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch
         lambda _: [_record(0, ["a"], expected=["a", "b"])],
     )
     outcomes = iter(
-        ["soft_failed\n", "canceled\n", "hard_failed\n", "passed\n", None, OSError("agent unavailable")]
+        [
+            "soft_failed\n",
+            "canceled\n",
+            "hard_failed\n",
+            "passed\n",
+            "",
+            None,
+            OSError("agent unavailable"),
+        ]
     )
     styles = []
 
@@ -338,7 +346,8 @@ def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch
     assert coverage.main() == 1
     assert coverage.main() == 1
     assert coverage.main() == 1
-    assert styles == ["warning", "warning", "warning", "error", "error", "error"]
+    assert coverage.main() == 1
+    assert styles == ["warning", "warning", "warning", "error", "error", "error", "error"]
 
 
 def test_soft_failed_outcomes_are_independent_for_each_step(monkeypatch):
