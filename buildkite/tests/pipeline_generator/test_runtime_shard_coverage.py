@@ -671,17 +671,22 @@ def test_a_record_without_a_build_id_is_stale_when_the_build_is_known():
 def test_artifact_download_failure_is_an_infrastructure_retry(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     annotated = []
+    styles = []
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "artifact", "download"]:
             return subprocess.CompletedProcess(command, 1, stdout="")
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
+            styles.append(command[command.index("--style") + 1])
         return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert coverage.main() == 93
-    assert "artifact download failed" in annotated[0]
+    assert styles == ["error"]
+    assert annotated[0] == (
+        "Coverage artifact download failed (exit 1); coverage could not be checked."
+    )
     assert "recorded nothing" not in annotated[0]
 
 
