@@ -8,11 +8,16 @@ command the plan covers, it:
   - skips collecting the files planned for other shards,
   - keeps this job's tests: its files, and its part of each file split by
     test. A collected file the plan doesn't name (one the generator could
-    not see) runs in the first shard that runs the command, so no test can
+    not see) runs in the least-loaded owner that runs the command, so no test can
     drop out of every shard,
   - opens a Buildkite log group per file, opens the group of a file that
     fails, and puts the failures and summary in their own open group,
-  - turns "no tests ran" into success when every test went to other shards.
+  - turns "no tests ran" into success when every test went to other shards,
+  - records what it ran for the build's coverage check
+    (runtime_shard_coverage.py): the command's least-loaded owner also records the
+    whole list of tests the command should run, collected by a separate pytest
+    it starts on the same worker, so its own run never imports the other
+    shards' files.
 
 Each job collects the same tests, so the parts of a split file add up to the
 file. Elsewhere (a setup command's pytest, a pytest a test starts) it does
@@ -27,15 +32,30 @@ import base64
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
+import time
 import zlib
 
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
 COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
+COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
 # The file the job's guard checks after a planned command: written once the
 # plugin has applied the plan, so a pytest that ran without it fails the job.
 APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
+# Set by the recording shard on the pytest it starts to list the command's
+# tests: the path that run writes the list to.
+INVENTORY_ENV = "RUNTIME_SHARD_INVENTORY"
+# A recording shard's inventory collection is bounded: a hung collection
+# must not hang the shard's own run.
+INVENTORY_TIMEOUT_SECONDS = 300
+# A failed inventory prints only this much of its output: enough to name the
+# file that broke, not enough to bury the job's own log.
+INVENTORY_TAIL_LINES = 40
+# Captured before conftest and package imports can change sys.path.
+_INITIAL_SYS_PATH_ENTRY = os.path.realpath(sys.path[0] or ".")
 
 
 def _pytest_python():
@@ -100,6 +120,12 @@ import pytest  # noqa: E402  (the install above runs without pytest)
 
 def pytest_configure(config):
     # Popped, so a pytest that a test itself starts runs as written.
+    inventory = os.environ.pop(INVENTORY_ENV, None)
+    if inventory:
+        # A recording shard's collecting subprocess: no shard plan here, and
+        # it writes no coverage record of its own.
+        config.pluginmanager.register(_Inventory(inventory), "runtime_shard_inventory")
+        return
     packed = os.environ.pop(PLAN_ENV, None)
     if not packed:
         return
@@ -116,7 +142,8 @@ def pytest_configure(config):
     )
     shard = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
     config.pluginmanager.register(
-        ShardPlugin(command, shard, plan["shards"]), "runtime_shard_job"
+        ShardPlugin(command, shard, plan["shards"], plan.get("key")),
+        "runtime_shard_job",
     )
     applied = os.environ.get(APPLIED_ENV)
     if applied:
@@ -140,8 +167,55 @@ def _without_plugins(args):
     return kept
 
 
+class _Inventory:
+    """Writes the collected tests' IDs to the path in INVENTORY_ENV: the whole
+    list a recording shard's subprocess collected for its command."""
+
+    def __init__(self, path):
+        self.path = path
+
+    @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
+    def pytest_collection_modifyitems(self, session, config, items):
+        with open(self.path, "w") as f:
+            json.dump([item.nodeid for item in items], f)
+
+
+def _cancel_inventory(signum, _frame):
+    """Let the inventory's finally run when the live job is canceled."""
+    raise SystemExit(128 + signum)
+
+
+def _stop_inventory_process(process):
+    """Stop the collection group and close its pipes without another read."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        print(
+            "runtime-shard: couldn't stop the inventory process group "
+            f"({error})",
+            file=sys.stderr,
+        )
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print(
+                "runtime-shard: inventory process did not stop after SIGKILL",
+                file=sys.stderr,
+            )
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+
+
 class ShardPlugin:
-    def __init__(self, command, shard, shards):
+    def __init__(self, command, shard, shards, step_key=None):
         self.files = command["files"]  # file from rootdir -> its shard
         self.split = command["split"]  # file -> {"shards", "assign"}
         self.prefix = command["prefix"]
@@ -158,9 +232,22 @@ class ShardPlugin:
         self.dropped = 0
         self.current = None
         self.expanded = False
+        self.step_key = step_key
+        self.position = command.get("position")
+        self.coverage_dir = os.environ.get(COVERAGE_DIR_ENV)
+        # The least-loaded owner that runs the command says what the command
+        # should run: listed by a separate pytest it starts
+        # (_expected_inventory), on the job's hardware, at the job's commit.
+        self.records_expected = bool(self.coverage_dir) and shard == self.fallback
+        self.expected = None
+        self.planned = None  # tests kept here after collection; None if unknown
+        self.collection_failed = False
+        self.ran = set()  # the tests pytest reported on here
 
     def pytest_ignore_collect(self, collection_path, config):
-        """A file planned whole for another shard isn't even imported."""
+        """A file planned whole for another shard isn't even imported. The
+        inventory uses an isolated pytest, so the live shard does not import
+        other shards' files to build that list."""
         relative = os.path.relpath(str(collection_path), str(config.rootpath))
         shard = self.files.get(relative.replace(os.sep, "/"))
         if shard is not None and shard != self.shard:
@@ -192,6 +279,12 @@ class ShardPlugin:
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
+        if (
+            self.records_expected
+            and not self.collection_failed
+            and not config.getoption("collectonly")
+        ):
+            self.expected = self._expected_inventory(config)
         for item in items:
             file = item.nodeid.split("::")[0]
             self.totals[file] = self.totals.get(file, 0) + 1
@@ -206,10 +299,126 @@ class ShardPlugin:
             self.dropped += len(drop)
             config.hook.pytest_deselected(items=drop)
             items[:] = keep
+        if not self.collection_failed:
+            # An empty assignment is meaningful only when collection completed.
+            self.planned = [item.nodeid for item in items]
+
+    def pytest_collectreport(self, report):
+        if report.failed:
+            self.collection_failed = True
+
+    def _expected_inventory(self, config):
+        """The command's full test list, collected by a second pytest on this
+        worker: the same python, arguments and environment as this run, but
+        with no shard plan, so a file of another shard cannot change what this
+        shard's own tests see, and the subprocess runs no shard plan and writes
+        no record of its own.
+
+        A failure — the collection could not run, or any file had an error —
+        leaves the list unknown (None): the coverage check then reports the
+        command unverified rather than compare against a partial list. The
+        inventory repeats collection-time option and plugin side effects,
+        including report writing. Recorder metadata and trace IDs are stripped
+        so the inventory cannot alter the job's own test counts or timings.
+        """
+        fd, path = tempfile.mkstemp(prefix="runtime-shard-inventory-", suffix=".json")
+        os.close(fd)
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if name not in (
+                PLAN_ENV,
+                COMMAND_ENV,
+                COVERAGE_DIR_ENV,
+                APPLIED_ENV,
+                "CI_INFRA_TRACE_ID",
+                "CI_INFRA_COMMAND_SPAN_ID",
+                "CUDA_INJECTION64_PATH",
+                "ROCP_TOOL_LIBRARIES",
+                "BUILDKITE_ANALYTICS_TOKEN",
+                "COVERAGE_PROCESS_START",
+            )
+            and not name.startswith(("FNREC_", "KERNREC_", "COV_CORE_"))
+        }
+        env[INVENTORY_ENV] = path
+        # Match the live invocation: -m pytest prepends the working directory
+        # to sys.path; the console script does not. Suppress it only if the
+        # live invocation did not already have it there.
+        if _INITIAL_SYS_PATH_ENTRY != os.path.realpath(
+            config.invocation_params.dir
+        ):
+            env["PYTHONSAFEPATH"] = "1"
+        process = None
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _cancel_inventory)
+        try:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    *config.invocation_params.args,
+                    "--collect-only",
+                ],
+                env=env,
+                cwd=config.invocation_params.dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            stdout, stderr = process.communicate(timeout=INVENTORY_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            os.unlink(path)
+            print(
+                "runtime-shard: couldn't collect the command's full test list "
+                f"(timed out after {INVENTORY_TIMEOUT_SECONDS} seconds); the "
+                "coverage check will report the command unverified"
+                + _output_tail(error.output, error.stderr),
+                file=sys.stderr,
+            )
+            return None
+        except OSError as error:
+            os.unlink(path)
+            print(
+                "runtime-shard: couldn't collect the command's full test list "
+                f"({error}); the coverage check will report the command "
+                "unverified",
+                file=sys.stderr,
+            )
+            return None
+        finally:
+            if process is not None:
+                _stop_inventory_process(process)
+            signal.signal(signal.SIGTERM, previous_sigterm)
+        try:
+            with open(path) as f:
+                inventory = json.load(f)
+        except (OSError, ValueError):
+            inventory = None
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+        collected = process.returncode in (
+            pytest.ExitCode.OK,
+            pytest.ExitCode.NO_TESTS_COLLECTED,
+        )
+        if collected and isinstance(inventory, list):
+            return inventory
+        print(
+            "runtime-shard: couldn't collect the command's full test list "
+            f"(exit {process.returncode}); the coverage check will report the "
+            "command unverified" + _output_tail(stdout, stderr),
+            file=sys.stderr,
+        )
+        return None
 
     def pytest_collection_finish(self, session):
         if session.config.getoption("collectonly"):
+            self.coverage_dir = None
             return
+        # Before any test: a shard that dies leaves this, marked unfinished.
+        self._write_record(finished=False)
         # Looked up here: it registers after -p plugins are configured.
         self.reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if self.reporter is None:
@@ -220,6 +429,44 @@ class ShardPlugin:
                 f"runtime-shard: not in the plan, so run in shard {self.fallback + 1}: "
                 + ", ".join(self.unplanned)
             )
+
+    def _write_record(self, finished):
+        """One file per job per command, for the build's coverage check. A
+        failure here costs the check a record, never the job its tests.
+
+        Directories are 0777: a job writes as root into a checkout the agent
+        owns, and the agent must be able to delete them for the next job.
+        """
+        if not self.coverage_dir:
+            return
+        job_id = os.environ.get("BUILDKITE_JOB_ID", "no-job-id")
+        job_dir = os.path.join(self.coverage_dir, job_id)
+        record = {
+            "step": self.step_key,
+            "position": self.position,
+            "shard": self.shard,
+            # The build the record belongs to, so the coverage check can
+            # ignore records a stale job wrote; null off Buildkite.
+            "build_id": os.environ.get("BUILDKITE_BUILD_ID"),
+            "retry": int(os.environ.get("BUILDKITE_RETRY_COUNT") or 0),
+            "finished": finished,
+            "finished_at": time.time(),
+            "expected": self.expected,
+            "planned": self.planned,
+            "ran": sorted(self.ran),
+        }
+        try:
+            os.makedirs(job_dir, exist_ok=True)
+            os.chmod(self.coverage_dir, 0o777)
+            os.chmod(job_dir, 0o777)
+            path = os.path.join(job_dir, f"{self.position}.json")
+            # Written aside, then swapped in whole: a job killed mid-write
+            # keeps its earlier record. The .tmp name isn't an artifact.
+            with open(f"{path}.tmp", "w") as f:
+                json.dump(record, f)
+            os.replace(f"{path}.tmp", path)
+        except OSError as error:
+            print(f"runtime-shard: no coverage record: {error}")
 
     def _where(self):
         """Which of the command's tests run here, and where the rest run, so
@@ -267,6 +514,7 @@ class ShardPlugin:
 
     @pytest.hookimpl(trylast=True)  # after -v prints FAILED or ERROR
     def pytest_runtest_logreport(self, report):
+        self.ran.add(report.nodeid)
         if self.reporter is not None and report.failed and not self.expanded:
             self.expanded = True
             self._say("^^^ +++")  # Buildkite: open this file's group
@@ -284,7 +532,29 @@ class ShardPlugin:
         # is not a failure. A command that collects nothing at all still is.
         if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and self.dropped:
             session.exitstatus = pytest.ExitCode.OK
+        # -x, --maxfail or a Ctrl-C stopped the run: tests here may not have run.
+        stopped = session.shouldstop or session.shouldfail or exitstatus in (
+            pytest.ExitCode.INTERRUPTED,
+            pytest.ExitCode.INTERNAL_ERROR,
+        )
+        self._write_record(finished=not stopped)
 
 
 def _plural(count, noun):
     return f"{count} {noun}{'' if count == 1 else 's'}"
+
+
+def _output_tail(stdout, stderr):
+    """The end of a failed inventory collection's output, bounded: pytest
+    names the file that broke at the end of its traceback."""
+    parts = []
+    for label, text in (("output", stdout), ("error output", stderr)):
+        if not text:
+            continue
+        if isinstance(text, bytes):
+            text = text.decode(errors="replace")
+        lines = text.splitlines()
+        if len(lines) > INVENTORY_TAIL_LINES:
+            lines = ["..."] + lines[-INVENTORY_TAIL_LINES:]
+        parts.append(f"\n--- last lines of its {label} ---\n" + "\n".join(lines))
+    return "".join(parts)

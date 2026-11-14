@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
+import json
 import math
 import os
 import time
@@ -794,25 +795,58 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
 # tails are blocked or hung jobs.
 COLLECT_AFTER_MINUTES = 180
 
-# Polls each recording step's state through the agent until all have finished
-# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
-# upload time, in the bootstrap's environment. An unreadable state (an older
-# agent, a step that is not there) reads as unfinished, so the step waits to
-# the deadline rather than collecting early.
-COLLECT_WAIT = (
-    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
-    'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
-    'pending=""; '
-    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-    'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
-    "done; "
-    '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
-    'echo "waiting on $$pending ($${s:-state unknown}); collecting at the latest at '
-    '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
-    "sleep 300; "
-    "done"
+def _wait_for_steps(
+    terminal_states: str,
+    sleep_seconds: int,
+    deadline_env: str,
+    finished_message: str,
+    mark_deadline: bool = False,
+) -> str:
+    """Poll step states, then let the caller handle anything still unfinished."""
+    marker = (
+        'marker="$${TMPDIR:-/tmp}/runtime-shard-coverage-'
+        '$$BUILDKITE_JOB_ID-wait-timed-out"; rm -f "$$marker"; '
+        if mark_deadline
+        else ""
+    )
+    touch = 'touch "$$marker"; ' if mark_deadline else ""
+    return (
+        f'{marker}deadline="$${deadline_env}"; '
+        "while :; do "
+        'pending=""; '
+        "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+        's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+        f'case "$$s" in {terminal_states}) ;; '
+        '*) pending="$$k"; break;; esac; '
+        "done; "
+        f'[ -z "$$pending" ] && {{ echo "{finished_message}"; break; }}; '
+        '[ "$$(date +%s)" -ge "$$deadline" ] && '
+        f'{{ {touch}echo "wait deadline reached with $$pending '
+        '($${s:-state unknown}); continuing"; break; }; '
+        'echo "waiting on $$pending ($${s:-state unknown}); deadline '
+        '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
+        f"sleep {sleep_seconds}; "
+        "done"
+    )
+
+
+# At the deadline, collection folds the available recordings and coverage
+# checks the available evidence. Coverage still fails anything left unproven.
+COLLECT_WAIT = _wait_for_steps(
+    "finished|ignored",
+    300,
+    "CI_SELECTOR_COLLECT_DEADLINE",
+    "every recording step has finished",
 )
+COVERAGE_WAIT = _wait_for_steps(
+    "finished|ignored|canceled|waiting_failed",
+    30,
+    "RUNTIME_SHARD_COVERAGE_DEADLINE",
+    "every sharded step has stopped",
+    mark_deadline=True,
+)
+COVERAGE_TIMEOUT_MINUTES = 360
+COVERAGE_WAIT_MINUTES = COVERAGE_TIMEOUT_MINUTES - 15
 
 
 def _collect_step(
@@ -897,6 +931,81 @@ def _collect_step(
         # the wait, then downloading every job's recordings, which takes a while
         timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
         retry=ensure_infra_failure_retry(None),
+    )
+
+
+def shard_coverage_step(
+    groups: "List[BuildkiteGroupStep]",
+) -> "Optional[BuildkiteCommandStep]":
+    """The job that checks no test dropped out of a build's shards, or None
+    when nothing in this build is sharded.
+
+    Fails when a test is missed or coverage cannot be proven, so a successful
+    shard cannot hide a missing record. The comparison source is packed at
+    generation, so the job runs the same revision as the plugin without a
+    runtime download. Polling rather than depending on the shards means a
+    canceled soft-fail shard cannot suppress the whole check. At the wait
+    deadline, the checker runs and fails any coverage still unproven, including
+    a soft-fail step whose final outcome is not yet known.
+    """
+    steps = {}
+    sharded = []
+    for group in groups:
+        for step in group.steps:
+            packed = (step.env or {}).get(runtime_shard.PLAN_ENV)
+            if not packed:
+                continue
+            plan = runtime_shard.unpack(packed)
+            sharded.append(step)
+            steps[step.key] = [
+                {
+                    "position": planned["position"],
+                    "label": planned["label"],
+                    "fallback": planned["fallback"],
+                    "owners": runtime_shard.owners(planned),
+                    # Only a terminal failure on a soft-fail step relaxes gaps;
+                    # a passed step still has to prove coverage.
+                    "soft_fail": bool(step.soft_fail),
+                }
+                for planned in plan["commands"]
+            ]
+    if not steps:
+        return None
+    source_path = os.path.join(
+        os.path.dirname(__file__), "runtime_shard_coverage.py"
+    )
+    with open(source_path) as f:
+        coverage_source = f.read()
+    on_main = get_global_config()["branch"] == "main"
+    queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+    retry = ensure_infra_failure_retry(None)
+    depends_on = []
+    for dep in (d for s in sharded for d in (s.depends_on or [])):
+        if dep not in depends_on:
+            depends_on.append(dep)
+    return BuildkiteCommandStep(
+        label=":mag: Check every test ran",
+        key="runtime-shard-coverage",
+        env={
+            "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
+            "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
+            "RUNTIME_SHARD_COVERAGE_DEADLINE": str(
+                int(time.time()) + COVERAGE_WAIT_MINUTES * 60
+            ),
+            "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),
+        },
+        agents={"queue": queue.value},
+        commands=[
+            COVERAGE_WAIT,
+            'python3 -I -c \'import base64,json,os,zlib;'
+            'exec(json.loads(zlib.decompress(base64.b64decode('
+            'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\'',
+        ],
+        depends_on=depends_on,
+        allow_dependency_failure=True,
+        soft_fail=False,
+        timeout_in_minutes=COVERAGE_TIMEOUT_MINUTES,
+        retry=retry,
     )
 
 
@@ -1235,6 +1344,7 @@ def _shard_at_generation(
     commands: List[str],
     env: Optional[Dict[str, str]],
     mode: str,
+    setup_profile: SetupProfile = "nvidia",
 ) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
     and, in "on" mode, turn its job's prepared commands and env into one
@@ -1270,7 +1380,7 @@ def _shard_at_generation(
         f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
         f" -p {runtime_shard.PLUGIN_MODULE}"
     ).strip()
-    plan = {"shards": result["shards"], "commands": result["commands"]}
+    plan = {"shards": result["shards"], "commands": result["commands"], "key": step_key}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
     commands = list(commands)
@@ -1290,7 +1400,8 @@ def _shard_at_generation(
             commands[at + 1] = runtime_shard.guard(
                 commands[at + 1], planned, result["shards"]
             )
-    return result["shards"], runtime_shard.shard_job_setup() + commands, env
+    checkout = _fnrec_checkout_path(step, setup_profile)
+    return result["shards"], runtime_shard.shard_job_setup(checkout) + commands, env
 
 
 def convert_group_step_to_buildkite_step(
@@ -1345,6 +1456,7 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         amd_env,
                         amd_shard_mode,
+                        "amd",
                     )
                     if amd_shard_mode
                     else None
@@ -1373,7 +1485,8 @@ def convert_group_step_to_buildkite_step(
                     extra_artifact_paths=_fnrec_artifact_paths(step, "amd")
                     + (
                         [KERNREC_ARTIFACT_PATH] if _kernrec_applies(step, "amd") else []
-                    ),
+                    )
+                    + ([runtime_shard.COVERAGE_ARTIFACT_PATH] if amd_sharded else []),
                     recorded_step=step,
                 )
                 amd_step.deferred = not _step_should_run(step, list_file_diff)
@@ -1493,6 +1606,10 @@ def convert_group_step_to_buildkite_step(
                 ) = sharded
                 # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
                 buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
+                buildkite_step.artifact_paths = _merge_artifact_paths(
+                    buildkite_step.artifact_paths,
+                    [runtime_shard.COVERAGE_ARTIFACT_PATH],
+                )
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1566,6 +1683,7 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         extra_env,
                         amd_shard_mode,
+                        "amd",
                     )
                     if amd_shard_mode
                     else None
@@ -1603,7 +1721,8 @@ def convert_group_step_to_buildkite_step(
                         [KERNREC_ARTIFACT_PATH]
                         if _kernrec_applies(amd_command_step, "amd")
                         else []
-                    ),
+                    )
+                    + ([runtime_shard.COVERAGE_ARTIFACT_PATH] if amd_sharded else []),
                     recorded_step=amd_command_step,
                 )
                 amd_step.deferred = not _amd_mirror_should_run(

@@ -3,9 +3,12 @@ import json
 import os
 import re
 import shlex
+import signal
+import stat
 import subprocess
 import sys
 import time
+import types
 import urllib.error
 
 import pytest
@@ -381,6 +384,29 @@ def test_plan_step_reads_each_commands_timing_when_their_previews_match(
         "k", [one, two], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
     )
     assert result["estimates"] == [930]
+
+
+def test_plan_step_sends_unplanned_tests_to_the_least_loaded_owner(
+    tmp_path, monkeypatch
+):
+    """The fallback shard runs the tests no plan names and collects the
+    command's full inventory for coverage; the least-loaded owner pays for
+    it, not always shard 0."""
+    files = {f"pkg/test_{name}.py": "def test_x(): pass\n" for name in "abc"}
+    _project(tmp_path, files)
+    command = "pytest -v pkg"
+    timings = _timings(
+        command, {"pkg/test_a.py": 800, "pkg/test_b.py": 800, "pkg/test_c.py": 100}
+    )
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    result, _ = rs.plan_step(
+        "k", [command], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
+    )
+    assert result["estimates"] == [900, 800]
+    planned = result["commands"][0]
+    assert rs.owners(planned) == [0, 1]
+    # The coverage job reads this same field to find the command's inventory.
+    assert planned["fallback"] == 1
 
 
 def test_plan_splits_a_file_over_the_budget_by_test_function():
@@ -906,7 +932,7 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # log headers and tracing labels, so main's timings keep matching. Each
     # test command exports its position, and runs only in the shards that
     # have its tests.
-    setup = rs.shard_job_setup()
+    setup = rs.shard_job_setup("/workdir")
     assert step.commands[: len(setup)] == setup
     jobs = step.commands[len(setup) :]
     assert len(jobs) == len(plain.commands)
@@ -1093,7 +1119,7 @@ def test_generator_shards_on_a_recording_build_too(
     monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
     [step] = _render(_step(automatic_shard=True))
     assert step.parallelism == 3
-    setup = rs.shard_job_setup()
+    setup = rs.shard_job_setup("/workdir")
     assert step.commands[: len(setup)] == setup
 
 
@@ -1132,7 +1158,10 @@ def test_generator_shards_a_flagged_native_mirror(fake_global_config, checkout):
     assert rs.guard(wrapped[1], plan["commands"][1], 3).startswith(
         'case "$${BUILDKITE_PARALLEL_JOB:-0}" in'
     )
-    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(rs.shard_job_setup() + [mirror])
+    assert job.env["VLLM_TEST_COMMANDS"] == " && ".join(
+        rs.shard_job_setup("$${BUILDKITE_BUILD_CHECKOUT_PATH:-/tmp/fnrec-no-checkout}")
+        + [mirror]
+    )
     # The CUDA step is planned separately, on its own queue.
     assert checkout.calls == [
         ("model-executor", AgentQueue.H200_35GB),
@@ -1150,7 +1179,12 @@ def test_generator_shards_a_standalone_native_amd_step(fake_global_config, check
     assert plan["shards"] == 3
     assert checkout.calls == [("model-executor", AgentQueue.AMD_MI325_1)]
     assert "runtime_shard_plugin" in job.env["PYTEST_ADDOPTS"]
-    assert rs.shard_job_setup()[0] in job.env["VLLM_TEST_COMMANDS"]
+    assert rs.shard_job_setup("x")[0] in job.env["VLLM_TEST_COMMANDS"]
+    assert rs.COVERAGE_ARTIFACT_PATH in job.artifact_paths
+    assert (
+        'RUNTIME_SHARD_COVERAGE_DIR="$${BUILDKITE_BUILD_CHECKOUT_PATH'
+        in job.env["VLLM_TEST_COMMANDS"]
+    )
 
 
 @pytest.mark.parametrize("overrides", [{"dind": True}, {"parallelism": 2}])
@@ -1393,7 +1427,7 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     assert step.retry == plain.retry == buildkite_step.ensure_infra_failure_retry(
         buildkite_step.K8S_RETRY
     )
-    jobs = step.commands[len(rs.shard_job_setup()) :]
+    jobs = step.commands[len(rs.shard_job_setup("/workdir")) :]
     assert step.parallelism == 3 and len(jobs) == len(plain.commands)
     # The same commands, each tagged with its position, the one-file command
     # run only by the shard with it.
@@ -1419,7 +1453,7 @@ def _run_after_setup(tmp_path, command, pythonpath="/x", venv=None):
     venv's: the setup's copies go there and not into the python running these
     tests."""
     venv = venv or _venv(tmp_path / "venv")
-    script = "\n".join(rs.shard_job_setup() + [command]).replace("$$", "$")
+    script = "\n".join(rs.shard_job_setup("/checkout") + [command]).replace("$$", "$")
     env = dict(
         os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH=pythonpath
     )
@@ -1436,8 +1470,11 @@ FIND_PLUGIN = (
 
 
 def test_shard_job_setup_installs_the_plugin_for_any_python(tmp_path):
-    run = _run_after_setup(tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH"')
-    path, pythonpath = run.stdout.split()
+    run = _run_after_setup(
+        tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH" "$RUNTIME_SHARD_COVERAGE_DIR"'
+    )
+    path, pythonpath, coverage_dir = run.stdout.split()
+    assert coverage_dir == "/checkout/.runtime-shard-coverage"
     assert path == f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"
     assert pythonpath == f"{rs.PLUGIN_DIR}:/x"
     source = os.path.join(os.path.dirname(rs.__file__), "runtime_shard_plugin.py")
@@ -1531,12 +1568,13 @@ def _project(tmp_path, files):
         path.write_text(text)
 
 
-def _run(tmp_path, command, plan, shard, wrapper_args=()):
+def _run(tmp_path, command, plan, shard, wrapper_args=(), extra_env=None):
     """One shard's run of a command, as its job runs it."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
     env.update(
         PYTEST_ADDOPTS="-p runtime_shard_plugin",
         PYTHONPATH=os.path.dirname(rs.__file__),
+        **(extra_env or {}),
     )
     if shard is not None:
         env["BUILDKITE_PARALLEL_JOB"] = str(shard)
@@ -1567,6 +1605,7 @@ def _command_plan(command, label, files):
         "label": label,
         "files": files,
         "split": {},
+        "position": 0,
     }
 
 
@@ -1649,10 +1688,13 @@ def test_every_test_runs_in_exactly_one_shard(tmp_path, monkeypatch):
         run = _run(tmp_path, command, plan, shard)
         assert run.returncode == 0, run.stdout + run.stderr
         ran += _ran(run.stdout)
-        if shard == 0:  # what the plan doesn't name runs in the first shard
-            assert "not in the plan, so run in shard 1: tests/pkg/test_new.py" in (
-                run.stdout
-            )
+        # What the plan doesn't name runs in the least-loaded shard.
+        fallback = plan["commands"][0]["fallback"]
+        if shard == fallback:
+            assert (
+                f"not in the plan, so run in shard {fallback + 1}: "
+                "tests/pkg/test_new.py"
+            ) in run.stdout
         else:
             assert "test_new" not in run.stdout
         # A file's group says when it holds only part of the file.
@@ -2134,3 +2176,1005 @@ def test_excluded_hand_splits_keep_their_split_and_are_not_called_one_job(by_def
     [_, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [mirrored]})
     assert amd_group.steps[0].parallelism == 4
 
+# The coverage records, from real pytest runs.
+
+
+COVERED_FILES = {
+    "pkg/test_a.py": "def test_1(): pass\ndef test_2(): pass\n",
+    "pkg/test_b.py": "open('imported_b', 'w').close()\ndef test_1(): pass\n",
+}
+
+
+def _covered_run(
+    tmp_path,
+    shard,
+    job,
+    command="pytest -v pkg",
+    retry=None,
+    fallback=0,
+    extra_env=None,
+):
+    """One job's run with records on. Returns (the run, its record)."""
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    planned = _command_plan(command, "Command (1/1)", files)
+    planned["fallback"] = fallback
+    plan = {"shards": 2, "key": "k", "commands": [planned]}
+    env = {
+        "RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records"),
+        "BUILDKITE_JOB_ID": job,
+        **(extra_env or {}),
+    }
+    if retry is not None:
+        env["BUILDKITE_RETRY_COUNT"] = str(retry)
+    run = _run(tmp_path, command, plan, shard, extra_env=env)
+    path = tmp_path / "records" / job / "0.json"
+    if not (tmp_path / "records").is_dir() or not path.exists():
+        return run, None
+    return run, json.loads(path.read_text())
+
+
+def test_the_first_shard_records_the_whole_command_and_each_what_it_ran(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    every = [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_a.py::test_2",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    shown = [nodeid[len("tests/") :] for nodeid in every]
+
+    run, first = _covered_run(tmp_path, 0, "job-0", retry=2)
+    assert run.returncode == 0, run.stdout
+    # The inventory's pytest runs quietly: none of its output leaks into the
+    # shard's own log.
+    assert run.stdout.count("test session starts") == 1
+    assert first["expected"] == every
+    assert first["ran"] == every[:2] and first["planned"] == every[:2]
+    assert (first["step"], first["position"], first["shard"]) == ("k", 0, 0)
+    assert first["retry"] == 2 and first["finished"] is True
+    assert first["finished_at"] > 1_000_000_000
+    # Its inventory subprocess imported the other shard's file; the shard's own
+    # run did not, and did not run its test.
+    assert (tmp_path / "tests" / "imported_b").exists()
+    assert _ran(run.stdout) == shown[:2]
+
+    (tmp_path / "tests" / "imported_b").unlink()
+    run, second = _covered_run(tmp_path, 1, "job-1")
+    assert run.returncode == 0, run.stdout
+    assert second["expected"] is None and second["ran"] == every[2:]
+    assert second["retry"] == 0
+    assert _ran(run.stdout) == shown[2:]
+
+
+def test_the_recording_shards_run_does_not_import_other_shards_files(tmp_path):
+    """The recording shard lists the command's tests from a separate pytest it
+    starts, so an import side effect of another shard's file cannot reach this
+    shard's own tests."""
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": (
+                "import os\n"
+                "def test_1():\n"
+                "    assert 'OTHER_SHARD_IMPORTED' not in os.environ\n"
+            ),
+            "pkg/test_b.py": (
+                "import os\n"
+                "os.environ['OTHER_SHARD_IMPORTED'] = '1'\n"
+                "def test_1(): pass\n"
+            ),
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 0, run.stdout
+    assert _ran(run.stdout) == ["pkg/test_a.py::test_1"]
+    # The expected list still covers the whole command, and the inventory's
+    # pytest wrote no record of its own.
+    assert record["expected"] == [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    assert [p.name for p in (tmp_path / "records").rglob("*.json")] == ["0.json"]
+
+
+def test_only_the_recording_shards_inventory_covers_other_shards_files(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    _, first = _covered_run(tmp_path, 1, "job-1", fallback=1)  # shard 2 records
+    assert first["expected"] == [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_a.py::test_2",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    assert (tmp_path / "tests" / "imported_b").exists()
+    (tmp_path / "tests" / "imported_b").unlink()
+    # And shard 1 is then an ordinary shard: test_b.py is another shard's file,
+    # and no inventory runs here.
+    run, record = _covered_run(tmp_path, 0, "job-0", fallback=1)
+    assert record["expected"] is None and not (tmp_path / "tests" / "imported_b").exists()
+    assert run.returncode == 0
+
+
+def test_no_coverage_directory_means_no_records_and_no_extra_collection(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "commands": [_command_plan("pytest -v pkg", "C", files)]}
+    assert _run(tmp_path, "pytest -v pkg", plan, 0).returncode == 0
+    assert not (tmp_path / "tests" / "imported_b").exists()
+    assert not (tmp_path / "records").exists()
+
+
+def test_a_live_collection_failure_skips_the_second_inventory(tmp_path):
+    """A failed live collection already leaves the expected list unknown, so
+    the shard does not spend time on another doomed inventory."""
+    _project(
+        tmp_path,
+        {"pkg/test_a.py": "raise ValueError\n", "pkg/test_b.py": "def test_2(): pass\n"},
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode != 0, run.stdout
+    assert record["expected"] is None
+    assert record["ran"] == [] and record["finished"] is False
+    assert "couldn't collect the command's full test list" not in run.stderr
+
+
+def test_the_inventory_is_the_tests_the_command_selects(tmp_path):
+    """The command's -m/-k deselection applies in the inventory's collection
+    too: the expected list is what the command selects, not every test in its
+    files."""
+    _project(tmp_path, COVERED_FILES)  # test_a: test_1, test_2; test_b: test_1
+    run, record = _covered_run(tmp_path, 0, "job-0", command="pytest -v pkg -k test_1")
+    assert run.returncode == 0, run.stdout
+    assert record["expected"] == [
+        "tests/pkg/test_a.py::test_1",
+        "tests/pkg/test_b.py::test_1",
+    ]
+    assert record["ran"] == ["tests/pkg/test_a.py::test_1"]
+
+
+def test_an_inventory_subprocess_that_cannot_start_leaves_the_shard_running(tmp_path):
+    """If the inventory's pytest cannot even start (spawning it raises), the
+    shard's own tests still run and pass, and the expected list stays
+    unavailable so the coverage check reports the command unverified."""
+    _project(tmp_path, COVERED_FILES)
+    (tmp_path / "tests" / "break_inventory.py").write_text(
+        "import runtime_shard_plugin\n"
+        "def pytest_configure(config):\n"
+        "    def dies(*args, **kwargs):\n"
+        "        raise OSError('out of processes')\n"
+        "    runtime_shard_plugin.subprocess.Popen = dies\n"
+    )
+    command = "pytest -v pkg"
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "key": "k", "commands": [_command_plan(command, "C", files)]}
+    env = {
+        "RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records"),
+        "BUILDKITE_JOB_ID": "job-0",
+    }
+    run = _run(
+        tmp_path, command, plan, 0, wrapper_args=("-p", "break_inventory"), extra_env=env
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert _ran(run.stdout) == ["pkg/test_a.py::test_1", "pkg/test_a.py::test_2"]
+    record = json.loads((tmp_path / "records" / "job-0" / "0.json").read_text())
+    assert record["expected"] is None and record["finished"] is True
+    assert "couldn't collect the command's full test list" in run.stderr
+
+
+def test_inventory_timeout_is_positive_and_finite():
+    timeout = runtime_shard_plugin.INVENTORY_TIMEOUT_SECONDS
+    assert isinstance(timeout, (int, float)) and timeout > 0 and timeout != float("inf")
+
+
+def _inventory_popen(fake_run):
+    class Process:
+        def __init__(self, args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.pid = 4242
+            self.returncode = None
+            self.error = None
+            self.stdout = io.StringIO()
+            self.stderr = io.StringIO()
+            self.calls = 0
+
+        def communicate(self, timeout=None):
+            self.calls += 1
+            if self.error:
+                return self.error.output, self.error.stderr
+            try:
+                result = fake_run(self.args, **dict(self.kwargs, timeout=timeout))
+            except subprocess.TimeoutExpired as error:
+                self.error = error
+                raise
+            self.returncode = result.returncode
+            return result.stdout, result.stderr
+
+        def kill(self):
+            self.returncode = -9
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = -9
+            return self.returncode
+
+    return Process
+
+
+def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsys):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+
+    def dies(*args, **kwargs):
+        raise OSError("out of processes")
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", dies)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    assert capsys.readouterr().err == (
+        "runtime-shard: couldn't collect the command's full test list "
+        "(out of processes); the coverage check will report the command "
+        "unverified\n"
+    )
+
+
+def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, capsys):
+    """A hung inventory collection is bounded: after the timeout the shard's
+    own run goes on without the list, so the coverage check reports the
+    command unverified."""
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    captured = {}
+    killed = []
+
+    def hangs(*args, **kwargs):
+        captured.update(kwargs)
+        raise subprocess.TimeoutExpired(
+            cmd=args[0],
+            timeout=plugin.INVENTORY_TIMEOUT_SECONDS,
+            output=b"pytest header: \xff\n",
+            stderr=b"inventory still collecting\n",
+        )
+
+    processes = []
+    process_class = _inventory_popen(hangs)
+
+    def create(*args, **kwargs):
+        process = process_class(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", create)
+    monkeypatch.setattr(
+        plugin.os, "killpg", lambda pid, sig: killed.append((pid, sig))
+    )
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    assert captured["start_new_session"] is True
+    assert killed == [(4242, signal.SIGKILL)]
+    assert processes[0].calls == 1
+    assert processes[0].stdout.closed and processes[0].stderr.closed
+    err = capsys.readouterr().err
+    assert (
+        "runtime-shard: couldn't collect the command's full test list "
+        f"(timed out after {plugin.INVENTORY_TIMEOUT_SECONDS} seconds); the "
+        "coverage check will report the command unverified\n"
+        "--- last lines of its output ---\n"
+        "pytest header: �\n"
+        "--- last lines of its error output ---\n"
+        "inventory still collecting\n"
+    ) == err
+
+
+def test_inventory_cancellation_stops_collection_and_restores_sigterm(
+    tmp_path, monkeypatch
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    killed = []
+
+    def cancel(args, **kwargs):
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(cancel))
+    monkeypatch.setattr(
+        plugin.os, "killpg", lambda pid, sig: killed.append((pid, sig))
+    )
+    previous = signal.getsignal(signal.SIGTERM)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    with pytest.raises(SystemExit) as stopped:
+        shard._expected_inventory(config)
+    assert stopped.value.code == 143
+    assert killed == [(4242, signal.SIGKILL)]
+    assert signal.getsignal(signal.SIGTERM) is previous
+
+
+def test_inventory_group_cleanup_failure_does_not_crash_the_shard(
+    tmp_path, monkeypatch, capsys
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+
+    def hangs(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=1, output=b"header\n")
+
+    processes = []
+
+    def create(*args, **kwargs):
+        process = _inventory_popen(hangs)(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def fails(*args):
+        raise OSError("group unavailable")
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", create)
+    monkeypatch.setattr(plugin.os, "killpg", fails)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    assert processes[0].returncode == -9
+    assert (
+        "runtime-shard: couldn't stop the inventory process group (group unavailable)"
+        in capsys.readouterr().err
+    )
+
+
+def test_inventory_wait_timeout_does_not_hang_the_shard(tmp_path, monkeypatch, capsys):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+
+    def hangs(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=1, output=b"header\n")
+
+    process = _inventory_popen(hangs)(["pytest"])
+    process.poll = lambda: None
+    waits = []
+
+    def waits_to_stop(timeout):
+        waits.append(timeout)
+        raise subprocess.TimeoutExpired("pytest", timeout)
+
+    process.wait = waits_to_stop
+    monkeypatch.setattr(plugin.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(plugin.os, "killpg", lambda *args: None)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    assert waits == [5]
+    assert process.stdout.closed and process.stderr.closed
+    assert (
+        "runtime-shard: inventory process did not stop after SIGKILL\n"
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+@pytest.mark.parametrize("detached", [False, True])
+def test_an_inventory_timeout_is_bounded_and_cleans_up(tmp_path, monkeypatch, detached):
+    import runtime_shard_plugin as plugin
+
+    tests = tmp_path / "tests" / "pkg"
+    tests.mkdir(parents=True)
+    child_options = (
+        "start_new_session=True"
+        if detached
+        else "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL"
+    )
+    (tests / "test_a.py").write_text(
+        "import os, subprocess, time\n"
+        f"child = subprocess.Popen(['sleep', '5'], {child_options})\n"
+        "with open(os.environ['INVENTORY_CHILD_PID'], 'w') as f:\n"
+        "    f.write(str(child.pid))\n"
+        "time.sleep(5)\n"
+        "def test_a():\n"
+        "    pass\n"
+    )
+    child_pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("INVENTORY_CHILD_PID", str(child_pid_file))
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p runtime_shard_plugin")
+    monkeypatch.setenv("PYTHONPATH", os.path.dirname(plugin.__file__))
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    monkeypatch.setattr(plugin, "INVENTORY_TIMEOUT_SECONDS", 2)
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(
+            args=["-v", "pkg"], dir=str(tmp_path / "tests")
+        )
+    )
+    started = time.monotonic()
+    assert shard._expected_inventory(config) is None
+    assert time.monotonic() - started < 4
+    child_pid = int(child_pid_file.read_text())
+
+    def stopped():
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    try:
+        if not detached:
+            for _ in range(100):
+                if stopped():
+                    break
+                time.sleep(0.02)
+            assert stopped(), "the inventory's child survived its collection timeout"
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_successful_inventory_stops_leftover_children(tmp_path, monkeypatch):
+    import runtime_shard_plugin as plugin
+
+    tests = tmp_path / "tests" / "pkg"
+    tests.mkdir(parents=True)
+    (tests / "test_a.py").write_text(
+        "import os, subprocess\n"
+        "child = subprocess.Popen(['sleep', '30'], stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL)\n"
+        "with open(os.environ['INVENTORY_CHILD_PID'], 'w') as f:\n"
+        "    f.write(str(child.pid))\n"
+        "def test_a():\n"
+        "    pass\n"
+    )
+    child_pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("INVENTORY_CHILD_PID", str(child_pid_file))
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p runtime_shard_plugin")
+    monkeypatch.setenv("PYTHONPATH", os.path.dirname(plugin.__file__))
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    monkeypatch.setattr(plugin, "INVENTORY_TIMEOUT_SECONDS", 5)
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(
+            args=["-v", "pkg"], dir=str(tmp_path / "tests")
+        )
+    )
+    assert shard._expected_inventory(config) == ["pkg/test_a.py::test_a"]
+    child_pid = int(child_pid_file.read_text())
+    try:
+        for _ in range(100):
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
+    """The inventory's pytest runs in the command's own directory — its
+    conftest.py and rootdir resolve as they did for the command — and cannot
+    run longer than the inventory timeout."""
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured.update(kwargs)
+        with open(kwargs["env"][plugin.INVENTORY_ENV], "w") as f:
+            json.dump(["tests/pkg/test_a.py::test_1"], f)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(fake_run))
+    monkeypatch.setattr(plugin.os, "killpg", lambda *args: None)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
+    assert captured["cwd"] == str(tmp_path)
+    assert captured["timeout"] == plugin.INVENTORY_TIMEOUT_SECONDS
+    assert "--continue-on-collection-errors" not in captured["args"]
+    assert captured["env"]["PYTHONSAFEPATH"] == "1"
+    monkeypatch.setenv("FNREC_OUT", str(tmp_path / "fnrec"))
+    monkeypatch.setenv("FNREC_OTHER", "metadata")
+    monkeypatch.setenv("CI_INFRA_TRACE_ID", "trace")
+    monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "span")
+    monkeypatch.setenv("KERNREC_DIR", str(tmp_path / "kernrec"))
+    monkeypatch.setenv("KERNREC_BACKEND", "cuda")
+    monkeypatch.setenv("CUDA_INJECTION64_PATH", "kernel-injection.so")
+    monkeypatch.setenv("ROCP_TOOL_LIBRARIES", "kernel-recorder.so")
+    monkeypatch.setenv("BUILDKITE_ANALYTICS_TOKEN", "analytics-token")
+    monkeypatch.setenv("COV_CORE_SOURCE", "coverage-source")
+    monkeypatch.setenv("COV_CORE_CONFIG", "coverage-config")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", "coverage-start")
+    monkeypatch.setenv("LD_PRELOAD", "unrelated-test-library.so")
+    assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
+    for name in (
+        "FNREC_OUT",
+        "FNREC_OTHER",
+        "CI_INFRA_TRACE_ID",
+        "CI_INFRA_COMMAND_SPAN_ID",
+        "KERNREC_DIR",
+        "KERNREC_BACKEND",
+        "CUDA_INJECTION64_PATH",
+        "ROCP_TOOL_LIBRARIES",
+        "BUILDKITE_ANALYTICS_TOKEN",
+        "COV_CORE_SOURCE",
+        "COV_CORE_CONFIG",
+        "COVERAGE_PROCESS_START",
+    ):
+        assert name not in captured["env"], name
+    assert captured["env"]["LD_PRELOAD"] == "unrelated-test-library.so"
+    monkeypatch.setattr(plugin, "_INITIAL_SYS_PATH_ENTRY", str(tmp_path))
+    assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
+    assert "PYTHONSAFEPATH" not in captured["env"]
+
+
+def test_a_failed_inventory_prints_a_bounded_tail_of_its_output(
+    tmp_path, monkeypatch, capsys
+):
+    """When the inventory's collection fails, the shard's log gets the end of
+    its output — where pytest names the file that broke — bounded so a huge
+    collection log cannot bury the job's own."""
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    noise = "".join(f"noise line {i}\n" for i in range(200))
+    error = "ERROR tests/pkg/test_b.py - ValueError: broken\n"
+
+    def failed(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, noise, error)
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(failed))
+    monkeypatch.setattr(plugin.os, "killpg", lambda *args: None)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    err = capsys.readouterr().err
+    assert err == (
+        "runtime-shard: couldn't collect the command's full test list (exit 1); "
+        "the coverage check will report the command unverified"
+        "\n--- last lines of its output ---\n...\n"
+        + "\n".join(f"noise line {i}" for i in range(160, 200))
+        + "\n--- last lines of its error output ---\n"
+        "ERROR tests/pkg/test_b.py - ValueError: broken\n"
+    )
+
+
+def test_stderr_inventory_tail_is_kept_and_exact_limit_is_not_truncated(
+    tmp_path, monkeypatch, capsys
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    noise = "".join(
+        f"line {i}\n" for i in range(plugin.INVENTORY_TAIL_LINES - 1)
+    )
+
+    def failed(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, "", "first error\n" + noise)
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(failed))
+    monkeypatch.setattr(plugin.os, "killpg", lambda *args: None)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    err = capsys.readouterr().err
+    assert "first error" in err and "line 0" in err
+    assert "error output" in err and "...\n" not in err
+
+
+def test_the_coverage_record_names_its_build(tmp_path, monkeypatch):
+    """Each record carries its build's id, so the coverage check can filter
+    out records a stale job wrote; off Buildkite there is no build and the id
+    is null."""
+    monkeypatch.delenv("BUILDKITE_BUILD_ID", raising=False)
+    _project(tmp_path, COVERED_FILES)
+    _, record = _covered_run(
+        tmp_path, 0, "job-0", extra_env={"BUILDKITE_BUILD_ID": "build-123"}
+    )
+    assert record["build_id"] == "build-123"
+    _, record = _covered_run(tmp_path, 1, "job-1")
+    assert record["build_id"] is None
+
+
+def test_a_collection_error_in_a_later_shard_still_stops_it(tmp_path):
+    # The file's own shard fails as before; the recording shard's run never
+    # imports it (covered by the inventory tests above).
+    _project(
+        tmp_path,
+        {"pkg/test_a.py": "def test_1(): pass\n", "pkg/test_b.py": "raise ValueError\n"},
+    )
+    run, _ = _covered_run(tmp_path, 1, "job-1")
+    assert run.returncode == 2  # pytest's "interrupted"
+
+
+def test_a_collection_error_before_assignment_records_an_unknown_plan(tmp_path):
+    _project(tmp_path, {"pkg/test_b.py": "raise ValueError\n"})
+    _, record = _covered_run(tmp_path, 1, "job-1")
+    assert record["expected"] is None and record["planned"] is None
+
+
+def test_a_stopped_run_is_not_finished(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "def test_1(): assert False\ndef test_2(): pass\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0", command="pytest -v -x pkg")
+    assert run.returncode == 1
+    assert record["finished"] is False and record["ran"] == ["tests/pkg/test_a.py::test_1"]
+
+
+def test_a_run_that_dies_leaves_its_list_marked_unfinished(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "import os\ndef test_1(): os._exit(3)\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 3
+    assert record["finished"] is False
+    assert record["expected"] == ["tests/pkg/test_a.py::test_1", "tests/pkg/test_b.py::test_1"]
+    assert record["ran"] == []
+
+
+def test_a_failed_test_counts_as_ran_and_keeps_the_job_red(tmp_path):
+    _project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "import pytest\ndef test_1(): assert False\n"
+            "@pytest.mark.skip\ndef test_2(): pass\n",
+            "pkg/test_b.py": "def test_1(): pass\n",
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 1
+    assert record["ran"] == ["tests/pkg/test_a.py::test_1", "tests/pkg/test_a.py::test_2"]
+
+
+def test_collect_only_writes_no_record_and_a_job_id_is_optional(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    _, record = _covered_run(tmp_path, 0, "job-0", command="pytest --collect-only pkg")
+    assert record is None
+    files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
+    plan = {"shards": 2, "key": "k", "commands": [_command_plan("pytest -v pkg", "C", files)]}
+    env = {"RUNTIME_SHARD_COVERAGE_DIR": str(tmp_path / "records")}
+    without_id = {k: v for k, v in os.environ.items() if k != "BUILDKITE_JOB_ID"}
+    os.environ.pop("BUILDKITE_JOB_ID", None)
+    try:
+        _run(tmp_path, "pytest -v pkg", plan, 0, extra_env=env)
+    finally:
+        os.environ.clear()
+        os.environ.update(without_id)
+    assert (tmp_path / "records" / "no-job-id" / "0.json").exists()
+
+
+def test_record_directories_can_be_deleted_by_the_agent(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    _covered_run(tmp_path, 0, "job-0")
+    for path in (tmp_path / "records", tmp_path / "records" / "job-0"):
+        assert stat.S_IMODE(path.stat().st_mode) == 0o777
+
+
+def test_a_record_that_cannot_be_written_leaves_the_job_alone(tmp_path):
+    _project(tmp_path, COVERED_FILES)
+    (tmp_path / "records").write_text("a file where the directory goes")
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    assert run.returncode == 0 and record is None
+    assert re.search(r"^runtime-shard: no coverage record: ", run.stdout, re.M)
+
+
+def test_a_write_that_dies_halfway_leaves_the_earlier_record_whole(
+    tmp_path, monkeypatch
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "job-0")
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    shard._write_record(finished=False)
+    path = tmp_path / "records" / "job-0" / "0.json"
+    assert json.loads(path.read_text())["finished"] is False
+
+    def dies_halfway(record, f):
+        f.write('{"step": "k", "fin')
+        raise OSError("killed")
+
+    monkeypatch.setattr(plugin.json, "dump", dies_halfway)
+    shard._write_record(finished=True)
+    assert json.loads(path.read_text())["finished"] is False
+    records = [p.name for p in path.parent.iterdir() if p.suffix == ".json"]
+    assert records == ["0.json"]
+
+
+# The job that compares them.
+
+
+def test_generator_adds_one_coverage_job_for_the_sharded_steps(
+    fake_global_config, checkout
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    mirror = _render_mirror(_mirror_step())
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step, mirror])
+    job = buildkite_step.shard_coverage_step([group])
+    assert job.key == "runtime-shard-coverage"
+    # Poll the shards rather than depend on them: a cancelled soft-fail shard
+    # must not make the whole coverage check disappear. Image builds still run first.
+    assert job.depends_on == ["image-build", "image-build-amd"]
+    assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "model-executor amd-model-executor"
+    assert "CI_SELECTOR_COLLECT_DEADLINE" not in job.env
+    assert job.allow_dependency_failure is True and job.soft_fail is False
+    steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
+    assert sorted(steps) == ["amd-model-executor", "model-executor"]
+    plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
+    assert plan["key"] == "model-executor"
+    assert [c["position"] for c in steps["model-executor"]] == [2, 3]
+    me = steps["model-executor"][0]
+    assert me["fallback"] == plan["commands"][0]["fallback"]
+    assert me["label"] == plan["commands"][0]["label"]
+    assert me["owners"] == rs.owners(plan["commands"][0])
+    assert me["soft_fail"] is False
+    # Sharded steps upload their records; the AMD mirror too.
+    assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.json"
+    assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
+    assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
+    assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 360
+    assert job.retry["automatic"] == [
+        {"exit_status": -1, "limit": 1},
+        {"exit_status": 255, "limit": 1},
+        {"exit_status": 94, "limit": 1},
+        {"exit_status": buildkite_step.HOOK_FAILURE_EXIT_STATUSES, "limit": 1},
+    ]
+    assert 'deadline="$$RUNTIME_SHARD_COVERAGE_DEADLINE"' in job.commands[0]
+    assert "finished|ignored|canceled|waiting_failed" in job.commands[0]
+    assert "sleep 30" in job.commands[0]
+    assert job.commands[1] == (
+        'python3 -I -c \'import base64,json,os,zlib;'
+        'exec(json.loads(zlib.decompress(base64.b64decode('
+        'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\''
+    )
+    # And their records land where each job can reach the checkout.
+    coverage_setup = rs.shard_job_setup("/workdir")[-1]
+    assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in coverage_setup
+    assert step.commands[len(rs.shard_job_setup("/workdir")) - 1] == coverage_setup
+    assert (
+        'RUNTIME_SHARD_COVERAGE_DIR="$${BUILDKITE_BUILD_CHECKOUT_PATH'
+        in mirror.env["VLLM_TEST_COMMANDS"]
+    )
+
+
+def test_coverage_job_propagates_a_steps_soft_fail(fake_global_config, checkout):
+    """The comparison needs the step's soft-fail setting to look up its outcome."""
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    step.soft_fail = True
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+
+    job = buildkite_step.shard_coverage_step([group])
+
+    steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
+    assert [c["soft_fail"] for c in steps["model-executor"]] == [True, True]
+
+
+def test_coverage_job_skips_unsharded_builds_and_waits_on_images(
+    fake_global_config, checkout
+):
+    fake_global_config["run_all"] = True
+    [sharded] = _render(_step(automatic_shard=True))
+    [plain] = _render(_step())
+    plain.key = "plain"
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[plain])
+    assert buildkite_step.shard_coverage_step([group]) is None
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded, plain])
+    job = buildkite_step.shard_coverage_step([group])
+    assert job.depends_on == ["image-build"]
+    assert json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).keys() == {
+        "model-executor"
+    }
+    image = buildkite_step.BuildkiteGroupStep(
+        group="i",
+        steps=[
+            buildkite_step.BuildkiteCommandStep(
+                label="i", key="image-build", commands=["x"]
+            )
+        ],
+    )
+    job = buildkite_step.shard_coverage_step([image, group])
+    assert job.depends_on == ["image-build"]  # not the shard jobs themselves
+
+
+def test_coverage_job_embeds_and_decodes_the_generator_script(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    with open(
+        os.path.join(
+            os.path.dirname(buildkite_step.__file__), "runtime_shard_coverage.py"
+        )
+    ) as f:
+        source = f.read()
+    assert rs.unpack(job.env["RUNTIME_SHARD_COVERAGE_SCRIPT"]) == source
+    assert all("raw.githubusercontent.com" not in command for command in job.commands)
+    assert job.agents["queue"] == AgentQueue.SMALL_CPU_PREMERGE.value
+    fake_global_config["branch"] = "main"
+    job = buildkite_step.shard_coverage_step([group])
+    assert job.agents["queue"] == AgentQueue.SMALL_CPU_POSTMERGE.value
+
+    command = shlex.split(job.commands[-1])
+    assert command[:3] == ["python3", "-I", "-c"]
+    for name, value in job.env.items():
+        monkeypatch.setenv(name, value)
+    namespace = {"__name__": "embedded_coverage"}
+    exec(command[-1], namespace)
+    assert callable(namespace["main"])
+
+
+def test_coverage_wait_stops_when_shards_cannot_run(
+    fake_global_config, checkout, tmp_path
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    wait = job.commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text('#!/bin/sh\nprintf "%s\\n" "$STEP_STATE"\n')
+    agent.chmod(0o755)
+    marker = tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    for state in ("finished", "ignored", "canceled", "waiting_failed"):
+        marker.touch()
+        run = subprocess.run(
+            ["bash", "-c", wait],
+            env=dict(
+                os.environ,
+                PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+                CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+                RUNTIME_SHARD_COVERAGE_DEADLINE=job.env[
+                    "RUNTIME_SHARD_COVERAGE_DEADLINE"
+                ],
+                STEP_STATE=state,
+                TMPDIR=str(tmp_path),
+                BUILDKITE_JOB_ID="coverage-job",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        assert run.returncode == 0
+        assert run.stdout == "every sharded step has stopped\n"
+        assert not marker.exists()
+
+
+def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
+    fake_global_config, checkout, tmp_path
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    before = int(time.time())
+    job = buildkite_step.shard_coverage_step([group])
+    after = int(time.time())
+    deadline = int(job.env["RUNTIME_SHARD_COVERAGE_DEADLINE"])
+    assert before + 345 * 60 <= deadline <= after + 345 * 60
+    assert job.timeout_in_minutes == 360
+    wait = job.commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text('#!/bin/sh\nprintf "%s\\n" running\n')
+    agent.chmod(0o755)
+    date = tmp_path / "date"
+    date.write_text(f'#!/bin/sh\n[ "$1" = "+%s" ] && {{ echo {deadline}; }} || exec /bin/date "$@"\n')
+    date.chmod(0o755)
+    run = subprocess.run(
+        ["bash", "-c", wait],
+        env=dict(
+            os.environ,
+            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+            RUNTIME_SHARD_COVERAGE_DEADLINE=str(deadline),
+            TMPDIR=str(tmp_path),
+            BUILDKITE_JOB_ID="coverage-job",
+        ),
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    assert run.returncode == 0
+    assert "deadline" in run.stdout and "model-executor" in run.stdout
+    assert (
+        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    ).is_file()
+    assert len(job.commands) == 2  # the checker runs next, even after the wait
+
+
+def test_coverage_wait_reports_pending_without_shell_errors(
+    fake_global_config, checkout, tmp_path
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    wait = job.commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text(
+        '#!/bin/sh\n'
+        'if [ -f "$WAIT_STATE_FILE" ]; then\n'
+        '  printf "finished\\n";\n'
+        'else\n'
+        '  : > "$WAIT_STATE_FILE"; printf "running\\n";\n'
+        'fi\n'
+    )
+    agent.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    date = tmp_path / "date"
+    date.write_text('#!/bin/sh\n[ "$1" = "-u" ] && { echo 00:00Z; } || exec /bin/date "$@"\n')
+    date.chmod(0o755)
+    run = subprocess.run(
+        ["bash", "-c", wait],
+        env=dict(
+            os.environ,
+            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+            RUNTIME_SHARD_COVERAGE_DEADLINE=job.env[
+                "RUNTIME_SHARD_COVERAGE_DEADLINE"
+            ],
+            WAIT_STATE_FILE=str(tmp_path / "finished"),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    assert run.returncode == 0
+    assert run.stderr == ""
+    assert "waiting on model-executor (running)" in run.stdout
+    assert run.stdout.endswith("every sharded step has stopped\n")
