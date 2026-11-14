@@ -2449,6 +2449,9 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
     monkeypatch.setenv("CUDA_INJECTION64_PATH", "kernel-injection.so")
     monkeypatch.setenv("ROCP_TOOL_LIBRARIES", "kernel-recorder.so")
     monkeypatch.setenv("BUILDKITE_ANALYTICS_TOKEN", "analytics-token")
+    monkeypatch.setenv("COV_CORE_SOURCE", "coverage-source")
+    monkeypatch.setenv("COV_CORE_CONFIG", "coverage-config")
+    monkeypatch.setenv("COVERAGE_PROCESS_START", "coverage-start")
     monkeypatch.setenv("LD_PRELOAD", "unrelated-test-library.so")
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     for name in (
@@ -2461,6 +2464,9 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
         "CUDA_INJECTION64_PATH",
         "ROCP_TOOL_LIBRARIES",
         "BUILDKITE_ANALYTICS_TOKEN",
+        "COV_CORE_SOURCE",
+        "COV_CORE_CONFIG",
+        "COVERAGE_PROCESS_START",
     ):
         assert name not in captured["env"], name
     assert captured["env"]["LD_PRELOAD"] == "unrelated-test-library.so"

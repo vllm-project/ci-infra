@@ -301,8 +301,9 @@ class ShardPlugin:
                 "CUDA_INJECTION64_PATH",
                 "ROCP_TOOL_LIBRARIES",
                 "BUILDKITE_ANALYTICS_TOKEN",
+                "COVERAGE_PROCESS_START",
             )
-            and not name.startswith(("FNREC_", "KERNREC_"))
+            and not name.startswith(("FNREC_", "KERNREC_", "COV_CORE_"))
         }
         env[INVENTORY_ENV] = path
         # Match the live invocation: -m pytest prepends the working directory
