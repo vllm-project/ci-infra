@@ -735,7 +735,7 @@ def test_malformed_records_are_skipped_with_a_diagnostic(tmp_path, capsys):
         dict(_record(0, []), ran="not-a-list"),
         _record(0, [], expected="not-a-list"),
         _record(0, [], planned="not-a-list"),
-        _record(0, [1]),
+        _record(0, [1], planned=[]),
         _record(0, [], expected=[1]),
         _record(0, [], planned=[1]),
     ]
