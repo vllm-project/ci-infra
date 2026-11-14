@@ -173,20 +173,18 @@ def compare(
                 unverified.append(f"{noun} {shards} recorded nothing")
             if unverified:
                 result["unverified"] = "; ".join(unverified)
-                if expected and not missing and not unfinished:
-                    result["missed"] = sorted(set(expected) - ran)
-                else:
-                    result["missed"] = sorted(finished_planned - ran)
-            elif unfinished:
+            if expected and not missing:
                 for nodeid in sorted(set(expected) - ran):
                     if nodeid in finished_planned:
                         result["missed"].append(nodeid)
-                    elif nodeid in unfinished_planned or unknown_unfinished_plan:
+                    elif unfinished and (
+                        nodeid in unfinished_planned or unknown_unfinished_plan
+                    ):
                         result["not_run"].append(nodeid)
                     else:
                         result["missed"].append(nodeid)
             else:
-                result["missed"] = sorted(set(expected) - ran)
+                result["missed"] = sorted(finished_planned - ran)
             results.append(result)
     return results
 

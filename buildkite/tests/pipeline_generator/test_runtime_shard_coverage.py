@@ -439,6 +439,19 @@ def test_unexpected_tests_do_not_hide_a_definite_miss_on_soft_fail():
     assert coverage.report([result])[0] == "error"
 
 
+def test_unexpected_and_unfinished_do_not_hide_an_unplanned_test():
+    records = [
+        _record(0, ["a", "extra"], expected=["a", "b", "c"], planned=["a"]),
+        _record(1, [], finished=False, planned=["b"]),
+    ]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["unexpected"] == ["extra"]
+    assert result["missed"] == ["c"]
+    assert result["not_run"] == ["b"]
+    result["soft_failed"] = True
+    assert coverage.report([result])[0] == "error"
+
+
 def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
     records = [
         _record(0, ["a"], expected=["a", "b"]),

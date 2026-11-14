@@ -180,6 +180,40 @@ class _Inventory:
             json.dump([item.nodeid for item in items], f)
 
 
+def _cancel_inventory(signum, _frame):
+    """Let the inventory's finally run when the live job is canceled."""
+    raise SystemExit(128 + signum)
+
+
+def _stop_inventory_process(process):
+    """Stop the collection group and close its pipes without another read."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError as error:
+        print(
+            "runtime-shard: couldn't stop the inventory process group "
+            f"({error})",
+            file=sys.stderr,
+        )
+        try:
+            process.kill()
+        except ProcessLookupError:
+            pass
+    if process.poll() is None:
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            print(
+                "runtime-shard: inventory process did not stop after SIGKILL",
+                file=sys.stderr,
+            )
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
+
+
 class ShardPlugin:
     def __init__(self, command, shard, shards, step_key=None):
         self.files = command["files"]  # file from rootdir -> its shard
@@ -314,6 +348,9 @@ class ShardPlugin:
             config.invocation_params.dir
         ):
             env["PYTHONSAFEPATH"] = "1"
+        process = None
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, _cancel_inventory)
         try:
             process = subprocess.Popen(
                 [
@@ -331,33 +368,17 @@ class ShardPlugin:
                 start_new_session=True,
             )
             stdout, stderr = process.communicate(timeout=INVENTORY_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            # Stop the whole collection group, not just pytest: imports can
-            # leave workers or servers holding a GPU beside the live shard.
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except OSError as error:
-                print(
-                    "runtime-shard: couldn't stop the inventory process group "
-                    f"({error})",
-                    file=sys.stderr,
-                )
-                process.kill()
-            stdout, stderr = process.communicate()
+        except subprocess.TimeoutExpired as error:
             os.unlink(path)
             print(
                 "runtime-shard: couldn't collect the command's full test list "
                 f"(timed out after {INVENTORY_TIMEOUT_SECONDS} seconds); the "
                 "coverage check will report the command unverified"
-                + _output_tail(stdout, stderr),
+                + _output_tail(error.output, error.stderr),
                 file=sys.stderr,
             )
             return None
         except OSError as error:
-            # The spawn itself failed (say, the worker is out of processes):
-            # no list, and the shard's own run must go on without it.
             os.unlink(path)
             print(
                 "runtime-shard: couldn't collect the command's full test list "
@@ -366,7 +387,10 @@ class ShardPlugin:
                 file=sys.stderr,
             )
             return None
-        run = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+        finally:
+            if process is not None:
+                _stop_inventory_process(process)
+            signal.signal(signal.SIGTERM, previous_sigterm)
         try:
             with open(path) as f:
                 inventory = json.load(f)
@@ -375,7 +399,7 @@ class ShardPlugin:
         finally:
             if os.path.exists(path):
                 os.unlink(path)
-        collected = run.returncode in (
+        collected = process.returncode in (
             pytest.ExitCode.OK,
             pytest.ExitCode.NO_TESTS_COLLECTED,
         )
@@ -383,8 +407,8 @@ class ShardPlugin:
             return inventory
         print(
             "runtime-shard: couldn't collect the command's full test list "
-            f"(exit {run.returncode}); the coverage check will report the "
-            "command unverified" + _output_tail(run.stdout, run.stderr),
+            f"(exit {process.returncode}); the coverage check will report the "
+            "command unverified" + _output_tail(stdout, stderr),
             file=sys.stderr,
         )
         return None
