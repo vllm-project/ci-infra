@@ -668,6 +668,23 @@ def test_a_record_without_a_build_id_is_stale_when_the_build_is_known():
     assert result["unverified"] is not None and result["missed"] == []
 
 
+def test_artifact_download_failure_is_an_infrastructure_retry(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "artifact", "download"]:
+            return subprocess.CompletedProcess(command, 1, stdout="")
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 93
+    assert "artifact download failed" in annotated[0]
+    assert "recorded nothing" not in annotated[0]
+
+
 def test_only_the_current_builds_records_count():
     records = [
         _record(0, ["a"], expected=["a", "b"], build_id="this-build"),

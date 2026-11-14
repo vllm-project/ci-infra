@@ -2700,6 +2700,7 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
         {"exit_status": 255, "limit": 1},
         {"exit_status": 94, "limit": 1},
         {"exit_status": buildkite_step.HOOK_FAILURE_EXIT_STATUSES, "limit": 1},
+        {"exit_status": 93, "limit": 1},
     ]
     assert 'deadline="$$RUNTIME_SHARD_COVERAGE_DEADLINE"' in job.commands[0]
     assert "finished|ignored|canceled|waiting_failed" in job.commands[0]

@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
 ARTIFACTS = ".runtime-shard-coverage/*/*.json"
+DOWNLOAD_FAILED_EXIT_STATUS = 93
 # Buildkite refuses an annotation over 1 MiB; the log keeps the whole list.
 MAX_IDS_SHOWN = 30
 
@@ -344,18 +345,26 @@ def main() -> int:
         # Every attempt, not only the latest, so latest_records() can pick the
         # latest that finished. An env var, not the flag: an agent too old for
         # it ignores the variable, where an unknown flag fails the download.
-        subprocess.run(
+        download = subprocess.run(
             ["buildkite-agent", "artifact", "download", ARTIFACTS, folder],
             check=False,
             env=dict(os.environ, BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS="true"),
         )
         records = _read_records(folder)
-    # Without the variable (a local run) every record counts, as before.
-    results = compare(
-        steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")
-    )
-    _relax_soft_failed_gaps(results)
-    style, text = report(results)
+    if getattr(download, "returncode", 0):
+        results = []
+        style = "error"
+        text = (
+            f"Coverage artifact download failed (exit {download.returncode}); "
+            "coverage could not be checked."
+        )
+    else:
+        # Without the variable (a local run) every record counts, as before.
+        results = compare(
+            steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")
+        )
+        _relax_soft_failed_gaps(results)
+        style, text = report(results)
     for result in results:
         for name in ("missed", "not_run", "unexpected"):
             for nodeid in result[name]:
@@ -387,6 +396,8 @@ def main() -> int:
         text=True,
         check=False,
     )
+    if getattr(download, "returncode", 0):
+        return DOWNLOAD_FAILED_EXIT_STATUS
     return 1 if style == "error" else 0
 
 
