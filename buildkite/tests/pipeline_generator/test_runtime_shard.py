@@ -2301,24 +2301,18 @@ def test_no_coverage_directory_means_no_records_and_no_extra_collection(tmp_path
     assert not (tmp_path / "records").exists()
 
 
-def test_an_inventory_that_cannot_collect_leaves_the_command_unverified(tmp_path):
-    """A file of another shard that cannot be imported fails the inventory's
-    collection, so the expected list stays unavailable: the coverage check
-    reports the command as unverified rather than compare against a partial
-    list. The recording shard's own tests are unaffected, and pass."""
+def test_a_live_collection_failure_skips_the_second_inventory(tmp_path):
+    """A failed live collection already leaves the expected list unknown, so
+    the shard does not spend time on another doomed inventory."""
     _project(
         tmp_path,
-        {"pkg/test_a.py": "def test_1(): pass\n", "pkg/test_b.py": "raise ValueError\n"},
+        {"pkg/test_a.py": "raise ValueError\n", "pkg/test_b.py": "def test_2(): pass\n"},
     )
     run, record = _covered_run(tmp_path, 0, "job-0")
-    assert run.returncode == 0, run.stdout  # test_b.py is shard 2's
+    assert run.returncode != 0, run.stdout
     assert record["expected"] is None
-    assert record["ran"] == ["tests/pkg/test_a.py::test_1"] and record["finished"] is True
-    assert (
-        "runtime-shard: couldn't collect the command's full test list "
-        f"(exit {pytest.ExitCode.INTERRUPTED}); "
-        "the coverage check will report the command unverified\n"
-    ) in run.stderr
+    assert record["ran"] == [] and record["finished"] is False
+    assert "couldn't collect the command's full test list" not in run.stderr
 
 
 def test_the_inventory_is_the_tests_the_command_selects(tmp_path):

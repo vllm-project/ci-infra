@@ -244,7 +244,11 @@ class ShardPlugin:
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
-        if self.records_expected and not config.getoption("collectonly"):
+        if (
+            self.records_expected
+            and not self.collection_failed
+            and not config.getoption("collectonly")
+        ):
             self.expected = self._expected_inventory(config)
         for item in items:
             file = item.nodeid.split("::")[0]

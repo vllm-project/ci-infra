@@ -231,6 +231,7 @@ def test_a_finished_shards_miss_is_not_hidden_by_missing_evidence():
     [result] = coverage.compare(SOFT_STEPS, records)
     assert result["missed"] == ["a"]
     assert result["unverified"] is not None
+    assert "ran in no finished shard" in coverage.report([result])[1]
     result["soft_failed"] = True
     assert coverage.report([result])[0] == "error"
 
@@ -851,6 +852,16 @@ def test_malformed_records_are_skipped_with_a_diagnostic(tmp_path, capsys):
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == len(malformed)
     assert all("runtime-shard coverage: skipped malformed " in line for line in lines)
+
+
+def test_an_unreadable_record_is_skipped_with_a_diagnostic(tmp_path, capsys):
+    folder = tmp_path / ".runtime-shard-coverage" / "job"
+    folder.mkdir(parents=True)
+    (folder / "0.json").mkdir()
+    record = _record(0, ["a"])
+    (folder / "1.json").write_text(json.dumps(record))
+    assert coverage._read_records(str(tmp_path)) == [record]
+    assert "skipped unreadable" in capsys.readouterr().out
 
 
 def test_the_script_end_to_end_with_an_agent_on_the_path(tmp_path):

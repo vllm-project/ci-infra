@@ -202,7 +202,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     if missed:
         for result in missed:
             count = len(result["missed"])
-            if result["unfinished"]:
+            if result["unfinished"] or result["unverified"]:
                 lines.append(f"### :x: {count} tests ran in no finished shard")
             else:
                 lines.append(
@@ -264,7 +264,7 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
         try:
             with open(path) as f:
                 record = json.load(f)
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             print(f"runtime-shard coverage: skipped unreadable {path}: {error}")
             continue
         valid = isinstance(record, dict) and all(
@@ -360,8 +360,8 @@ def main() -> int:
             "buildkite-agent",
             "annotate",
             "--context",
-            # Use the job's own key so a retried or separately uploaded check
-            # cannot overwrite another check's annotation.
+            # A separately uploaded coverage job gets its own context; retrying
+            # the same job replaces its stale report.
             os.getenv("BUILDKITE_STEP_KEY") or "runtime-shard-coverage",
             "--style",
             style,
