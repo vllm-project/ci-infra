@@ -729,16 +729,23 @@ def test_a_cut_off_record_is_skipped_and_the_rest_still_read(tmp_path, capsys):
 def test_malformed_records_are_skipped_with_a_diagnostic(tmp_path, capsys):
     folder = tmp_path / ".runtime-shard-coverage" / "job"
     folder.mkdir(parents=True)
-    (folder / "0.json").write_text("[]")
-    (folder / "1.json").write_text('{"step": "k"}')
-    (folder / "2.json").write_text(
-        json.dumps(dict(_record(0, []), ran="not-a-list"))
-    )
+    malformed = [
+        [],
+        {"step": "k"},
+        dict(_record(0, []), ran="not-a-list"),
+        _record(0, [], expected="not-a-list"),
+        _record(0, [], planned="not-a-list"),
+        _record(0, [1]),
+        _record(0, [], expected=[1]),
+        _record(0, [], planned=[1]),
+    ]
+    for index, value in enumerate(malformed):
+        (folder / f"{index}.json").write_text(json.dumps(value))
     record = _record(0, ["a"])
-    (folder / "3.json").write_text(json.dumps(record))
+    (folder / "8.json").write_text(json.dumps(record))
     assert coverage._read_records(str(tmp_path)) == [record]
     lines = capsys.readouterr().out.splitlines()
-    assert len(lines) == 3
+    assert len(lines) == len(malformed)
     assert all("runtime-shard coverage: skipped malformed " in line for line in lines)
 
 
