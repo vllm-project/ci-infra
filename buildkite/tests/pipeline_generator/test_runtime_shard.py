@@ -2315,7 +2315,8 @@ def test_an_inventory_that_cannot_collect_leaves_the_command_unverified(tmp_path
     assert record["expected"] is None
     assert record["ran"] == ["tests/pkg/test_a.py::test_1"] and record["finished"] is True
     assert (
-        "runtime-shard: couldn't collect the command's full test list (exit 1); "
+        "runtime-shard: couldn't collect the command's full test list "
+        f"(exit {pytest.ExitCode.INTERRUPTED}); "
         "the coverage check will report the command unverified\n"
     ) in run.stderr
 
@@ -2430,6 +2431,7 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
     captured = {}
 
     def fake_run(args, **kwargs):
+        captured["args"] = args
         captured.update(kwargs)
         with open(kwargs["env"][plugin.INVENTORY_ENV], "w") as f:
             json.dump(["tests/pkg/test_a.py::test_1"], f)
@@ -2442,19 +2444,30 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     assert captured["cwd"] == str(tmp_path)
     assert captured["timeout"] == plugin.INVENTORY_TIMEOUT_SECONDS
+    assert "--continue-on-collection-errors" not in captured["args"]
     assert captured["env"]["PYTHONSAFEPATH"] == "1"
     monkeypatch.setenv("FNREC_OUT", str(tmp_path / "fnrec"))
     monkeypatch.setenv("FNREC_OTHER", "metadata")
     monkeypatch.setenv("CI_INFRA_TRACE_ID", "trace")
     monkeypatch.setenv("CI_INFRA_COMMAND_SPAN_ID", "span")
+    monkeypatch.setenv("KERNREC_DIR", str(tmp_path / "kernrec"))
+    monkeypatch.setenv("KERNREC_BACKEND", "cuda")
+    monkeypatch.setenv("CUDA_INJECTION64_PATH", "kernel-injection.so")
+    monkeypatch.setenv("ROCP_TOOL_LIBRARIES", "kernel-recorder.so")
+    monkeypatch.setenv("LD_PRELOAD", "unrelated-test-library.so")
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     for name in (
         "FNREC_OUT",
         "FNREC_OTHER",
         "CI_INFRA_TRACE_ID",
         "CI_INFRA_COMMAND_SPAN_ID",
+        "KERNREC_DIR",
+        "KERNREC_BACKEND",
+        "CUDA_INJECTION64_PATH",
+        "ROCP_TOOL_LIBRARIES",
     ):
-        assert name not in captured["env"]
+        assert name not in captured["env"], name
+    assert captured["env"]["LD_PRELOAD"] == "unrelated-test-library.so"
     monkeypatch.setattr(plugin, "_INITIAL_SYS_PATH_ENTRY", str(tmp_path))
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     assert "PYTHONSAFEPATH" not in captured["env"]
@@ -2681,7 +2694,6 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
     assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 360
     assert job.retry["automatic"] == [
-        {"exit_status": -1, "signal_reason": "cancel", "limit": 0},
         {"exit_status": -1, "limit": 1},
         {"exit_status": 255, "limit": 1},
         {"exit_status": 94, "limit": 1},

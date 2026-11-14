@@ -294,8 +294,10 @@ class ShardPlugin:
                 APPLIED_ENV,
                 "CI_INFRA_TRACE_ID",
                 "CI_INFRA_COMMAND_SPAN_ID",
+                "CUDA_INJECTION64_PATH",
+                "ROCP_TOOL_LIBRARIES",
             )
-            and not name.startswith("FNREC_")
+            and not name.startswith(("FNREC_", "KERNREC_"))
         }
         env[INVENTORY_ENV] = path
         # Match the live invocation: -m pytest prepends the working directory
@@ -313,7 +315,6 @@ class ShardPlugin:
                     "pytest",
                     *config.invocation_params.args,
                     "--collect-only",
-                    "--continue-on-collection-errors",
                 ],
                 env=env,
                 cwd=config.invocation_params.dir,

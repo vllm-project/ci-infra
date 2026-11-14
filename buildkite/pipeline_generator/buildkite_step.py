@@ -967,11 +967,6 @@ def shard_coverage_step(
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
     retry = ensure_infra_failure_retry(None)
-    # Match timeout cancellation first; other agent losses keep the normal retry.
-    retry["automatic"] = [
-        {"exit_status": -1, "signal_reason": "cancel", "limit": 0},
-        *retry["automatic"],
-    ]
     depends_on = []
     for dep in (d for s in sharded for d in (s.depends_on or [])):
         if dep not in depends_on:

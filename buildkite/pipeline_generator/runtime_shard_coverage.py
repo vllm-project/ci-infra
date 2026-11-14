@@ -349,7 +349,7 @@ def main() -> int:
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
     if style == "error":
         text += (
-            "\n\nAfter retrying a failed shard, retry this coverage job too "
+            "\n\nAfter the retried shard finishes, retry this coverage job too "
             "so it compares the new records."
         )
     print(text)
