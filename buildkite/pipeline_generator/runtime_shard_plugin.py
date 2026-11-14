@@ -511,6 +511,8 @@ def _output_tail(stdout, stderr):
     for label, text in (("output", stdout), ("error output", stderr)):
         if not text:
             continue
+        if isinstance(text, bytes):
+            text = text.decode(errors="replace")
         lines = text.splitlines()
         if len(lines) > INVENTORY_TAIL_LINES:
             lines = ["..."] + lines[-INVENTORY_TAIL_LINES:]

@@ -339,6 +339,14 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
 
 def main() -> int:
     steps = json.loads(os.environ[STEPS_ENV])
+    wait_timed_out = os.path.exists(
+        os.path.join(
+            os.environ.get("TMPDIR", "/tmp"),
+            "runtime-shard-coverage-"
+            + os.environ.get("BUILDKITE_JOB_ID", "")
+            + "-wait-timed-out",
+        )
+    )
     with tempfile.TemporaryDirectory() as folder:
         # Fails when no job uploaded anything; the comparison then says so.
         # Every attempt, not only the latest, so latest_records() can pick the
@@ -363,14 +371,28 @@ def main() -> int:
         for nodeid, shards in result["duplicated"].items():
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
-    if style == "error" and any(
-        result["retryable"] and not result.get("soft_failed", False)
+    retry_pending = wait_timed_out and any(
+        (result["unverified"] or result["unfinished"])
+        and not result.get("soft_failed", False)
         for result in results
-    ):
-        text += (
-            "\n\nAfter the retried shard finishes, retry this coverage job too "
-            "so it compares the new records."
+    )
+    if style == "error" and (
+        retry_pending
+        or any(
+            result["retryable"] and not result.get("soft_failed", False)
+            for result in results
         )
+    ):
+        if retry_pending:
+            text += (
+                "\n\nShards were still pending at the wait deadline; after they "
+                "finish, retry this coverage job."
+            )
+        else:
+            text += (
+                "\n\nAfter the retried shard finishes, retry this coverage job too "
+                "so it compares the new records."
+            )
     print(text)
     subprocess.run(
         [

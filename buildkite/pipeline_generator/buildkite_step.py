@@ -796,11 +796,22 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
 COLLECT_AFTER_MINUTES = 180
 
 def _wait_for_steps(
-    terminal_states: str, sleep_seconds: int, deadline_env: str, finished_message: str
+    terminal_states: str,
+    sleep_seconds: int,
+    deadline_env: str,
+    finished_message: str,
+    mark_deadline: bool = False,
 ) -> str:
     """Poll step states, then let the caller handle anything still unfinished."""
+    marker = (
+        'marker="$${TMPDIR:-/tmp}/runtime-shard-coverage-'
+        '$$BUILDKITE_JOB_ID-wait-timed-out"; rm -f "$$marker"; '
+        if mark_deadline
+        else ""
+    )
+    touch = 'touch "$$marker"; ' if mark_deadline else ""
     return (
-        f'deadline="$${deadline_env}"; '
+        f'{marker}deadline="$${deadline_env}"; '
         "while :; do "
         'pending=""; '
         "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
@@ -810,7 +821,7 @@ def _wait_for_steps(
         "done; "
         f'[ -z "$$pending" ] && {{ echo "{finished_message}"; break; }}; '
         '[ "$$(date +%s)" -ge "$$deadline" ] && '
-        '{ echo "wait deadline reached with $$pending '
+        f'{{ {touch}echo "wait deadline reached with $$pending '
         '($${s:-state unknown}); continuing"; break; }; '
         'echo "waiting on $$pending ($${s:-state unknown}); deadline '
         '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
@@ -832,6 +843,7 @@ COVERAGE_WAIT = _wait_for_steps(
     30,
     "RUNTIME_SHARD_COVERAGE_DEADLINE",
     "every sharded step has stopped",
+    mark_deadline=True,
 )
 COVERAGE_TIMEOUT_MINUTES = 360
 COVERAGE_WAIT_MINUTES = COVERAGE_TIMEOUT_MINUTES - 15

@@ -113,7 +113,11 @@ def test_collection_skips_deferred_steps(recorder, reverse):
 
 
 def test_collect_wait_uses_its_deadline_and_terminal_states():
-    assert 'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"' in buildkite_step.COLLECT_WAIT
+    assert buildkite_step.COLLECT_WAIT.startswith(
+        'deadline="$$CI_SELECTOR_COLLECT_DEADLINE";'
+    )
+    assert '{ echo "wait deadline reached with $$pending ' in buildkite_step.COLLECT_WAIT
+    assert "runtime-shard-coverage-" not in buildkite_step.COLLECT_WAIT
     assert (
         'case "$$s" in finished|ignored|canceled|waiting_failed) ;; '
         in buildkite_step.COLLECT_WAIT

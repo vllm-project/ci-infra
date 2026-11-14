@@ -106,6 +106,12 @@ def test_retry_advice_depends_on_missing_shard_evidence(monkeypatch):
         monkeypatch.setattr(coverage, "_read_records", lambda _: records)
         assert coverage.main() == 1
         assert ("After the retried shard finishes" in annotated[0]) is expected
+        if expected:
+            assert "### Couldn't check" in annotated[0]
+            assert annotated[0].endswith(
+                "After the retried shard finishes, retry this coverage job too "
+                "so it compares the new records."
+            )
 
 
 def test_an_empty_inventory_is_not_proof_of_coverage():
@@ -779,6 +785,14 @@ def coverage_records(folder):
 def test_main_fails_closed_with_no_records(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
+    monkeypatch.delenv("TMPDIR", raising=False)
+    monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
+    marker_paths = []
+    monkeypatch.setattr(
+        coverage.os.path,
+        "exists",
+        lambda path: marker_paths.append(path) or False,
+    )
     calls = []
     annotated = []
 
@@ -800,6 +814,88 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     assert calls[1][5] == "error"
     assert annotated[0].startswith("### Couldn't check")
     assert "After the retried shard finishes" not in annotated[0]
+    assert marker_paths == ["/tmp/runtime-shard-coverage--wait-timed-out"]
+
+
+def test_main_advises_retry_when_the_wait_deadline_left_shards_pending(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "coverage-job")
+    (
+        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    ).touch()
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(coverage, "_read_records", lambda _: [])
+    assert coverage.main() == 1
+    assert annotated[0].startswith("### Couldn't check")
+    assert (
+        "Shards were still pending at the wait deadline; after they finish, "
+        "retry this coverage job."
+    ) in annotated[0]
+
+
+def test_deadline_retry_advice_distinguishes_unfinished_from_misses(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "coverage-job")
+    (
+        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    ).touch()
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
+
+    cases = [
+        (
+            "unfinished",
+            STEPS,
+            [
+                _record(0, ["a"], expected=["a", "b"], planned=["a"]),
+                _record(1, [], finished=False, planned=["b"]),
+            ],
+            True,
+        ),
+        (
+            "allowed soft failure",
+            SOFT_STEPS,
+            [
+                _record(0, [], expected=["a", "b"], planned=["a"]),
+                _record(1, [], finished=False, planned=["b"]),
+            ],
+            False,
+        ),
+        (
+            "definite miss",
+            STEPS,
+            [
+                _record(0, ["a"], expected=["a", "b"], planned=["a"]),
+                _record(1, [], planned=["b"]),
+            ],
+            False,
+        ),
+    ]
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for name, steps, records, expected_retry in cases:
+        monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(steps))
+        monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+        annotated.clear()
+        assert coverage.main() == 1, name
+        assert annotated[0].startswith("###"), name
+        assert (
+            "Shards were still pending at the wait deadline" in annotated[0]
+        ) is expected_retry, name
 
 
 def test_main_checks_only_the_current_builds_records(monkeypatch):

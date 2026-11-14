@@ -2397,7 +2397,10 @@ def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, caps
 
     def hangs(*args, **kwargs):
         raise subprocess.TimeoutExpired(
-            cmd=args[0], timeout=plugin.INVENTORY_TIMEOUT_SECONDS
+            cmd=args[0],
+            timeout=plugin.INVENTORY_TIMEOUT_SECONDS,
+            output=b"pytest header: \xff\n",
+            stderr=b"inventory still collecting\n",
         )
 
     monkeypatch.setattr(plugin.subprocess, "run", hangs)
@@ -2410,6 +2413,10 @@ def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, caps
         "runtime-shard: couldn't collect the command's full test list "
         f"(timed out after {plugin.INVENTORY_TIMEOUT_SECONDS} seconds); the "
         "coverage check will report the command unverified\n"
+        "--- last lines of its output ---\n"
+        "pytest header: �\n"
+        "--- last lines of its error output ---\n"
+        "inventory still collecting\n"
     ) == err
 
 
@@ -2799,7 +2806,9 @@ def test_coverage_wait_stops_when_shards_cannot_run(
     agent = tmp_path / "buildkite-agent"
     agent.write_text('#!/bin/sh\nprintf "%s\\n" "$STEP_STATE"\n')
     agent.chmod(0o755)
+    marker = tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
     for state in ("finished", "ignored", "canceled", "waiting_failed"):
+        marker.touch()
         run = subprocess.run(
             ["bash", "-c", wait],
             env=dict(
@@ -2810,6 +2819,8 @@ def test_coverage_wait_stops_when_shards_cannot_run(
                     "RUNTIME_SHARD_COVERAGE_DEADLINE"
                 ],
                 STEP_STATE=state,
+                TMPDIR=str(tmp_path),
+                BUILDKITE_JOB_ID="coverage-job",
             ),
             capture_output=True,
             text=True,
@@ -2817,6 +2828,7 @@ def test_coverage_wait_stops_when_shards_cannot_run(
         )
         assert run.returncode == 0
         assert run.stdout == "every sharded step has stopped\n"
+        assert not marker.exists()
 
 
 def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
@@ -2845,6 +2857,8 @@ def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
             PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
             CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
             RUNTIME_SHARD_COVERAGE_DEADLINE=str(deadline),
+            TMPDIR=str(tmp_path),
+            BUILDKITE_JOB_ID="coverage-job",
         ),
         capture_output=True,
         text=True,
@@ -2852,6 +2866,9 @@ def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
     )
     assert run.returncode == 0
     assert "deadline" in run.stdout and "model-executor" in run.stdout
+    assert (
+        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    ).is_file()
     assert len(job.commands) == 2  # the checker runs next, even after the wait
 
 
