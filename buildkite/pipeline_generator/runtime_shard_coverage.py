@@ -149,6 +149,7 @@ def compare(
                 unverified.append(f"{noun} {shards} recorded nothing")
             if unverified:
                 result["unverified"] = "; ".join(unverified)
+                result["missed"] = sorted(finished_planned - ran)
             elif unfinished:
                 for nodeid in sorted(set(expected) - ran):
                     if nodeid in finished_planned:
@@ -330,16 +331,11 @@ def main() -> int:
         )
         records = _read_records(folder)
     # Without the variable (a local run) every record counts, as before.
-    results = compare(steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")) if records else []
-    if records:
-        _relax_soft_failed_gaps(results)
-        style, text = report(results)
-    else:
-        style = "error"
-        text = (
-            "No coverage records were uploaded; coverage could not be checked. "
-            "The shard jobs may not have run."
-        )
+    results = compare(
+        steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")
+    )
+    _relax_soft_failed_gaps(results)
+    style, text = report(results)
     for result in results:
         for name in ("missed", "not_run", "unexpected"):
             for nodeid in result[name]:
@@ -347,7 +343,9 @@ def main() -> int:
         for nodeid, shards in result["duplicated"].items():
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
-    if style == "error":
+    if style == "error" and any(
+        result["unfinished"] or result["unverified"] for result in results
+    ):
         text += (
             "\n\nAfter the retried shard finishes, retry this coverage job too "
             "so it compares the new records."

@@ -172,6 +172,15 @@ def test_a_shard_with_no_record_fails_closed():
     )
 
 
+def test_a_finished_shards_miss_is_not_hidden_by_missing_evidence():
+    records = [_record(0, [], planned=["a"])]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["missed"] == ["a"]
+    assert result["unverified"] is not None
+    result["soft_failed"] = True
+    assert coverage.report([result])[0] == "error"
+
+
 def test_a_missing_record_next_to_an_unfinished_shard_hides_its_not_run():
     # Shard 1 recorded it didn't finish; shard 2 left nothing. Shard 2's gap
     # makes attribution unknowable, so the command reports unverified, not
@@ -391,6 +400,20 @@ def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch
     assert styles == ["warning", "warning", "warning", "error", "error", "error", "error"]
 
 
+def test_main_relaxes_no_records_only_for_allowed_soft_fail_outcomes(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
+    monkeypatch.setattr(coverage, "_read_records", lambda _: [])
+    for outcome, expected in (("soft_failed\n", 0), ("passed\n", 1), ("neutral\n", 1)):
+
+        def fake_run(command, check, **kwargs):
+            if command[:3] == ["buildkite-agent", "step", "get"]:
+                return subprocess.CompletedProcess(command, 0, stdout=outcome)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert coverage.main() == expected
+
+
 def test_soft_failed_outcomes_are_independent_for_each_step(monkeypatch):
     steps = {
         "hard": [{"position": 0, "label": "Hard", "fallback": 0, "owners": [0]}],
@@ -567,7 +590,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
         "--style",
     ]
     assert calls[1][5] == "error" and "`gone`" in annotated[0]
-    assert "After the retried shard finishes, retry this coverage job too" in annotated[0]
+    assert "After the retried shard finishes" not in annotated[0]
     out = capsys.readouterr().out
     assert "missed: k: gone\n" in out and "### :x:" in out
 
@@ -619,9 +642,8 @@ def test_main_fails_closed_with_no_records(monkeypatch):
         "--style",
     ]
     assert calls[1][5] == "error"
-    assert annotated[0].startswith(
-        "No coverage records were uploaded; coverage could not be checked."
-    )
+    assert annotated[0].startswith("### Couldn't check")
+    assert "After the retried shard finishes" in annotated[0]
 
 
 def test_main_checks_only_the_current_builds_records(monkeypatch):
