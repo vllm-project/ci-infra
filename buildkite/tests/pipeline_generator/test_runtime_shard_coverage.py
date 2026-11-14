@@ -127,6 +127,23 @@ def test_a_test_no_finished_shard_ran_is_a_miss():
     )
 
 
+def test_a_miss_heading_ignores_unfinished_other_commands():
+    steps = {
+        "k": [
+            {"position": 0, "label": "Finished", "fallback": 0, "owners": [0]},
+            {"position": 1, "label": "Unfinished", "fallback": 0, "owners": [0, 1]},
+        ]
+    }
+    records = [
+        _record(0, [], expected=["a"], position=0, planned=["a"]),
+        _record(0, [], expected=["a"], position=1, planned=["a"], finished=False),
+        _record(1, [], position=1),
+    ]
+    style, text = coverage.report(coverage.compare(steps, records))
+    assert style == "error"
+    assert text.startswith("### :x: 1 tests ran in no shard, though every shard finished")
+
+
 def test_a_test_with_any_outcome_counts_because_ran_is_any_report():
     records = [_record(0, ["a", "b"], expected=["a", "b"]), _record(1, [])]
     assert coverage.compare(STEPS, records)[0]["missed"] == []

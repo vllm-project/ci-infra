@@ -200,14 +200,14 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     duplicated = [result for result in results if result["duplicated"]]
     lines = []
     if missed:
-        count = sum(len(result["missed"]) for result in missed)
-        if unfinished:
-            lines.append(f"### :x: {count} tests ran in no finished shard")
-        else:
-            lines.append(
-                f"### :x: {count} tests ran in no shard, though every shard finished"
-            )
         for result in missed:
+            count = len(result["missed"])
+            if result["unfinished"]:
+                lines.append(f"### :x: {count} tests ran in no finished shard")
+            else:
+                lines.append(
+                    f"### :x: {count} tests ran in no shard, though every shard finished"
+                )
             lines.append(f"**{result['step']}**, {result['label']}:")
             lines.extend(_ids(result["missed"]))
     if unfinished:
