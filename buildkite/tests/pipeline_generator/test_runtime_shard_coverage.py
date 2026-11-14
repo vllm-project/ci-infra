@@ -87,10 +87,10 @@ def test_retry_advice_omits_deterministic_inventory_errors(monkeypatch):
     assert "After the retried shard finishes" not in annotated[0]
 
 
-def test_retry_advice_includes_each_kind_of_missing_evidence(monkeypatch):
+def test_retry_advice_depends_on_missing_shard_evidence(monkeypatch):
     cases = [
-        [_record(0, ["a"], expected=["a", "b"])],
-        [_record(0, ["a"]), _record(1, [])],
+        ([_record(0, ["a"], expected=["a", "b"])], True),
+        ([_record(0, ["a"]), _record(1, [])], False),
     ]
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     annotated = []
@@ -101,11 +101,11 @@ def test_retry_advice_includes_each_kind_of_missing_evidence(monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    for records in cases:
+    for records, expected in cases:
         annotated.clear()
         monkeypatch.setattr(coverage, "_read_records", lambda _: records)
         assert coverage.main() == 1
-        assert "After the retried shard finishes" in annotated[0]
+        assert ("After the retried shard finishes" in annotated[0]) is expected
 
 
 def test_an_empty_inventory_is_not_proof_of_coverage():
@@ -680,7 +680,7 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     ]
     assert calls[1][5] == "error"
     assert annotated[0].startswith("### Couldn't check")
-    assert "After the retried shard finishes" in annotated[0]
+    assert "After the retried shard finishes" not in annotated[0]
 
 
 def test_main_checks_only_the_current_builds_records(monkeypatch):

@@ -296,6 +296,7 @@ class ShardPlugin:
                 "CI_INFRA_COMMAND_SPAN_ID",
                 "CUDA_INJECTION64_PATH",
                 "ROCP_TOOL_LIBRARIES",
+                "BUILDKITE_ANALYTICS_TOKEN",
             )
             and not name.startswith(("FNREC_", "KERNREC_"))
         }

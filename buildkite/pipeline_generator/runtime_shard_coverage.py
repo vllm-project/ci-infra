@@ -73,9 +73,11 @@ def compare(
         unfinished owner), `unfinished` (shards that recorded they didn't
         finish), `not_run` (test IDs assigned to unfinished shards with no
         reported outcome, or whose ownership is unknown), `unexpected` (reported
-        test IDs absent from the expected inventory), `duplicated` (each test ID
-        reported by more than one shard, to those shards) and `unverified` (why
-        it can't be checked, or None). A shard that left no record makes its
+        test IDs absent from the expected inventory), `retryable` (whether an
+        unfinished shard or a missing shard alongside reported outcomes may
+        produce new evidence on retry), `duplicated` (each test ID reported by
+        more than one shard, to those shards) and `unverified` (why it can't be
+        checked, or None). A shard that left no record makes its
         command unverified: which tests it owned can't be known, so they are
         neither missed nor not_run. An empty or inconsistent expected inventory
         is unverified too.
@@ -125,6 +127,7 @@ def compare(
                 "unfinished": unfinished,
                 "not_run": [],
                 "unexpected": unexpected,
+                "retryable": bool(unfinished or (missing and ran)),
                 "duplicated": {
                     nodeid: shards
                     for nodeid, shards in sorted(shards_of.items())
@@ -344,14 +347,7 @@ def main() -> int:
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
     if style == "error" and any(
-        result["unfinished"]
-        or (
-            result["unverified"]
-            and (
-                "recorded nothing" in result["unverified"]
-                or "recorded no test list" in result["unverified"]
-            )
-        )
+        result["retryable"] and not result.get("soft_failed", False)
         for result in results
     ):
         text += (

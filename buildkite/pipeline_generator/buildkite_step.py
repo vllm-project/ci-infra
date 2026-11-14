@@ -951,7 +951,7 @@ def shard_coverage_step(
                     "label": planned["label"],
                     "fallback": planned["fallback"],
                     "owners": runtime_shard.owners(planned),
-                    # Only a final soft-failed outcome relaxes coverage gaps;
+                    # Only a terminal failure on a soft-fail step relaxes gaps;
                     # a passed step still has to prove coverage.
                     "soft_fail": bool(step.soft_fail),
                 }
