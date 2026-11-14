@@ -545,9 +545,12 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
     calls = []
+    annotated = []
 
     def fake_run(command, check, **kwargs):
         calls.append(command)
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(coverage, "_read_records", lambda _: [])
@@ -560,6 +563,9 @@ def test_main_fails_closed_with_no_records(monkeypatch):
         "--style",
     ]
     assert calls[1][5] == "error"
+    assert annotated[0].startswith(
+        "No coverage records were uploaded; coverage could not be checked."
+    )
 
 
 def test_main_checks_only_the_current_builds_records(monkeypatch):
@@ -697,7 +703,8 @@ if [ "$1" = artifact ]; then cp -r {tmp_path}/artifacts/. "$4"; else echo "$@" >
 def test_a_large_annotation_is_passed_on_stdin_not_as_an_argument(monkeypatch):
     text = "x" * 140_000
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
-    monkeypatch.setattr(coverage, "_read_records", lambda _: [])
+    records = [_record(0, [], expected=[]), _record(1, [])]
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
     monkeypatch.setattr(coverage, "report", lambda _: ("warning", text))
     calls = []
 

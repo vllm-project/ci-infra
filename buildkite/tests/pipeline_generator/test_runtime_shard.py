@@ -2443,7 +2443,7 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
     assert captured["cwd"] == str(tmp_path)
     assert captured["timeout"] == plugin.INVENTORY_TIMEOUT_SECONDS
     assert captured["env"]["PYTHONSAFEPATH"] == "1"
-    monkeypatch.setattr(plugin.sys, "path", [str(tmp_path)])
+    monkeypatch.setattr(plugin, "_INITIAL_SYS_PATH_ENTRY", str(tmp_path))
     assert shard._expected_inventory(config) == ["tests/pkg/test_a.py::test_1"]
     assert "PYTHONSAFEPATH" not in captured["env"]
 
@@ -2647,9 +2647,10 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step, mirror])
     job = buildkite_step.shard_coverage_step([group])
     assert job.key == "runtime-shard-coverage"
-    # Dependencies wait for the shards and their retries, not a CPU polling job.
-    assert job.depends_on == ["model-executor", "amd-model-executor"]
-    assert "CI_SELECTOR_COLLECT_WAIT_FOR" not in job.env
+    # Poll the shards rather than depend on them: a cancelled soft-fail shard
+    # must not make the whole coverage check disappear.
+    assert job.depends_on == []
+    assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "model-executor amd-model-executor"
     assert "CI_SELECTOR_COLLECT_DEADLINE" not in job.env
     assert job.allow_dependency_failure is True and job.soft_fail is False
     steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
@@ -2666,14 +2667,27 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.json"
     assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
     assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
-    assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 60
+    assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 360
     assert job.retry == buildkite_step.ensure_infra_failure_retry(None)
+    assert job.commands[0] == (
+        "while :; do "
+        'pending=""; '
+        "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+        's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+        'case "$$s" in finished|ignored|*_failed|timed_out|canceled|cancelled|expired|broken|skipped) ;; '
+        '*) pending="$$k"; break;; esac; '
+        "done; "
+        '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
+        'echo "waiting on $$pending ($${s:-state unknown})"; '
+        "sleep 30; "
+        "done"
+    )
     script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
-    assert job.commands == [
+    assert job.commands[1] == (
         'python3 -c \'import base64,json,os,sys,zlib; '
         'sys.stdout.write(json.loads(zlib.decompress(base64.b64decode(os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\''
         f" > {script} && python3 {script}"
-    ]
+    )
     # And their records land where each job can reach the checkout.
     coverage_setup = rs.shard_job_setup("/workdir")[-1]
     assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in coverage_setup
@@ -2713,14 +2727,14 @@ def test_coverage_job_leaves_out_deferred_steps_and_builds_without_shards(
     [running] = _render(_step(automatic_shard=True, key="running"))
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded, running])
     job = buildkite_step.shard_coverage_step([group])
-    assert job.depends_on == ["running"]
+    assert job.depends_on == []
     assert json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).keys() == {"running"}
     image = buildkite_step.BuildkiteGroupStep(
         group="i",
         steps=[buildkite_step.BuildkiteCommandStep(label="i", key="image-build", commands=["x"])],
     )
     job = buildkite_step.shard_coverage_step([image, group])
-    assert job.depends_on == ["running"]  # the shard's image is a transitive dependency
+    assert job.depends_on == ["image-build"]  # not the shard jobs themselves
 
 
 def test_coverage_job_embeds_and_decodes_the_generator_script(fake_global_config, checkout):
@@ -2742,7 +2756,7 @@ def test_coverage_job_embeds_and_decodes_the_generator_script(fake_global_config
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_POSTMERGE.value
 
     script = "/tmp/runtime_shard_coverage.test-job.py"
-    decode = job.commands[0].replace("$$", "$").split(" && python3 ", 1)[0]
+    decode = job.commands[-1].replace("$$", "$").split(" && python3 ", 1)[0]
     try:
         subprocess.run(
             ["bash", "-c", decode],
@@ -2758,10 +2772,28 @@ def test_coverage_job_embeds_and_decodes_the_generator_script(fake_global_config
             os.unlink(script)
 
 
-def test_coverage_job_does_not_poll(fake_global_config, checkout):
+def test_coverage_wait_stops_when_shards_cannot_run(
+    fake_global_config, checkout, tmp_path
+):
     fake_global_config["run_all"] = True
     [step] = _render(_step(automatic_shard=True))
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    job = buildkite_step.shard_coverage_step([group])
-    assert len(job.commands) == 1
-    assert "CI_SELECTOR_COLLECT_WAIT_FOR" not in job.env
+    wait = buildkite_step.shard_coverage_step([group]).commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text('#!/bin/sh\nprintf "%s\\n" "$STEP_STATE"\n')
+    agent.chmod(0o755)
+    for state in ("waiting_failed", "timed_out", "canceled"):
+        run = subprocess.run(
+            ["bash", "-c", wait],
+            env=dict(
+                os.environ,
+                PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+                CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+                STEP_STATE=state,
+            ),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        assert run.returncode == 0
+        assert run.stdout == "every sharded step has stopped\n"

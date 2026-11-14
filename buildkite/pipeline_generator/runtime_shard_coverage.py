@@ -287,8 +287,16 @@ def main() -> int:
         )
         records = _read_records(folder)
     # Without the variable (a local run) every record counts, as before.
-    results = compare(steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID"))
-    _relax_soft_failed_unverified(results)
+    results = compare(steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")) if records else []
+    if records:
+        _relax_soft_failed_unverified(results)
+        style, text = report(results)
+    else:
+        style = "error"
+        text = (
+            "No coverage records were uploaded; coverage could not be checked. "
+            "The shard jobs may not have run."
+        )
     for result in results:
         for name in ("missed", "not_run"):
             for nodeid in result[name]:
@@ -296,7 +304,6 @@ def main() -> int:
         for nodeid, shards in result["duplicated"].items():
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
-    style, text = report(results)
     if style == "error":
         text += (
             "\n\nAfter retrying a failed shard, retry this coverage job too "

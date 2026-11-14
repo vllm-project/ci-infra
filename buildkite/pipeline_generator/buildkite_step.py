@@ -815,6 +815,25 @@ COLLECT_WAIT = (
     "done"
 )
 
+# Polls each sharded step until every one reaches a terminal state, including
+# a canceled soft-fail step that a dependent coverage job would otherwise skip.
+# The wait has no generation-time deadline; the job's timeout includes queue time.
+COVERAGE_WAIT = (
+    "while :; do "
+    'pending=""; '
+    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    'case "$$s" in finished|ignored|*_failed|timed_out|canceled|cancelled|expired|broken|skipped) ;; '
+    '*) pending="$$k"; break;; esac; '
+    "done; "
+    '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
+    'echo "waiting on $$pending ($${s:-state unknown})"; '
+    "sleep 30; "
+    "done"
+)
+COVERAGE_TIMEOUT_MINUTES = 360
+
+
 def _collect_step(
     groups: "List[BuildkiteGroupStep]",
     recorder: str,
@@ -909,17 +928,20 @@ def shard_coverage_step(
     Fails when a test is missed or coverage cannot be proven, so a successful
     shard cannot hide a missing record. The comparison source is packed at
     generation, so the job runs the same revision as the plugin without a
-    runtime download. Depending on the sharded steps waits for them and their
-    retries without a CPU polling job. allow_dependency_failure still lets it
-    check ordinary failed shards; a canceled build already fails without it.
+    runtime download. Polling rather than depending on the shards means a
+    canceled soft-fail shard cannot suppress the whole check. The polling
+    agent is held through shard queue time, bounded by this job's timeout.
     """
     steps = {}
+    sharded = []
+    runnable_keys = {s.key for g in groups for s in g.steps if not s.deferred}
     for group in groups:
         for step in group.steps:
             packed = (step.env or {}).get(runtime_shard.PLAN_ENV)
             if not packed or step.deferred:
                 continue
             plan = runtime_shard.unpack(packed)
+            sharded.append(step)
             steps[step.key] = [
                 {
                     "position": planned["position"],
@@ -942,23 +964,29 @@ def shard_coverage_step(
     script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+    depends_on = []
+    for dep in (d for s in sharded for d in (s.depends_on or [])):
+        if dep in runnable_keys and dep not in depends_on:
+            depends_on.append(dep)
     return BuildkiteCommandStep(
         label=":mag: Check every test ran",
         key="runtime-shard-coverage",
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
+            "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
             "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),
         },
         agents={"queue": queue.value},
         commands=[
+            COVERAGE_WAIT,
             'python3 -c \'import base64,json,os,sys,zlib; '
             'sys.stdout.write(json.loads(zlib.decompress(base64.b64decode(os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\''
             f" > {script} && python3 {script}"
         ],
-        depends_on=list(steps),
+        depends_on=depends_on,
         allow_dependency_failure=True,
         soft_fail=False,
-        timeout_in_minutes=60,
+        timeout_in_minutes=COVERAGE_TIMEOUT_MINUTES,
         retry=ensure_infra_failure_retry(None),
     )
 

@@ -53,6 +53,8 @@ INVENTORY_TIMEOUT_SECONDS = 300
 # A failed inventory prints only this much of its output: enough to name the
 # file that broke, not enough to bury the job's own log.
 INVENTORY_TAIL_LINES = 40
+# Captured before conftest and package imports can change sys.path.
+_INITIAL_SYS_PATH_ENTRY = os.path.realpath(sys.path[0] or ".")
 
 
 def _pytest_python():
@@ -290,7 +292,7 @@ class ShardPlugin:
         # Match the live invocation: -m pytest prepends the working directory
         # to sys.path; the console script does not. Suppress it only if the
         # live invocation did not already have it there.
-        if os.path.realpath(sys.path[0] or ".") != os.path.realpath(
+        if _INITIAL_SYS_PATH_ENTRY != os.path.realpath(
             config.invocation_params.dir
         ):
             env["PYTHONSAFEPATH"] = "1"
@@ -359,8 +361,6 @@ class ShardPlugin:
         if session.config.getoption("collectonly"):
             self.coverage_dir = None
             return
-        if self.collection_failed:
-            self.planned = None
         # Before any test: a shard that dies leaves this, marked unfinished.
         self._write_record(finished=False)
         # Looked up here: it registers after -p plugins are configured.
