@@ -71,12 +71,14 @@ def compare(
         may fail without failing the build), `tests` (how many it should
         run), `missed` (test IDs from a finished shard or with no possible
         unfinished owner), `unfinished` (shards that recorded they didn't
-        finish), `not_run` (test IDs assigned to unfinished shards or whose
-        ownership is unknown), `duplicated` (each
-        test ID that more than one finished shard ran, to those shards) and
-        `unverified` (why it can't be checked, or None). A shard that left no
-        record makes its command unverified: which tests it owned can't be
-        known, so they are neither missed nor not_run.
+        finish), `not_run` (test IDs assigned to unfinished shards with no
+        reported outcome, or whose ownership is unknown), `unexpected` (reported
+        test IDs absent from the expected inventory), `duplicated` (each test ID
+        reported by more than one shard, to those shards) and `unverified` (why
+        it can't be checked, or None). A shard that left no record makes its
+        command unverified: which tests it owned can't be known, so they are
+        neither missed nor not_run. An empty or inconsistent expected inventory
+        is unverified too.
     """
     if build_id is not None:
         records = [record for record in records if record.get("build_id") == build_id]
@@ -91,29 +93,29 @@ def compare(
             finished_planned = set()
             unfinished_planned = set()
             unknown_unfinished_plan = False
-            shards_of = {}  # test ID -> the finished shards that ran it
+            shards_of = {}  # test ID -> the shards that reported it
             for shard in command["owners"]:
                 record = latest.get((step_key, position, shard))
                 if record is None:
                     missing.append(shard)
                     continue
                 planned = record.get("planned")
+                ran.update(record["ran"])
+                for nodeid in set(record["ran"]):
+                    shards_of.setdefault(nodeid, []).append(shard)
                 if not record["finished"]:
                     unfinished.append(shard)
                     if isinstance(planned, list):
                         unfinished_planned.update(planned)
                     else:
                         unknown_unfinished_plan = True
-                else:
-                    ran.update(record["ran"])
-                    if isinstance(planned, list):
-                        finished_planned.update(planned)
-                    for nodeid in set(record["ran"]):
-                        shards_of.setdefault(nodeid, []).append(shard)
+                elif isinstance(planned, list):
+                    finished_planned.update(planned)
             # The expected list is written before any test runs, so a shard
             # that died still has it.
             first = latest.get((step_key, position, command["fallback"]))
             expected = first.get("expected") if first else None
+            unexpected = sorted(ran - set(expected)) if expected is not None else []
             result = {
                 "step": step_key,
                 "label": command["label"],
@@ -122,6 +124,7 @@ def compare(
                 "missed": [],
                 "unfinished": unfinished,
                 "not_run": [],
+                "unexpected": unexpected,
                 "duplicated": {
                     nodeid: shards
                     for nodeid, shards in sorted(shards_of.items())
@@ -133,6 +136,12 @@ def compare(
             if expected is None:
                 unverified.append(
                     f"shard {command['fallback'] + 1} recorded no test list"
+                )
+            elif not expected:
+                unverified.append("expected inventory is empty")
+            if unexpected:
+                unverified.append(
+                    f"{len(unexpected)} reported tests absent from the expected inventory"
                 )
             if missing:
                 shards = ", ".join(str(shard + 1) for shard in missing)
@@ -176,9 +185,9 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         every test is proven run: a miss, an unfinished shard and a command
         that can't be checked all fail the job; only duplicates stay a
         warning. A soft-fail step is the exception for an unfinished shard or
-        unverified evidence after Buildkite's final non-passing outcome: its
-        build already allows that failure. Either gap after a passed step still
-        fails, as does a definite miss.
+        unverified evidence after an allowed terminal failure outcome: its
+        build already allows that failure. Either gap after a passed, neutral
+        or unavailable outcome still fails, as does a definite miss.
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
@@ -219,6 +228,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
             lines.append(
                 f"**{result['step']}**, {result['label']}: {result['unverified']}{soft}"
             )
+            lines.extend(_ids(result.get("unexpected", [])))
     if lines:
         blocking = [
             result
@@ -234,24 +244,50 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
 
 def _read_records(folder: str) -> List[Dict[str, Any]]:
     records = []
+    required = {
+        "step": str,
+        "position": int,
+        "shard": int,
+        "retry": int,
+        "finished": bool,
+        "finished_at": (int, float),
+        "ran": list,
+    }
     pattern = os.path.join(folder, ARTIFACTS)
     for path in glob.glob(pattern, recursive=True):
         # A shard killed mid-write leaves one bad file; skipping it makes that
         # shard's coverage unverified rather than stopping every step's check.
         try:
             with open(path) as f:
-                records.append(json.load(f))
+                record = json.load(f)
         except ValueError as error:
             print(f"runtime-shard coverage: skipped unreadable {path}: {error}")
+            continue
+        valid = isinstance(record, dict) and all(
+            isinstance(record.get(key), kind) for key, kind in required.items()
+        )
+        if valid:
+            for key in ("expected", "planned", "ran"):
+                value = record.get(key)
+                if value is not None and (
+                    not isinstance(value, list)
+                    or any(not isinstance(nodeid, str) for nodeid in value)
+                ):
+                    valid = False
+                    break
+        if not valid:
+            print(f"runtime-shard coverage: skipped malformed {path}")
+            continue
+        records.append(record)
     return records
 
 
 def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
     """Do not turn a step's existing soft failure into a hard coverage failure.
 
-    A passed soft-fail step still has to prove its coverage. Any final outcome
-    other than passed may relax its unfinished shards or missing evidence; an
-    unavailable outcome keeps the hard failure.
+    A passed soft-fail step still has to prove its coverage. Only a terminal
+    soft_failed, hard_failed, errored or canceled outcome may relax its gaps.
+    A passed, neutral or unavailable outcome keeps the hard failure.
     """
     outcomes = {}
     for result in results:
@@ -269,8 +305,11 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
                     text=True,
                     timeout=60,
                 )
-                outcomes[step] = (
-                    run.returncode == 0 and run.stdout.strip() not in ("", "passed")
+                outcomes[step] = run.returncode == 0 and run.stdout.strip() in (
+                    "soft_failed",
+                    "hard_failed",
+                    "errored",
+                    "canceled",
                 )
             except (OSError, subprocess.TimeoutExpired):
                 outcomes[step] = False
@@ -302,7 +341,7 @@ def main() -> int:
             "The shard jobs may not have run."
         )
     for result in results:
-        for name in ("missed", "not_run"):
+        for name in ("missed", "not_run", "unexpected"):
             for nodeid in result[name]:
                 print(f"{name}: {result['step']}: {nodeid}")
         for nodeid, shards in result["duplicated"].items():

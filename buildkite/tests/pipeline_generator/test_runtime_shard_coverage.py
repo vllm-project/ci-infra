@@ -60,6 +60,24 @@ def test_all_tests_ran():
     assert text == "Every test ran: 2 tests across 1 sharded steps."
 
 
+def test_an_inventory_that_omits_a_reported_test_fails_closed():
+    records = [_record(0, ["a", "extra"], expected=["a"]), _record(1, [])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unexpected"] == ["extra"]
+    assert result["missed"] == []
+    assert result["unverified"] == "1 reported tests absent from the expected inventory"
+    style, text = coverage.report([result])
+    assert style == "error"
+    assert "`extra`" in text
+
+
+def test_an_empty_inventory_is_not_proof_of_coverage():
+    records = [_record(0, [], expected=[]), _record(1, [])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unverified"] == "expected inventory is empty"
+    assert coverage.report([result])[0] == "error"
+
+
 def test_a_test_no_finished_shard_ran_is_a_miss():
     records = [_record(0, ["a"], expected=["a", "b", "c"]), _record(1, ["b"])]
     [result] = coverage.compare(STEPS, records)
@@ -92,6 +110,18 @@ def test_an_unfinished_shard_is_apart_from_misses_but_fails_closed():
         "### Shards that didn't finish, so these tests may not have run\n"
         "**k**, Command (1/1): shard 2\n- `b`"
     )
+
+
+def test_an_unfinished_shards_reported_outcomes_count_as_reported():
+    records = [
+        _record(0, ["a"], expected=["a", "b", "c"], planned=["a"]),
+        _record(1, ["a", "b"], finished=False, planned=["b", "c"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["missed"] == []
+    assert result["not_run"] == ["c"]
+    assert result["unfinished"] == [1]
+    assert result["duplicated"] == {"a": [0, 1]}
 
 
 def test_a_finished_shards_miss_is_not_hidden_by_an_unfinished_shard():
@@ -220,12 +250,12 @@ def test_the_duplicate_list_is_capped_like_the_others():
     assert text.endswith("- and 2 more, listed in this job's log")
 
 
-def test_only_finished_shards_count_towards_a_duplicate():
+def test_an_unfinished_shards_reported_outcome_counts_towards_a_duplicate():
     records = [
         _record(0, ["a", "b"], expected=["a", "b"]),
         _record(1, ["b"], finished=False),
     ]
-    assert coverage.compare(STEPS, records)[0]["duplicated"] == {}
+    assert coverage.compare(STEPS, records)[0]["duplicated"] == {"b": [0, 1]}
 
 
 def test_latest_finished_attempt_wins_over_an_earlier_and_a_later_unfinished_one():
@@ -282,7 +312,14 @@ def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
     ]
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
     monkeypatch.setattr(coverage, "_read_records", lambda _: records)
-    for outcome, expected in (("soft_failed\n", 0), ("passed\n", 1), ("", 1)):
+    for outcome, expected in (
+        ("soft_failed\n", 0),
+        ("errored\n", 0),
+        ("canceled\n", 0),
+        ("passed\n", 1),
+        ("neutral\n", 1),
+        ("", 1),
+    ):
 
         def fake_run(command, check, **kwargs):
             if command[:3] == ["buildkite-agent", "step", "get"]:
@@ -672,19 +709,37 @@ def test_main_annotates_under_its_step_key(monkeypatch):
 def test_read_records_finds_what_download_wrote(tmp_path):
     folder = tmp_path / ".runtime-shard-coverage" / "job"
     folder.mkdir(parents=True)
-    (folder / "0.json").write_text(json.dumps({"a": 1}))
-    assert coverage._read_records(str(tmp_path)) == [{"a": 1}]
+    record = _record(0, ["a"])
+    (folder / "0.json").write_text(json.dumps(record))
+    assert coverage._read_records(str(tmp_path)) == [record]
 
 
 def test_a_cut_off_record_is_skipped_and_the_rest_still_read(tmp_path, capsys):
     folder = tmp_path / ".runtime-shard-coverage" / "job"
     folder.mkdir(parents=True)
     (folder / "0.json").write_text('{"step": "k", "ran": ["a"')  # killed mid-write
-    (folder / "1.json").write_text(json.dumps({"a": 1}))
-    assert coverage._read_records(str(tmp_path)) == [{"a": 1}]
+    record = _record(0, ["a"])
+    (folder / "1.json").write_text(json.dumps(record))
+    assert coverage._read_records(str(tmp_path)) == [record]
     [line] = capsys.readouterr().out.splitlines()  # named in the log
     assert line.startswith("runtime-shard coverage: skipped unreadable ")
     assert "0.json: " in line and line.endswith("(char 25)")
+
+
+def test_malformed_records_are_skipped_with_a_diagnostic(tmp_path, capsys):
+    folder = tmp_path / ".runtime-shard-coverage" / "job"
+    folder.mkdir(parents=True)
+    (folder / "0.json").write_text("[]")
+    (folder / "1.json").write_text('{"step": "k"}')
+    (folder / "2.json").write_text(
+        json.dumps(dict(_record(0, []), ran="not-a-list"))
+    )
+    record = _record(0, ["a"])
+    (folder / "3.json").write_text(json.dumps(record))
+    assert coverage._read_records(str(tmp_path)) == [record]
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 3
+    assert all("runtime-shard coverage: skipped malformed " in line for line in lines)
 
 
 def test_the_script_end_to_end_with_an_agent_on_the_path(tmp_path):
