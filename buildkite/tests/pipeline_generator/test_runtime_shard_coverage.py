@@ -87,6 +87,27 @@ def test_retry_advice_omits_deterministic_inventory_errors(monkeypatch):
     assert "After the retried shard finishes" not in annotated[0]
 
 
+def test_retry_advice_includes_each_kind_of_missing_evidence(monkeypatch):
+    cases = [
+        [_record(0, ["a"], expected=["a", "b"])],
+        [_record(0, ["a"]), _record(1, [])],
+    ]
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for records in cases:
+        annotated.clear()
+        monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+        assert coverage.main() == 1
+        assert "After the retried shard finishes" in annotated[0]
+
+
 def test_an_empty_inventory_is_not_proof_of_coverage():
     records = [_record(0, [], expected=[]), _record(1, [])]
     [result] = coverage.compare(STEPS, records)
