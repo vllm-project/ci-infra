@@ -1248,11 +1248,15 @@ def _deleted_and_unreferenced(repo: Path, head: str, path: str) -> bool:
     ):
         return False
     pkg, stem = posixpath.split(path.removesuffix(".py"))
+    name = re.escape(stem)
+    # Word edges as POSIX classes: `\b` is a GNU extension that macOS git's
+    # regex library reads as a plain `b`, so nothing ever matched there.
+    edge = "([^[:alnum:]_]|$)"
     rel = _git_grep(
         repo,
         "-n",
         "-E",
-        rf"from \.+{re.escape(stem)}\b|from \.+ import .*\b{re.escape(stem)}\b",
+        rf"from \.+{name}{edge}|from \.+ import (.*[^[:alnum:]_])?{name}{edge}",
         head,
         "--",
         f"{pkg}/" if pkg else ".",

@@ -3593,6 +3593,27 @@ def test_a_deleted_module_still_imported_or_named_is_not_dead(tiny_repo):
     assert not _deleted_and_unreferenced(repo, "no-such-ref", "vllm/scripts.py")
 
 
+def test_a_relative_import_of_a_namesake_does_not_keep_a_module_alive(tiny_repo):
+    """The relative-import grep matches whole names only: `.relx` and
+    `prelude` are other modules, while `rel as r` in a list is a real use."""
+    from ci_selector.codemap.classify import _deleted_and_unreferenced
+
+    repo, _ = tiny_repo
+    namesakes = _commit_tree(
+        repo,
+        {
+            "vllm/rel.py": None,
+            "vllm/sibling.py": "from .relx import Z\nfrom . import prelude\n",
+        },
+        "namesakes",
+    )
+    assert _deleted_and_unreferenced(repo, namesakes, "vllm/rel.py")
+    listed = _commit_tree(
+        repo, {"vllm/sibling.py": "from . import a, rel as r\n"}, "listed"
+    )
+    assert not _deleted_and_unreferenced(repo, listed, "vllm/rel.py")
+
+
 def test_a_comment_only_edit_has_the_same_ast(tiny_repo):
     from ci_selector.codemap.classify import _same_python_ast
 
