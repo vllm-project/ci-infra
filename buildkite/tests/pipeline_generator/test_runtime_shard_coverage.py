@@ -4,6 +4,8 @@ import stat
 import subprocess
 import sys
 
+import pytest
+
 import runtime_shard_coverage as coverage
 
 
@@ -432,18 +434,23 @@ def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
     ]
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
     monkeypatch.setattr(coverage, "_read_records", lambda _: records)
-    for outcome, expected in (
-        ("soft_failed\n", 0),
-        ("errored\n", 0),
-        ("canceled\n", 0),
-        ("passed\n", 1),
-        ("neutral\n", 1),
-        ("", 1),
+    for state, outcome, expected in (
+        ("finished\n", "soft_failed\n", 0),
+        ("finished\n", "errored\n", 0),
+        ("canceled\n", "canceled\n", 0),
+        ("ignored\n", "soft_failed\n", 0),
+        ("waiting_failed\n", "hard_failed\n", 0),
+        ("running\n", "hard_failed\n", 1),
+        ("running\n", "soft_failed\n", 1),
+        ("finished\n", "passed\n", 1),
+        ("finished\n", "neutral\n", 1),
+        ("finished\n", "", 1),
     ):
 
         def fake_run(command, check, **kwargs):
             if command[:3] == ["buildkite-agent", "step", "get"]:
-                return subprocess.CompletedProcess(command, 0, stdout=outcome)
+                value = state if command[3] == "state" else outcome
+                return subprocess.CompletedProcess(command, 0, stdout=value)
             return subprocess.CompletedProcess(command, 0, stdout="")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -468,6 +475,8 @@ def test_relaxed_soft_failure_does_not_trigger_retry_advice_for_other_errors(
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "step", "get"]:
+            if command[3] == "state":
+                return subprocess.CompletedProcess(command, 0, stdout="finished\n")
             return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
@@ -508,16 +517,12 @@ def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "step", "get"]:
-            assert command == [
-                "buildkite-agent",
-                "step",
-                "get",
-                "outcome",
-                "--step",
-                "k",
-            ]
+            assert command[3:] == [command[3], "--step", "k"]
+            assert command[3] in ("state", "outcome")
             assert check is False
             assert kwargs == {"capture_output": True, "text": True, "timeout": 60}
+            if command[3] == "state":
+                return subprocess.CompletedProcess(command, 0, stdout="finished\n")
             outcome = next(outcomes)
             if isinstance(outcome, Exception):
                 raise outcome
@@ -546,6 +551,8 @@ def test_main_relaxes_no_records_only_for_allowed_soft_fail_outcomes(monkeypatch
 
         def fake_run(command, check, **kwargs):
             if command[:3] == ["buildkite-agent", "step", "get"]:
+                if command[3] == "state":
+                    return subprocess.CompletedProcess(command, 0, stdout="finished\n")
                 return subprocess.CompletedProcess(command, 0, stdout=outcome)
             return subprocess.CompletedProcess(command, 0, stdout="")
 
@@ -563,14 +570,26 @@ def test_soft_failed_outcomes_are_independent_for_each_step(monkeypatch):
     calls = []
 
     def fake_run(command, **kwargs):
-        calls.append(command[-1])
+        calls.append((command[3], command[-1]))
+        if command[3] == "state":
+            return subprocess.CompletedProcess(command, 0, stdout="finished\n")
         outcome = "soft_failed\n" if command[-1] == "soft-a" else "passed\n"
         return subprocess.CompletedProcess(command, 0, stdout=outcome)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     coverage._relax_soft_failed_gaps(results)
-    assert calls == ["soft-a", "soft-b"]
+    assert calls == [
+        ("state", "soft-a"),
+        ("outcome", "soft-a"),
+        ("state", "soft-b"),
+        ("outcome", "soft-b"),
+    ]
     assert [result.get("soft_failed") for result in results] == [None, True, False]
+
+
+def test_a_missing_step_property_result_is_unavailable(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: None)
+    assert coverage._step_property("state", "k") is None
 
 
 def test_soft_fail_defaults_to_false_so_todays_behavior_is_kept():
@@ -674,15 +693,27 @@ def test_a_record_without_a_build_id_is_stale_when_the_build_is_known():
     assert result["unverified"] is not None and result["missed"] == []
 
 
-def test_no_matching_artifacts_preserves_soft_fail_outcome(monkeypatch):
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_no_matching_artifacts_preserves_soft_fail_outcome(monkeypatch, stream):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
     annotated = []
     styles = []
+    downloads = []
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "artifact", "download"]:
-            return subprocess.CompletedProcess(command, 1, stdout="")
+            downloads.append(command)
+            assert kwargs["capture_output"] is True
+            assert kwargs["text"] is True
+            assert kwargs["timeout"] == 60
+            output = {"stdout": "", "stderr": ""}
+            output[stream] = (
+                "failed to download artifacts: no artifacts found for downloading"
+            )
+            return subprocess.CompletedProcess(command, 1, **output)
         if command[:3] == ["buildkite-agent", "step", "get"]:
+            if command[3] == "state":
+                return subprocess.CompletedProcess(command, 0, stdout="finished\n")
             return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
@@ -691,10 +722,114 @@ def test_no_matching_artifacts_preserves_soft_fail_outcome(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert coverage.main() == 0
+    assert len(downloads) == 1
     assert styles == ["warning"]
     assert "artifact download failed" not in annotated[0]
     assert "recorded nothing" in annotated[0]
     assert "After the retried shard finishes" not in annotated[0]
+
+
+def test_artifact_download_retries_then_compares(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    records = [_record(0, ["a"], expected=["a", "b"]), _record(1, ["b"])]
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    downloads = []
+    styles = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "artifact", "download"]:
+            downloads.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                int(len(downloads) < 3),
+                stdout="",
+                stderr="connection reset",
+            )
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            styles.append(command[command.index("--style") + 1])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 0
+    assert len(downloads) == 3
+    assert styles == ["success"]
+
+
+def test_persistent_artifact_download_failure_is_not_a_shard_failure(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    downloads = []
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "artifact", "download"]:
+            downloads.append(command)
+            if len(downloads) == 2:
+                raise subprocess.TimeoutExpired(command, 60)
+            return subprocess.CompletedProcess(
+                command, 1, stdout="", stderr="connection reset"
+            )
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 1
+    assert len(downloads) == 3
+    assert annotated[0].startswith(
+        "Coverage artifact download failed after 3 attempts"
+    )
+    assert "recorded nothing" not in annotated[0]
+    assert annotated[0].endswith("(exit 1); retry this coverage job.")
+
+
+def test_artifact_download_timeout_is_reported(monkeypatch):
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    downloads = []
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "artifact", "download"]:
+            downloads.append(command)
+            raise subprocess.TimeoutExpired(command, 60)
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 1
+    assert len(downloads) == 3
+    assert "(TimeoutExpired)" in annotated[0]
+
+
+def test_deterministic_collection_errors_get_no_advice_even_at_the_deadline(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("BUILDKITE_JOB_ID", "coverage-job")
+    (
+        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    ).touch()
+    failed = _record(1, [], finished=False)
+    failed["planned"] = None
+    cases = [
+        [_record(0, ["a"], expected=["a", "b"], planned=["a"]), failed],
+        [_record(0, ["a"], planned=["a"]), _record(1, ["b"])],
+    ]
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    for records in cases:
+        monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+        annotated.clear()
+        assert coverage.main() == 1
+        assert "After the retried shard finishes" not in annotated[0]
+        assert "Shards were still pending" not in annotated[0]
 
 
 def test_only_the_current_builds_records_count():
@@ -853,9 +988,13 @@ def test_deadline_retry_advice_distinguishes_unfinished_from_misses(
     annotated = []
 
     def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "step", "get"]:
+            if command[3] == "state":
+                return subprocess.CompletedProcess(command, 0, stdout="finished\n")
+            return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
-        return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     cases = [
         (

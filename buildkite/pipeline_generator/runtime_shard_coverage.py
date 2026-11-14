@@ -109,6 +109,7 @@ def compare(
             position = command["position"]
             ran = set()
             unfinished = []
+            retryable_unfinished = []
             missing = []  # shards that left no record at all
             finished_planned = set()
             unfinished_planned = set()
@@ -127,6 +128,7 @@ def compare(
                     unfinished.append(shard)
                     if isinstance(planned, list):
                         unfinished_planned.update(planned)
+                        retryable_unfinished.append(shard)
                     else:
                         unknown_unfinished_plan = True
                 elif isinstance(planned, list):
@@ -144,7 +146,8 @@ def compare(
                 "unfinished": unfinished,
                 "not_run": [],
                 "unexpected": unexpected,
-                "retryable": bool(unfinished or (missing and ran)),
+                "missing_shards": missing,
+                "retryable": bool(retryable_unfinished or (missing and ran)),
                 "duplicated": {
                     nodeid: shards
                     for nodeid, shards in sorted(shards_of.items())
@@ -303,12 +306,73 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
     return records
 
 
+def _download_records(folder: str) -> Optional[str]:
+    """Download shard records, retrying failures but not an empty artifact set.
+
+    Args:
+        folder: The directory in which Buildkite should place the records.
+
+    Returns:
+        A download error to annotate, or None on success or no matching records.
+    """
+    details = []
+    for _ in range(3):
+        try:
+            run = subprocess.run(
+                ["buildkite-agent", "artifact", "download", ARTIFACTS, folder],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=dict(os.environ, BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS="true"),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            details.append(type(error).__name__)
+            continue
+        returncode = getattr(run, "returncode", 0)
+        if not returncode:
+            return None
+        output = run.stdout + run.stderr
+        if "no artifacts found for downloading" in output:
+            return None
+        details.append(f"exit {returncode}")
+    return (
+        f"Coverage artifact download failed after 3 attempts ({details[-1]}); "
+        "retry this coverage job."
+    )
+
+
+def _step_property(name: str, step: str) -> Optional[str]:
+    """Read a Buildkite step property.
+
+    Args:
+        name: The property to read, such as state or outcome.
+        step: The step's key.
+
+    Returns:
+        The property value, or None when the agent cannot supply it.
+    """
+    try:
+        run = subprocess.run(
+            ["buildkite-agent", "step", "get", name, "--step", step],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not run or run.returncode:
+        return None
+    return run.stdout.strip()
+
+
 def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
     """Do not turn a step's existing soft failure into a hard coverage failure.
 
     A passed soft-fail step still has to prove its coverage. Only a terminal
-    soft_failed, hard_failed, errored or canceled outcome may relax its gaps.
-    A passed, neutral or unavailable outcome keeps the hard failure.
+    state and a soft_failed, hard_failed, errored or canceled outcome may relax
+    its gaps. A pending step, passed, neutral or unavailable outcome stays hard.
     """
     outcomes = {}
     for result in results:
@@ -318,22 +382,18 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
             continue
         step = result["step"]
         if step not in outcomes:
-            try:
-                run = subprocess.run(
-                    ["buildkite-agent", "step", "get", "outcome", "--step", step],
-                    check=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                )
-                outcomes[step] = run.returncode == 0 and run.stdout.strip() in (
-                    "soft_failed",
-                    "hard_failed",
-                    "errored",
-                    "canceled",
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                outcomes[step] = False
+            terminal = _step_property("state", step) in (
+                "finished",
+                "ignored",
+                "canceled",
+                "waiting_failed",
+            )
+            outcomes[step] = terminal and _step_property("outcome", step) in (
+                "soft_failed",
+                "hard_failed",
+                "errored",
+                "canceled",
+            )
         result["soft_failed"] = outcomes[step]
 
 
@@ -348,22 +408,21 @@ def main() -> int:
         )
     )
     with tempfile.TemporaryDirectory() as folder:
-        # Fails when no job uploaded anything; the comparison then says so.
         # Every attempt, not only the latest, so latest_records() can pick the
         # latest that finished. An env var, not the flag: an agent too old for
         # it ignores the variable, where an unknown flag fails the download.
-        subprocess.run(
-            ["buildkite-agent", "artifact", "download", ARTIFACTS, folder],
-            check=False,
-            env=dict(os.environ, BUILDKITE_AGENT_INCLUDE_RETRIED_JOBS="true"),
-        )
+        download_error = _download_records(folder)
         records = _read_records(folder)
-    # Without the variable (a local run) every record counts, as before.
-    results = compare(
-        steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")
-    )
-    _relax_soft_failed_gaps(results)
-    style, text = report(results)
+    if download_error:
+        results = []
+        style, text = "error", download_error
+    else:
+        # Without the variable (a local run) every record counts, as before.
+        results = compare(
+            steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")
+        )
+        _relax_soft_failed_gaps(results)
+        style, text = report(results)
     for result in results:
         for name in ("missed", "not_run", "unexpected"):
             for nodeid in result[name]:
@@ -372,7 +431,7 @@ def main() -> int:
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
     retry_pending = wait_timed_out and any(
-        (result["unverified"] or result["unfinished"])
+        (result["retryable"] or result["missing_shards"])
         and not result.get("soft_failed", False)
         for result in results
     )
