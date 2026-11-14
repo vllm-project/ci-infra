@@ -344,7 +344,15 @@ def main() -> int:
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
     if style == "error" and any(
-        result["unfinished"] or result["unverified"] for result in results
+        result["unfinished"]
+        or (
+            result["unverified"]
+            and (
+                "recorded nothing" in result["unverified"]
+                or "recorded no test list" in result["unverified"]
+            )
+        )
+        for result in results
     ):
         text += (
             "\n\nAfter the retried shard finishes, retry this coverage job too "

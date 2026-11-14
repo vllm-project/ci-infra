@@ -71,6 +71,22 @@ def test_an_inventory_that_omits_a_reported_test_fails_closed():
     assert "`extra`" in text
 
 
+def test_retry_advice_omits_deterministic_inventory_errors(monkeypatch):
+    records = [_record(0, ["a", "extra"], expected=["a"]), _record(1, [])]
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 1
+    assert "After the retried shard finishes" not in annotated[0]
+
+
 def test_an_empty_inventory_is_not_proof_of_coverage():
     records = [_record(0, [], expected=[]), _record(1, [])]
     [result] = coverage.compare(STEPS, records)
