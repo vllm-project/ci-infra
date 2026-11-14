@@ -2839,3 +2839,48 @@ def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
     assert run.returncode == 0
     assert "deadline" in run.stdout and "model-executor" in run.stdout
     assert len(job.commands) == 2  # the checker runs next, even after the wait
+
+
+def test_coverage_wait_reports_pending_without_shell_errors(
+    fake_global_config, checkout, tmp_path
+):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    wait = job.commands[0].replace("$$", "$")
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text(
+        '#!/bin/sh\n'
+        'if [ -f "$WAIT_STATE_FILE" ]; then\n'
+        '  printf "finished\\n";\n'
+        'else\n'
+        '  : > "$WAIT_STATE_FILE"; printf "running\\n";\n'
+        'fi\n'
+    )
+    agent.chmod(0o755)
+    sleep = tmp_path / "sleep"
+    sleep.write_text("#!/bin/sh\nexit 0\n")
+    sleep.chmod(0o755)
+    date = tmp_path / "date"
+    date.write_text('#!/bin/sh\n[ "$1" = "-u" ] && { echo 00:00Z; } || exec /bin/date "$@"\n')
+    date.chmod(0o755)
+    run = subprocess.run(
+        ["bash", "-c", wait],
+        env=dict(
+            os.environ,
+            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+            RUNTIME_SHARD_COVERAGE_DEADLINE=job.env[
+                "RUNTIME_SHARD_COVERAGE_DEADLINE"
+            ],
+            WAIT_STATE_FILE=str(tmp_path / "finished"),
+        ),
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    assert run.returncode == 0
+    assert run.stderr == ""
+    assert "waiting on model-executor (running)" in run.stdout
+    assert run.stdout.endswith("every sharded step has stopped\n")
