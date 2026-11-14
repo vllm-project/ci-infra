@@ -511,11 +511,27 @@ KERNREC_SKIP_STEPS = {
     "quantization": "int4 per-token KV cache test fails under CUPTI",
 }
 
+# Key prefixes of steps the ROCm recorder stays off, and why. Applies to the
+# AMD mirror and leaves the CUDA step recording.
+KERNREC_AMD_SKIP_STEP_PREFIXES = {
+    # Dispatch tracing swaps each completion signal for a pooled one, and
+    # rocprofiler-sdk 1.3.5 can release it while HIP still uses it:
+    # SIGSEGV in pool<signal_t>::release <- AsyncSignalHandler after the
+    # first mid-serving Triton JIT (vllm/ci #101909, #102057). 2 in ~58
+    # recorded runs, 0 in ~900 unrecorded. Back on once the image's SDK
+    # carries ROCm/rocm-systems#14385.
+    "lm-eval-turboquant-": "rocprofiler-sdk dispatch-signal SIGSEGV",
+}
+
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
     if setup_profile == "amd":
-        enabled = kernrec_amd_enabled() and not (step.num_nodes and step.num_nodes > 1)
+        enabled = (
+            kernrec_amd_enabled()
+            and not (step.num_nodes and step.num_nodes > 1)
+            and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
+        )
     else:
         enabled = kernrec_enabled()
     return (

@@ -267,6 +267,31 @@ def test_amd_multinode_mirrors_stay_unarmed_without_affecting_cuda(
     assert ("amd-kernels" in waits_for) is armed
 
 
+def test_amd_skip_prefix_unarms_only_the_amd_mirror(monkeypatch, fake_global_config):
+    """rocprofiler-sdk dispatch tracing segfaults the TurboQuant eval server, so
+    its AMD mirror runs unrecorded and the CUDA step still records."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    (prefix,) = buildkite_step.KERNREC_AMD_SKIP_STEP_PREFIXES
+    key = f"{prefix}k8v4"
+    groups = _rendered_groups(
+        _gpu_step(key=key, mirror={"amd": {"device": "mi355_dpx"}}),
+        _gpu_step(key="kernels", mirror={"amd": {"device": "mi355_dpx"}}),
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    assert buildkite_step._carries(steps[key], "kernrec")
+    skipped = steps[f"amd-{key}"]
+    assert not buildkite_step._carries(skipped, "kernrec")
+    assert buildkite_step.KERNREC_ARTIFACT_PATH not in (skipped.artifact_paths or [])
+    assert buildkite_step._carries(steps["amd-kernels"], "kernrec")
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    waits_for = collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()
+    assert f"amd-{key}" not in waits_for
+    assert "amd-kernels" in waits_for
+
+
 @pytest.mark.parametrize("cuda,amd", [(1, 0), (0, 1)])
 def test_cuda_and_amd_switches_arm_their_backend_alone(
     monkeypatch, fake_global_config, cuda, amd
