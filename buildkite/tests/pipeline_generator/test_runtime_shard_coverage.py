@@ -290,6 +290,32 @@ def test_an_empty_later_inventory_does_not_replace_a_valid_earlier_list():
     assert coverage.report([result])[0] == "success"
 
 
+def test_an_expected_list_never_comes_from_another_step():
+    steps = {
+        "a": [{"position": 0, "label": "A", "fallback": 0, "owners": [0]}],
+        "b": [{"position": 0, "label": "B", "fallback": 0, "owners": [0]}],
+    }
+    records = [
+        dict(_record(0, ["a"], expected=["a"]), step="a"),
+        dict(_record(0, []), step="b"),
+    ]
+    results = coverage.compare(steps, records)
+    assert results[0]["unverified"] is None
+    assert results[1]["unverified"] == "shard 1 recorded no test list"
+
+
+def test_the_latest_valid_inventory_wins_over_an_older_valid_list():
+    records = [
+        _record(0, ["a"], expected=["a"], retry=0, at=1.0),
+        _record(0, ["a"], expected=["a", "b"], retry=1, at=2.0),
+        _record(1, ["b"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unverified"] is None
+    assert result["missed"] == [] and result["tests"] == 2
+    assert coverage.report([result])[0] == "success"
+
+
 def test_nothing_uploaded_is_unverified_not_clean():
     [result] = coverage.compare(STEPS, [])
     assert result["unverified"] == (
