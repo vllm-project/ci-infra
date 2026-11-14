@@ -50,6 +50,24 @@ def latest_records(records: List[Dict[str, Any]]) -> Dict[Tuple, Dict[str, Any]]
     return latest
 
 
+def _expected_from_attempts(records, step, position, shard):
+    """The latest valid expected list from any owner attempt, or None."""
+    candidates = [
+        record
+        for record in records
+        if record["step"] == step
+        and record["position"] == position
+        and record["shard"] == shard
+        and isinstance(record.get("expected"), list)
+    ]
+    if not candidates:
+        return None
+    valid = [record for record in candidates if record["expected"]]
+    return max(valid or candidates, key=lambda record: (record["retry"], record["finished_at"]))[
+        "expected"
+    ]
+
+
 def compare(
     steps: Dict[str, List[Dict[str, Any]]],
     records: List[Dict[str, Any]],
@@ -113,10 +131,9 @@ def compare(
                         unknown_unfinished_plan = True
                 elif isinstance(planned, list):
                     finished_planned.update(planned)
-            # The expected list is written before any test runs, so a shard
-            # that died still has it.
-            first = latest.get((step_key, position, command["fallback"]))
-            expected = first.get("expected") if first else None
+            expected = _expected_from_attempts(
+                records, step_key, position, command["fallback"]
+            )
             unexpected = sorted(ran - set(expected)) if expected is not None else []
             result = {
                 "step": step_key,

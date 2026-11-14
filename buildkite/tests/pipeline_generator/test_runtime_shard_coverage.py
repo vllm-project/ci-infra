@@ -266,6 +266,30 @@ def test_no_expected_list_cannot_be_checked_and_fails_closed():
     )
 
 
+def test_expected_list_can_come_from_an_earlier_owner_attempt():
+    records = [
+        _record(0, ["a"], expected=["a", "b"], retry=0, at=1.0),
+        _record(0, ["a"], expected=None, retry=1, at=2.0),
+        _record(1, ["b"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unverified"] is None
+    assert result["missed"] == [] and result["tests"] == 2
+    assert coverage.report([result])[0] == "success"
+
+
+def test_an_empty_later_inventory_does_not_replace_a_valid_earlier_list():
+    records = [
+        _record(0, ["a"], expected=["a", "b"], retry=0, at=1.0),
+        _record(0, ["a"], expected=[], retry=1, at=2.0),
+        _record(1, ["b"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unverified"] is None
+    assert result["missed"] == [] and result["tests"] == 2
+    assert coverage.report([result])[0] == "success"
+
+
 def test_nothing_uploaded_is_unverified_not_clean():
     [result] = coverage.compare(STEPS, [])
     assert result["unverified"] == (
