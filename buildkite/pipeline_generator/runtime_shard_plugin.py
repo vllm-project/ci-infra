@@ -32,6 +32,7 @@ import base64
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -314,7 +315,7 @@ class ShardPlugin:
         ):
             env["PYTHONSAFEPATH"] = "1"
         try:
-            run = subprocess.run(
+            process = subprocess.Popen(
                 [
                     sys.executable,
                     "-m",
@@ -324,19 +325,33 @@ class ShardPlugin:
                 ],
                 env=env,
                 cwd=config.invocation_params.dir,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=INVENTORY_TIMEOUT_SECONDS,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired as error:
-            # A hung collection must not hang the shard's own run: no list,
-            # and the run goes on without it.
+            stdout, stderr = process.communicate(timeout=INVENTORY_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # Stop the whole collection group, not just pytest: imports can
+            # leave workers or servers holding a GPU beside the live shard.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError as error:
+                print(
+                    "runtime-shard: couldn't stop the inventory process group "
+                    f"({error})",
+                    file=sys.stderr,
+                )
+                process.kill()
+            stdout, stderr = process.communicate()
             os.unlink(path)
             print(
                 "runtime-shard: couldn't collect the command's full test list "
                 f"(timed out after {INVENTORY_TIMEOUT_SECONDS} seconds); the "
                 "coverage check will report the command unverified"
-                + _output_tail(error.output, error.stderr),
+                + _output_tail(stdout, stderr),
                 file=sys.stderr,
             )
             return None
@@ -351,6 +366,7 @@ class ShardPlugin:
                 file=sys.stderr,
             )
             return None
+        run = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
         try:
             with open(path) as f:
                 inventory = json.load(f)

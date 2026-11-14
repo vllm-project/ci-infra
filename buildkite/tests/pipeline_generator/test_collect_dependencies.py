@@ -118,7 +118,5 @@ def test_collect_wait_uses_its_deadline_and_terminal_states():
     )
     assert '{ echo "wait deadline reached with $$pending ' in buildkite_step.COLLECT_WAIT
     assert "runtime-shard-coverage-" not in buildkite_step.COLLECT_WAIT
-    assert (
-        'case "$$s" in finished|ignored|canceled|waiting_failed) ;; '
-        in buildkite_step.COLLECT_WAIT
-    )
+    assert 'case "$$s" in finished|ignored) ;; ' in buildkite_step.COLLECT_WAIT
+    assert "canceled" not in buildkite_step.COLLECT_WAIT

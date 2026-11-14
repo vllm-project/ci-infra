@@ -427,6 +427,18 @@ def test_a_soft_fail_step_missed_test_is_still_an_error():
     assert "### :x: 1 tests ran in no shard" in text
 
 
+def test_unexpected_tests_do_not_hide_a_definite_miss_on_soft_fail():
+    records = [
+        _record(0, ["a", "extra"], expected=["a", "b"], planned=["a"]),
+        _record(1, [], planned=[]),
+    ]
+    [result] = coverage.compare(SOFT_STEPS, records)
+    assert result["unexpected"] == ["extra"]
+    assert result["missed"] == ["b"]
+    result["soft_failed"] = True
+    assert coverage.report([result])[0] == "error"
+
+
 def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
     records = [
         _record(0, ["a"], expected=["a", "b"]),
@@ -735,6 +747,8 @@ def test_artifact_download_retries_then_compares(monkeypatch):
     monkeypatch.setattr(coverage, "_read_records", lambda _: records)
     downloads = []
     styles = []
+    sleeps = []
+    monkeypatch.setattr(coverage.time, "sleep", sleeps.append)
 
     def fake_run(command, check, **kwargs):
         if command[:3] == ["buildkite-agent", "artifact", "download"]:
@@ -753,10 +767,12 @@ def test_artifact_download_retries_then_compares(monkeypatch):
     assert coverage.main() == 0
     assert len(downloads) == 3
     assert styles == ["success"]
+    assert sleeps == [0, 10, 20]
 
 
 def test_persistent_artifact_download_failure_is_not_a_shard_failure(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setattr(coverage.time, "sleep", lambda _: None)
     downloads = []
     annotated = []
 
@@ -784,6 +800,7 @@ def test_persistent_artifact_download_failure_is_not_a_shard_failure(monkeypatch
 
 def test_artifact_download_timeout_is_reported(monkeypatch):
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
+    monkeypatch.setattr(coverage.time, "sleep", lambda _: None)
     downloads = []
     annotated = []
 
@@ -871,6 +888,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
         calls.append(command)
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
@@ -899,6 +917,7 @@ def test_main_logs_every_duplicate_and_downloads_every_attempt(monkeypatch, caps
 
     def fake_run(command, check, **kwargs):
         calls.append((command, kwargs.get("env") or {}))
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.setattr(coverage, "_read_records", lambda _: records)
@@ -935,6 +954,7 @@ def test_main_fails_closed_with_no_records(monkeypatch):
         calls.append(command)
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(coverage, "_read_records", lambda _: [])
@@ -966,6 +986,7 @@ def test_main_advises_retry_when_the_wait_deadline_left_shards_pending(
     def fake_run(command, check, **kwargs):
         if command[:2] == ["buildkite-agent", "annotate"]:
             annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(coverage, "_read_records", lambda _: [])
@@ -1051,6 +1072,7 @@ def test_main_checks_only_the_current_builds_records(monkeypatch):
 
     def fake_run(command, check, **kwargs):
         calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.setenv("BUILDKITE_BUILD_ID", "this-build")
@@ -1069,6 +1091,7 @@ def test_main_fails_closed_when_every_record_is_from_another_build(monkeypatch):
 
     def fake_run(command, check, **kwargs):
         calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.setenv("BUILDKITE_BUILD_ID", "this-build")
@@ -1088,6 +1111,7 @@ def test_main_without_a_build_id_uses_every_record(monkeypatch):
 
     def fake_run(command, check, **kwargs):
         calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
     monkeypatch.delenv("BUILDKITE_BUILD_ID", raising=False)
@@ -1107,6 +1131,7 @@ def test_main_annotates_under_its_step_key(monkeypatch):
 
     def fake_run(command, check, **kwargs):
         calls.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(coverage, "_read_records", lambda _: [])

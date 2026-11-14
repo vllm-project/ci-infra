@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shlex
+import signal
 import stat
 import subprocess
 import sys
@@ -2339,7 +2340,7 @@ def test_an_inventory_subprocess_that_cannot_start_leaves_the_shard_running(tmp_
         "def pytest_configure(config):\n"
         "    def dies(*args, **kwargs):\n"
         "        raise OSError('out of processes')\n"
-        "    runtime_shard_plugin.subprocess.run = dies\n"
+        "    runtime_shard_plugin.subprocess.Popen = dies\n"
     )
     command = "pytest -v pkg"
     files = {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}
@@ -2363,6 +2364,32 @@ def test_inventory_timeout_is_positive_and_finite():
     assert isinstance(timeout, (int, float)) and timeout > 0 and timeout != float("inf")
 
 
+def _inventory_popen(fake_run):
+    class Process:
+        def __init__(self, args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+            self.pid = 4242
+            self.returncode = None
+            self.error = None
+
+        def communicate(self, timeout=None):
+            if self.error:
+                return self.error.output, self.error.stderr
+            try:
+                result = fake_run(self.args, **dict(self.kwargs, timeout=timeout))
+            except subprocess.TimeoutExpired as error:
+                self.error = error
+                raise
+            self.returncode = result.returncode
+            return result.stdout, result.stderr
+
+        def kill(self):
+            self.returncode = -9
+
+    return Process
+
+
 def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsys):
     import runtime_shard_plugin as plugin
 
@@ -2373,7 +2400,7 @@ def test_an_inventory_spawn_failure_returns_no_list(tmp_path, monkeypatch, capsy
     def dies(*args, **kwargs):
         raise OSError("out of processes")
 
-    monkeypatch.setattr(plugin.subprocess, "run", dies)
+    monkeypatch.setattr(plugin.subprocess, "Popen", dies)
     config = types.SimpleNamespace(
         invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
     )
@@ -2394,8 +2421,11 @@ def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, caps
     monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
     command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
     shard = plugin.ShardPlugin(command, 0, 2, "k")
+    captured = {}
+    killed = []
 
     def hangs(*args, **kwargs):
+        captured.update(kwargs)
         raise subprocess.TimeoutExpired(
             cmd=args[0],
             timeout=plugin.INVENTORY_TIMEOUT_SECONDS,
@@ -2403,11 +2433,16 @@ def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, caps
             stderr=b"inventory still collecting\n",
         )
 
-    monkeypatch.setattr(plugin.subprocess, "run", hangs)
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(hangs))
+    monkeypatch.setattr(
+        plugin.os, "killpg", lambda pid, sig: killed.append((pid, sig))
+    )
     config = types.SimpleNamespace(
         invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
     )
     assert shard._expected_inventory(config) is None
+    assert captured["start_new_session"] is True
+    assert killed == [(4242, signal.SIGKILL)]
     err = capsys.readouterr().err
     assert (
         "runtime-shard: couldn't collect the command's full test list "
@@ -2418,6 +2453,95 @@ def test_an_inventory_that_times_out_returns_no_list(tmp_path, monkeypatch, caps
         "--- last lines of its error output ---\n"
         "inventory still collecting\n"
     ) == err
+
+
+def test_inventory_group_cleanup_failure_does_not_crash_the_shard(
+    tmp_path, monkeypatch, capsys
+):
+    import runtime_shard_plugin as plugin
+
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+
+    def hangs(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=1, output=b"header\n")
+
+    processes = []
+
+    def create(*args, **kwargs):
+        process = _inventory_popen(hangs)(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    def fails(*args):
+        raise OSError("group unavailable")
+
+    monkeypatch.setattr(plugin.subprocess, "Popen", create)
+    monkeypatch.setattr(plugin.os, "killpg", fails)
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
+    )
+    assert shard._expected_inventory(config) is None
+    assert processes[0].returncode == -9
+    assert (
+        "runtime-shard: couldn't stop the inventory process group (group unavailable)"
+        in capsys.readouterr().err
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process groups are POSIX-only")
+def test_an_inventory_timeout_stops_its_process_group(tmp_path, monkeypatch):
+    import runtime_shard_plugin as plugin
+
+    tests = tmp_path / "tests" / "pkg"
+    tests.mkdir(parents=True)
+    (tests / "test_a.py").write_text(
+        "import os, subprocess, time\n"
+        "child = subprocess.Popen(['sleep', '5'], stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL)\n"
+        "with open(os.environ['INVENTORY_CHILD_PID'], 'w') as f:\n"
+        "    f.write(str(child.pid))\n"
+        "time.sleep(5)\n"
+        "def test_a():\n"
+        "    pass\n"
+    )
+    child_pid_file = tmp_path / "child.pid"
+    monkeypatch.setenv("INVENTORY_CHILD_PID", str(child_pid_file))
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-p runtime_shard_plugin")
+    monkeypatch.setenv("PYTHONPATH", os.path.dirname(plugin.__file__))
+    monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
+    monkeypatch.setattr(plugin, "INVENTORY_TIMEOUT_SECONDS", 2)
+    command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
+    shard = plugin.ShardPlugin(command, 0, 2, "k")
+    config = types.SimpleNamespace(
+        invocation_params=types.SimpleNamespace(
+            args=["-v", "pkg"], dir=str(tmp_path / "tests")
+        )
+    )
+    started = time.monotonic()
+    assert shard._expected_inventory(config) is None
+    assert time.monotonic() - started < 4
+    child_pid = int(child_pid_file.read_text())
+
+    def stopped():
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    try:
+        for _ in range(100):
+            if stopped():
+                break
+            time.sleep(0.02)
+        assert stopped(), "the inventory's child survived its collection timeout"
+    finally:
+        try:
+            os.kill(child_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
@@ -2438,7 +2562,7 @@ def test_the_inventory_collects_where_the_command_ran(tmp_path, monkeypatch):
             json.dump(["tests/pkg/test_a.py::test_1"], f)
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(plugin.subprocess, "run", fake_run)
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(fake_run))
     config = types.SimpleNamespace(
         invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
     )
@@ -2499,7 +2623,7 @@ def test_a_failed_inventory_prints_a_bounded_tail_of_its_output(
     def failed(args, **kwargs):
         return subprocess.CompletedProcess(args, 1, noise, error)
 
-    monkeypatch.setattr(plugin.subprocess, "run", failed)
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(failed))
     config = types.SimpleNamespace(
         invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
     )
@@ -2530,7 +2654,7 @@ def test_stderr_inventory_tail_is_kept_and_exact_limit_is_not_truncated(
     def failed(args, **kwargs):
         return subprocess.CompletedProcess(args, 1, "", "first error\n" + noise)
 
-    monkeypatch.setattr(plugin.subprocess, "run", failed)
+    monkeypatch.setattr(plugin.subprocess, "Popen", _inventory_popen(failed))
     config = types.SimpleNamespace(
         invocation_params=types.SimpleNamespace(args=["-v", "pkg"], dir=str(tmp_path))
     )

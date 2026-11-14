@@ -833,7 +833,7 @@ def _wait_for_steps(
 # At the deadline, collection folds the available recordings and coverage
 # checks the available evidence. Coverage still fails anything left unproven.
 COLLECT_WAIT = _wait_for_steps(
-    "finished|ignored|canceled|waiting_failed",
+    "finished|ignored",
     300,
     "CI_SELECTOR_COLLECT_DEADLINE",
     "every recording step has finished",

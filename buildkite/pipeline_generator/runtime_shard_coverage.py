@@ -25,6 +25,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
@@ -172,7 +173,10 @@ def compare(
                 unverified.append(f"{noun} {shards} recorded nothing")
             if unverified:
                 result["unverified"] = "; ".join(unverified)
-                result["missed"] = sorted(finished_planned - ran)
+                if expected and not missing and not unfinished:
+                    result["missed"] = sorted(set(expected) - ran)
+                else:
+                    result["missed"] = sorted(finished_planned - ran)
             elif unfinished:
                 for nodeid in sorted(set(expected) - ran):
                     if nodeid in finished_planned:
@@ -316,7 +320,8 @@ def _download_records(folder: str) -> Optional[str]:
         A download error to annotate, or None on success or no matching records.
     """
     details = []
-    for _ in range(3):
+    for attempt in range(3):
+        time.sleep(10 * attempt)
         try:
             run = subprocess.run(
                 ["buildkite-agent", "artifact", "download", ARTIFACTS, folder],
@@ -329,7 +334,7 @@ def _download_records(folder: str) -> Optional[str]:
         except (OSError, subprocess.TimeoutExpired) as error:
             details.append(type(error).__name__)
             continue
-        returncode = getattr(run, "returncode", 0)
+        returncode = run.returncode
         if not returncode:
             return None
         output = run.stdout + run.stderr
