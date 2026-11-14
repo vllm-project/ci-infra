@@ -1797,7 +1797,11 @@ def test_eval_config_in_a_list_routes_to_that_lists_steps(state):
 
     def entries(name):
         text = (configs / name).read_text()
-        return [l.strip() for l in text.splitlines() if l.strip() and l[0] != "#"]
+        return [
+            line.strip()
+            for line in text.splitlines()
+            if line.strip() and line[0] != "#"
+        ]
 
     small = entries("models-small.txt")
     claim = _classify(state, f"tests/evals/gsm8k/configs/{small[0]}", None)
@@ -1881,7 +1885,10 @@ def test_a_config_named_only_at_head_follows_the_changed_list(tmp_path):
 
     def targets(*lists):
         return SimpleNamespace(
-            data_files=list(lists), config_lists=list(lists), targets=[], scripts_seen=[]
+            data_files=list(lists),
+            config_lists=list(lists),
+            targets=[],
+            scripts_seen=[],
         )
 
     state = SimpleNamespace(
@@ -3166,7 +3173,8 @@ def test_rust_root_change_without_the_pyo3_bridge_does_not_fail_open(
     def gone(st, path, ctx):
         if path == RUST_PYO3_BRIDGE_FILE:
             return classify.Claim(
-                "fail-open", f"{path} is unclaimed by any rule; running everything",
+                "fail-open",
+                f"{path} is unclaimed by any rule; running everything",
                 run_all={"vllm_ci"},
             )
         return real(st, path, ctx)
@@ -3501,7 +3509,10 @@ def test_an_env_var_the_build_never_reads_skips_the_image_union(tmp_path):
             state, "vllm/envs.py", DiffContext(base, head, {"vllm/envs.py": "M"})
         )
 
-    added = envs.replace("}\n", '    "VLLM_NEW": lambda: float(\n        os.getenv("VLLM_NEW", "3")\n    ),\n}\n')
+    added = envs.replace(
+        "}\n",
+        '    "VLLM_NEW": lambda: float(\n        os.getenv("VLLM_NEW", "3")\n    ),\n}\n',
+    )
     assert after(added)
     assert not after(envs.replace('getenv("MAX_JOBS")', 'getenv("MAX_JOBS", "8")'))
     assert not after(envs + "print('side effect')\n")
@@ -3584,7 +3595,9 @@ def test_a_deleted_module_still_imported_or_named_is_not_dead(tiny_repo):
     repo, _ = tiny_repo
     head = _commit_tree(repo, {"vllm/used.py": None, "vllm/rel.py": None}, "drop")
     entry = _commit_tree(
-        repo, {"vllm/scripts.py": None, "pyproject.toml": 'x = "vllm.scripts:main"\n'}, "ep"
+        repo,
+        {"vllm/scripts.py": None, "pyproject.toml": 'x = "vllm.scripts:main"\n'},
+        "ep",
     )
     assert not _deleted_and_unreferenced(repo, entry, "vllm/scripts.py")  # entry point
     assert not _deleted_and_unreferenced(repo, head, "vllm/used.py")  # dotted import
@@ -3620,7 +3633,9 @@ def test_a_comment_only_edit_has_the_same_ast(tiny_repo):
     repo, base = tiny_repo
     path = "vllm/doc.py"
     comments = _commit_tree(
-        repo, {path: '"""Old."""\n# new comment\n\ndef f(a):  # why\n    return a\n'}, "c"
+        repo,
+        {path: '"""Old."""\n# new comment\n\ndef f(a):  # why\n    return a\n'},
+        "c",
     )
     assert _same_python_ast(repo, base, comments, path)
     docstring = _commit_tree(repo, {path: '"""New."""\ndef f(a):\n    return a\n'}, "d")
@@ -3748,8 +3763,12 @@ def test_an_added_step_is_named_by_its_head_key(state, monkeypatch):
 
     def edit(doc):
         doc["steps"].append(
-            {"label": "New Thing", "key": "brand-new-step", "commands": ["pytest x"],
-             "optional": True}
+            {
+                "label": "New Thing",
+                "key": "brand-new-step",
+                "commands": ["pytest x"],
+                "optional": True,
+            }
         )
 
     claim = _claim_for(state, monkeypatch, path, edit)
