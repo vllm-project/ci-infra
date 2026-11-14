@@ -8,11 +8,10 @@ annotation, failing closed: red whenever coverage is not proven. That is a
 miss (a test no shard ran although every shard finished), a shard that
 didn't finish (its tests may not have run, so they are listed apart from
 misses), and a command it cannot check (a shard left no record, or none
-recorded the test list). Yellow only for a test that two finished shards both
-ran: it costs a shard's time but loses no test. A soft-fail step is allowed
-to fail, so an explicitly unfinished shard stays yellow. Missing evidence is
-also yellow only when Buildkite reports the step's final outcome as
-soft_failed; a passed step with missing evidence stays red. A definite miss
+recorded the test list). Yellow for a test that two finished shards both ran:
+it costs a shard's time but loses no test. Unfinished shards and missing
+evidence are yellow only when Buildkite reports that the step did not pass;
+a passed soft-fail step with either gap stays red. A definite miss
 stays red, though, since that means the sharding itself is broken. And only
 the current build's records count: a record from another build (or one too
 old to name its build) is stale evidence, ignored when the build's ID is
@@ -177,9 +176,9 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         every test is proven run: a miss, an unfinished shard and a command
         that can't be checked all fail the job; only duplicates stay a
         warning. A soft-fail step is the exception for an unfinished shard or
-        unverified evidence after Buildkite's final soft_failed outcome: its
-        build already allows that failure. Missing evidence after a passed
-        step still fails, as does a definite miss.
+        unverified evidence after Buildkite's final non-passing outcome: its
+        build already allows that failure. Either gap after a passed step still
+        fails, as does a definite miss.
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
@@ -222,8 +221,11 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
             )
     if lines:
         blocking = [
-            result for result in unverified if not result.get("soft_failed", False)
-        ] + [result for result in unfinished if not result["soft_fail"]]
+            result
+            for result in results
+            if (result["unverified"] or result["unfinished"])
+            and not result.get("soft_failed", False)
+        ]
         style = "error" if missed or blocking else "warning"
         return style, "\n".join(lines)
     steps = len({result["step"] for result in results})
@@ -244,16 +246,18 @@ def _read_records(folder: str) -> List[Dict[str, Any]]:
     return records
 
 
-def _relax_soft_failed_unverified(results: List[Dict[str, Any]]) -> None:
+def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
     """Do not turn a step's existing soft failure into a hard coverage failure.
 
     A passed soft-fail step still has to prove its coverage. Any final outcome
-    other than passed may relax its missing evidence; an unavailable outcome
-    keeps the hard failure.
+    other than passed may relax its unfinished shards or missing evidence; an
+    unavailable outcome keeps the hard failure.
     """
     outcomes = {}
     for result in results:
-        if not result["soft_fail"] or not result["unverified"]:
+        if not result["soft_fail"] or not (
+            result["unverified"] or result["unfinished"]
+        ):
             continue
         step = result["step"]
         if step not in outcomes:
@@ -289,7 +293,7 @@ def main() -> int:
     # Without the variable (a local run) every record counts, as before.
     results = compare(steps, records, build_id=os.environ.get("BUILDKITE_BUILD_ID")) if records else []
     if records:
-        _relax_soft_failed_unverified(results)
+        _relax_soft_failed_gaps(results)
         style, text = report(results)
     else:
         style = "error"

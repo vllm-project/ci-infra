@@ -823,7 +823,7 @@ COVERAGE_WAIT = (
     'pending=""; '
     "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
     's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
-    'case "$$s" in finished|ignored|*_failed|timed_out|canceled|cancelled|expired|broken|skipped) ;; '
+    'case "$$s" in finished|ignored|canceled) ;; '
     '*) pending="$$k"; break;; esac; '
     "done; "
     '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
@@ -934,11 +934,10 @@ def shard_coverage_step(
     """
     steps = {}
     sharded = []
-    runnable_keys = {s.key for g in groups for s in g.steps if not s.deferred}
     for group in groups:
         for step in group.steps:
             packed = (step.env or {}).get(runtime_shard.PLAN_ENV)
-            if not packed or step.deferred:
+            if not packed:
                 continue
             plan = runtime_shard.unpack(packed)
             sharded.append(step)
@@ -948,8 +947,8 @@ def shard_coverage_step(
                     "label": planned["label"],
                     "fallback": planned["fallback"],
                     "owners": runtime_shard.owners(planned),
-                    # Only a final soft-failed outcome relaxes unverified
-                    # evidence; a passed step still has to prove coverage.
+                    # Only a final soft-failed outcome relaxes coverage gaps;
+                    # a passed step still has to prove coverage.
                     "soft_fail": bool(step.soft_fail),
                 }
                 for planned in plan["commands"]
@@ -961,17 +960,16 @@ def shard_coverage_step(
     )
     with open(source_path) as f:
         coverage_source = f.read()
-    script = "/tmp/runtime_shard_coverage.$${BUILDKITE_JOB_ID:-local}.py"
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
     retry = ensure_infra_failure_retry(None)
-    # A timeout must not start another six-hour wait on a second small-CPU agent.
-    retry["automatic"] = [
-        rule for rule in retry["automatic"] if rule.get("exit_status") != -1
-    ]
+    # Do not retry a timeout into another wait; agent loss still gets one retry.
+    for rule in retry["automatic"]:
+        if rule.get("exit_status") == -1:
+            rule["signal_reason"] = "agent_stop"
     depends_on = []
     for dep in (d for s in sharded for d in (s.depends_on or [])):
-        if dep in runnable_keys and dep not in depends_on:
+        if dep not in depends_on:
             depends_on.append(dep)
     return BuildkiteCommandStep(
         label=":mag: Check every test ran",
@@ -984,9 +982,9 @@ def shard_coverage_step(
         agents={"queue": queue.value},
         commands=[
             COVERAGE_WAIT,
-            'python3 -c \'import base64,json,os,sys,zlib; '
-            'sys.stdout.write(json.loads(zlib.decompress(base64.b64decode(os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\''
-            f" > {script} && python3 {script}"
+            'python3 -I -c \'import base64,json,os,zlib;'
+            'exec(json.loads(zlib.decompress(base64.b64decode('
+            'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\'',
         ],
         depends_on=depends_on,
         allow_dependency_failure=True,

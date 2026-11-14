@@ -275,18 +275,22 @@ def test_a_soft_fail_step_missed_test_is_still_an_error():
     assert "### :x: 1 tests ran in no shard" in text
 
 
-def test_a_soft_fail_step_unfinished_shard_is_warning_only():
-    # The step may fail, so a shard that didn't finish proves nothing new:
-    # it reads as a warning, matching the build's soft-fail semantics.
+def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
     records = [
         _record(0, ["a"], expected=["a", "b"]),
         _record(1, [], finished=False, planned=["b"]),
     ]
-    [result] = coverage.compare(SOFT_STEPS, records)
-    assert result["unfinished"] == [1] and result["not_run"] == ["b"]
-    style, text = coverage.report([result])
-    assert style == "warning"
-    assert "**k**, Command (1/1): shard 2 (soft-fail step)" in text
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(SOFT_STEPS))
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    for outcome, expected in (("soft_failed\n", 0), ("passed\n", 1), ("", 1)):
+
+        def fake_run(command, check, **kwargs):
+            if command[:3] == ["buildkite-agent", "step", "get"]:
+                return subprocess.CompletedProcess(command, 0, stdout=outcome)
+            return subprocess.CompletedProcess(command, 0, stdout="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        assert coverage.main() == expected
 
 
 def test_a_soft_fail_step_unverified_fails_closed():
@@ -365,7 +369,7 @@ def test_soft_failed_outcomes_are_independent_for_each_step(monkeypatch):
         return subprocess.CompletedProcess(command, 0, stdout=outcome)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    coverage._relax_soft_failed_unverified(results)
+    coverage._relax_soft_failed_gaps(results)
     assert calls == ["soft-a", "soft-b"]
     assert [result.get("soft_failed") for result in results] == [None, True, False]
 
@@ -401,7 +405,9 @@ def test_a_hard_steps_gap_stays_an_error_next_to_a_soft_fail_steps_gap():
     ]
     soft, hard = coverage.compare(steps, records)
     assert soft["unfinished"] == [0] and hard["unfinished"] == [0]
-    assert coverage.report([soft])[0] == "warning"  # the soft-fail step alone
+    assert coverage.report([soft])[0] == "error"
+    soft["soft_failed"] = True
+    assert coverage.report([soft])[0] == "warning"
     assert coverage.report([soft, hard])[0] == "error"
 
 
