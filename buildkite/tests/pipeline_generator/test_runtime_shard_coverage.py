@@ -376,6 +376,34 @@ def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
         assert coverage.main() == expected
 
 
+def test_relaxed_soft_failure_does_not_trigger_retry_advice_for_other_errors(
+    monkeypatch,
+):
+    steps = {
+        "soft": [dict(SOFT_STEPS["k"][0])],
+        "hard": [{"position": 0, "label": "Hard", "fallback": 0, "owners": [0]}],
+    }
+    records = [
+        dict(_record(0, ["a"], expected=["a", "b"]), step="soft"),
+        dict(_record(1, [], finished=False, planned=["b"]), step="soft"),
+        dict(_record(0, [], expected=["a"], planned=[]), step="hard"),
+    ]
+    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(steps))
+    monkeypatch.setattr(coverage, "_read_records", lambda _: records)
+    annotated = []
+
+    def fake_run(command, check, **kwargs):
+        if command[:3] == ["buildkite-agent", "step", "get"]:
+            return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
+        if command[:2] == ["buildkite-agent", "annotate"]:
+            annotated.append(kwargs["input"])
+        return subprocess.CompletedProcess(command, 0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert coverage.main() == 1
+    assert "After the retried shard finishes" not in annotated[0]
+
+
 def test_a_soft_fail_step_unverified_fails_closed():
     [result] = coverage.compare(SOFT_STEPS, [_record(0, ["a"], expected=["a", "b"])])
     assert result["unverified"] == "shard 2 recorded nothing"
