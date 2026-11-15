@@ -87,7 +87,7 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
     of callback-missed lines."""
     names: set[str] = set()
     dropped = 0
-    clean = False
+    clean = clean_footer = False
     errors = False
     headers = 0
     footers = 0
@@ -104,7 +104,7 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
     for line in lines:
         if not line:
             continue
-        clean = False  # A footer must be the final nonempty line.
+        clean = clean_footer = False  # A footer must be the final nonempty line.
         if line.startswith("#"):
             try:
                 if line.startswith("# kernrec "):
@@ -140,7 +140,7 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
                     fields = dict(p.split("=", 1) for p in line[6:].split())
                     total = int(fields["dropped"])
                     dropped = max(dropped, total)
-                    clean = (
+                    clean_footer = (
                         valid_header
                         and footers == 1
                         and not errors
@@ -148,8 +148,12 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
                         and int(fields["errors"]) == 0
                         and int(fields["unresolved"]) == 0
                         and int(fields["unique"]) == len(names)
-                        and int(fields["records"]) >= len(names)
                     )
+                    # Under sync=1 a kernel named at launch may never run.
+                    clean = clean_footer and (
+                        sync or int(fields["records"]) >= len(names)
+                    )
+                    clean_footer = clean_footer and int(fields["records"]) >= len(names)
             except (KeyError, ValueError):
                 errors = True
             continue
@@ -174,7 +178,7 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
         names,
         dropped,
         (clean or idle or launch_time) and not errors,
-        (clean or idle) and not errors,
+        (clean_footer or idle) and not errors,
         missed,
     )
 

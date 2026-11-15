@@ -476,6 +476,18 @@ def test_launch_time_recording_is_complete_without_a_footer(tmp_path, text, clea
     assert kernel_table.read_recording(path, footer_rule=True)[2] is footer_rule
 
 
+def test_launch_time_names_may_outnumber_kernel_records(tmp_path):
+    """A kernel named at launch or graph capture may never run (a graph never
+    replayed, a rejected launch), so the footer counts fewer records than
+    names. Complete under sync=1; the footer rule still says no."""
+    path = tmp_path / "kern.7.txt"
+    path.write_text(
+        f"{SYNC}\n# gpu_active\nk\n{FOOTER.replace('records=1', 'records=0')}\n"
+    )
+    assert kernel_table.read_recording(path)[2] is True
+    assert kernel_table.read_recording(path, footer_rule=True)[2] is False
+
+
 def test_table_reports_misses_and_what_the_footer_rule_would_give(tmp_path):
     root = tmp_path / ".kernrec"
     for job, step, text in [
