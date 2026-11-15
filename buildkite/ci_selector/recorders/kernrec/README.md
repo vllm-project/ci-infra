@@ -28,19 +28,21 @@ engine-core process behind `vllm serve` record themselves into their own
 `kern.<pid>.txt`. When the variable is unset nothing loads: PR jobs pay
 nothing. Recording is meant for nightly or post-merge full runs only.
 
-Names are appended the first time they are seen, so a test killed by a
-timeout still leaves everything it launched up to that point.
+Each name is written when its kernel is launched or added to a CUDA graph,
+before it can run: CUPTI driver-API callbacks look the handle's name up
+(`cuFuncGetName`, or `cuKernelGetName` for `CUkernel` handles) and write it
+with one `write(2)` the first time it is seen. The header says `sync=1`, and
+the file is complete even if the process is killed or leaves through
+`os._exit`. The callbacks are enabled all or nothing; when the driver lacks
+the lookups (before CUDA 12.3) or CUPTI refuses one, the header omits
+`sync=1` and completeness rests on the footer.
 
-"Up to that point" depends on flushing. CUPTI hands records over only when a
-buffer fills or someone flushes, and most processes never fill one, so a
-recorder that flushed only at exit lost every process that never got there:
-engine cores and Ray workers SIGKILLed at teardown, children leaving through
-`os._exit`. A thread now flushes on a timer, a plain flush every
-`KERNREC_FLUSH_MS` (default 1000, 0 turns it off) and a forced one every
-`KERNREC_FORCE_EVERY` ticks (default 5) for the buffer a busy process always
-has a kernel in flight in. A kill loses at most the last few seconds of new
-names. The file is opened at `cuInit`, so a process that initialised CUDA and
-died before its first flush still leaves a header.
+The Activity API runs alongside as the cross-check, flushed on a timer
+(`KERNREC_FLUSH_MS`, default 1000, 0 turns it off; forced every
+`KERNREC_FORCE_EVERY` ticks, default 5). A name it delivers that no callback
+wrote is logged as `# error=callback-missed <name>`, then the name. The file
+is opened at `cuInit`, so a process that dies before launching anything
+still leaves a header.
 
 Under the docker plugin the step runs as root and the checkout is a bind
 mount owned by the agent user, so anything left there with default modes
@@ -54,29 +56,47 @@ the conditions in Docker and checks both, including a SIGKILLed step.
 ## Output
 
 ```
-# kernrec v1 backend=cuda recorder=cupti pid=4242 ppid=4200 exe=/usr/bin/python3
+# kernrec v1 backend=cuda recorder=cupti activity=1 sync=1 pid=4242 ppid=4200 exe=/usr/bin/python3
+# gpu_active
 _Z21fusedQKNormRopeKernelIN3c108BFloat16ENS0_ELi128ELb1EEvPvT_...
 fused_moe_kernel
 _ZN9deep_gemm...
-# dropped=0
 # end records=183220 unique=311 dropped=0 errors=0 unresolved=0
 ```
 
-`# dropped=N` marks CUPTI buffer overflow: launches we never saw. A row with
-drops should be treated as suspect by the table builder, not trusted.
+- `# gpu_active`: the first CUDA context was created. A file without it
+  launched nothing.
+- `# dropped=N`: CUPTI buffer overflow. A row with drops is never trusted.
+- `# error=...`: anything that could hide a launch (`callback-missed`,
+  `callback-unresolved`, `released-to-profiler`, a failed write or flush).
+- `# end`: the footer, written at normal exit. Optional with `sync=1`, but
+  it must agree with the file when present.
+
+`kernel_table.py` reads a `sync=1` file with no error lines and a whole last
+line as complete. Other files, and every ROCm file, need the footer or must
+be idle. The table's stats print `callback_missed` and
+`rows_usable_footer_rule` (the footer rule alone).
 
 ## What it sees
 
 Everything that reaches the driver, however the binary was made: ahead-of-time
 `_C` kernels, Triton (`@triton.jit` functions appear under their Python name),
 DeepGEMM and FlashInfer JIT, cuBLAS and cuDNN, and kernels replayed from CUDA
-graphs (CUPTI reports one record per graph node).
+graphs (named when the graph is built).
 
 Known limits:
 
-- One CUPTI activity client per process. If `torch.profiler` (Kineto) starts,
-  it takes over the buffer callbacks and this recorder goes quiet. Steps that
-  run profiler tests should not record.
+- One CUPTI activity client and one callback subscriber per process. When a
+  CUDA `torch.profiler` prepares, `kernrec_torch.py` calls
+  `kernrec_release()`, which hands both over and marks the file
+  `# error=released-to-profiler`.
+  Any other CUPTI client (Triton Proton, Nsight, a CUPTI timer) cannot
+  subscribe while a recording process holds the callback slot.
+- Kernels launched from device code (dynamic parallelism, device graph
+  launch) never reach a host callback. The Activity API reports them as
+  `callback-missed` in a process that lives to a flush; in a process killed
+  first, they are lost.
+- A write that fails empties the file, so it reads as incomplete.
 - Both backends require every observed process to finish cleanly, with no
   drops, errors, or unresolved names, before the row may authorize a drop.
   Partial recordings still provide positive evidence. Neither backend proves
