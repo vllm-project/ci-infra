@@ -150,6 +150,20 @@ The latest AMI ID is stored in SSM Parameter Store:
 
 CloudFormation uses `{{resolve:ssm:...}}` to dynamically fetch the AMI ID.
 
+The pipeline rolls new AMIs out to the CI build queues only
+(`bk-cpu-queue-premerge-us-east-1`, `bk-cpu-queue-postmerge-us-east-1`). The
+release queues read `/buildkite/release-cpu-build-ami/us-east-1`, which
+`packer_build_queue` can read but not write, so a release AMI is always a
+deliberate promotion. To promote an AMI to release, an admin runs:
+
+```bash
+aws ssm put-parameter --region us-east-1 --overwrite \
+  --name /buildkite/release-cpu-build-ami/us-east-1 --value ami-...
+```
+
+and then applies Terraform in ci-infra-private so the release stacks pick it up.
+The cleanup step never deletes the AMI that parameter points to.
+
 ### AMI Lifecycle
 
 - New AMIs are created with each daily build
