@@ -16,6 +16,9 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
         image = f"{registries}/{repositories['main']}:{commit}"
     else:
         image = f"{registries}/{repositories['premerge']}:{commit}"
+    if cpu and arm64:
+        # image_build_cpu_arm64.sh's tag; that build never uses the torch nightly.
+        return f"{image}-arm64-cpu"
     # In the full torch-nightly run, every step must use the nightly image. Use
     # the dedicated -torch-nightly tag so it never collides with the shared
     # postmerge tag (no overwrite / race with the regular postmerge image).
@@ -26,15 +29,6 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     if arm64:
         image = f"{image}-arm64"
     return image
-
-
-def get_arm64_cpu_image() -> str:
-    """The tag vLLM's `image_build_cpu_arm64.sh` pushes: `$REPO:<commit>-arm64-cpu`,
-    with no torch-nightly suffix, since that build never uses the nightly."""
-    global_config = get_global_config()
-    repositories = global_config["repositories"]
-    repo = repositories["main" if global_config["branch"] == "main" else "premerge"]
-    return f"{global_config['registries']}/{repo}:$BUILDKITE_COMMIT-arm64-cpu"
 
 
 def get_torch_nightly_image() -> str:

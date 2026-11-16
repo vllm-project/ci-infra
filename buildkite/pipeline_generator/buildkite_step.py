@@ -27,7 +27,6 @@ from amd import (
 )
 from step import Step
 from utils_lib.docker_utils import (
-    get_arm64_cpu_image,
     get_image,
     get_ecr_cache_registry,
     get_torch_nightly_image,
@@ -364,7 +363,7 @@ def _get_step_plugin(step: Step):
     if _uses_k8s_plugin(step):
         return get_k8s_plugin(step, get_image(use_cpu))
     elif step.device == DeviceType.ARM_CPU:
-        return {"docker#v5.2.0": get_docker_plugin(step, get_arm64_cpu_image())}
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(True, True))}
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
 

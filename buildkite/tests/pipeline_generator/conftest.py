@@ -50,9 +50,6 @@ def fake_global_config(monkeypatch):
         lambda cpu=False, arm64=False: "test-image",
     )
     monkeypatch.setattr(
-        buildkite_step, "get_arm64_cpu_image", lambda: "test-image-arm64-cpu"
-    )
-    monkeypatch.setattr(
         buildkite_step,
         "get_torch_nightly_image",
         lambda: "torch-nightly-image",
