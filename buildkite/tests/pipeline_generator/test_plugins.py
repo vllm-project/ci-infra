@@ -65,3 +65,28 @@ def test_standard_k8s_templates_inject_buildkite_analytics_token(template):
             }
         },
     }
+
+
+def test_arm_cpu_step_gets_a_container_like_its_script_started(fake_global_config):
+    step = Step(label="Arm CPU Test", device="arm_cpu")
+
+    plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
+
+    assert plugin == {
+        "image": "example/image:latest",
+        "always-pull": True,
+        "propagate-environment": True,
+        "shm-size": "4g",
+        "environment": [
+            "VLLM_USAGE_SOURCE=ci-test",
+            "HF_TOKEN",
+            BUILDKITE_ANALYTICS_TOKEN,
+        ],
+        "volumes": [
+            "/var/lib/buildkite-agent/.cache/huggingface:/root/.cache/huggingface",
+        ],
+    }
+    # A deep copy: nothing a step changes may leak into the next step's plugin.
+    template = docker_plugin.arm_cpu_plugin_template
+    assert template["image"] == ""
+    assert plugin["environment"] is not template["environment"]

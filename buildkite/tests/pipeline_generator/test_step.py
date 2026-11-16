@@ -1316,6 +1316,28 @@ def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
     assert buildkite_step.get_agent_queue(step) == queue
 
 
+def test_arm_cpu_step_runs_in_the_arm_cpu_image_on_the_arm_queue(monkeypatch):
+    monkeypatch.setattr(
+        buildkite_step,
+        "get_image",
+        lambda cpu=False, arm64=False: f"image cpu={cpu} arm64={arm64}",
+    )
+    step = Step(
+        label="Arm CPU Test",
+        key="arm-cpu-test",
+        group="CPU",
+        device="arm_cpu",
+        commands=["pytest -v -s kernels/test_onednn.py"],
+    )
+
+    (job,) = _render_single_step(step).steps
+
+    assert job.agents == {"queue": AgentQueue.ARM_CPU}
+    (plugin,) = job.plugins
+    assert plugin["docker#v5.2.0"]["image"] == "image cpu=True arm64=True"
+    assert "gpus" not in plugin["docker#v5.2.0"]
+
+
 def test_the_precommit_gate_retries_infra_failures():
     # A checkout that times out on the Git mirror lock would otherwise fail
     # the gate and block every test that depends on it.

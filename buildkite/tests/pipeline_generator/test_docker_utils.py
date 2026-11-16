@@ -38,3 +38,18 @@ def test_get_image_uses_torch_nightly_tag(monkeypatch):
         docker_utils.get_image(cpu=True)
         == "example.com/vllm/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly-cpu"
     )
+
+
+def test_arm_cpu_image_is_named_as_its_build_script_names_it(monkeypatch):
+    monkeypatch.setattr(docker_utils, "get_global_config", lambda: _cfg())
+    assert (
+        docker_utils.get_image(cpu=True, arm64=True)
+        == "example.com/vllm/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-arm64-cpu"
+    )
+    monkeypatch.setattr(
+        docker_utils, "get_global_config", lambda: _cfg(torch_nightly="1")
+    )
+    assert (
+        docker_utils.get_image(cpu=True, arm64=True)
+        == "example.com/vllm/vllm-ci-postmerge-repo:$BUILDKITE_COMMIT-torch-nightly-arm64-cpu"
+    )

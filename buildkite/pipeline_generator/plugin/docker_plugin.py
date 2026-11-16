@@ -126,6 +126,23 @@ amd_zen5_plugin_template = {
     ],
 }
 
+# What run-cpu-test-arm.sh gave its own container: no GPUs, 4 GB of shared
+# memory and the agent's Hugging Face cache. Test settings go in the step's env.
+arm_cpu_plugin_template = {
+    "image": "",
+    "always-pull": True,
+    "propagate-environment": True,
+    "shm-size": "4g",
+    "environment": [
+        "VLLM_USAGE_SOURCE=ci-test",
+        "HF_TOKEN",
+        "BUILDKITE_ANALYTICS_TOKEN",
+    ],
+    "volumes": [
+        "/var/lib/buildkite-agent/.cache/huggingface:/root/.cache/huggingface",
+    ],
+}
+
 
 def get_docker_plugin(step: Step, image: str):
     plugin = None
@@ -139,6 +156,8 @@ def get_docker_plugin(step: Step, image: str):
         plugin = copy.deepcopy(b200_plugin_template)
     elif step.device == DeviceType.AMD_ZEN5_CPU:
         plugin = copy.deepcopy(amd_zen5_plugin_template)
+    elif step.device == DeviceType.ARM_CPU:
+        plugin = copy.deepcopy(arm_cpu_plugin_template)
     else:
         plugin = copy.deepcopy(docker_plugin_template)
     plugin["image"] = image

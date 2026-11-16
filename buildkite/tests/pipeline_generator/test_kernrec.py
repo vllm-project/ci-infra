@@ -115,6 +115,13 @@ def test_on_leaves_no_plugin_steps_alone(monkeypatch):
     assert not _artifact_paths(rendered)
 
 
+def test_on_leaves_arm_cpu_steps_alone(monkeypatch):
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    rendered = _render(_gpu_step(device="arm_cpu"))
+    assert not any("kernrec" in c for c in _commands(rendered))
+    assert not _artifact_paths(rendered)
+
+
 @pytest.mark.parametrize(
     "key,switch,other",
     [

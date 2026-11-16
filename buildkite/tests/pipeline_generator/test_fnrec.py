@@ -157,6 +157,8 @@ def test_present_when_enabled(monkeypatch):
             },
             "nvidia",
         ),
+        # Left the hardware runner for the docker plugin; still never recorded.
+        ({"device": "arm_cpu"}, "nvidia"),
     ],
 )
 def test_steps_that_must_not_be_armed(monkeypatch, step_kwargs, profile):

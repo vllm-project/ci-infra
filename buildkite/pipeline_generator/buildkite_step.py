@@ -359,8 +359,13 @@ def _get_step_plugin(step: Step):
         DeviceType.CPU,
         DeviceType.CPU_SMALL,
         DeviceType.CPU_MEDIUM,
+        DeviceType.ARM_CPU,
     )
-    use_arm64 = step.device in (DeviceType.DGX_SPARK, DeviceType.GH200)
+    use_arm64 = step.device in (
+        DeviceType.DGX_SPARK,
+        DeviceType.GH200,
+        DeviceType.ARM_CPU,
+    )
     if _uses_k8s_plugin(step):
         return get_k8s_plugin(step, get_image(use_cpu))
     else:
@@ -539,6 +544,7 @@ def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool
         and not step.no_plugin
         and not step.label.startswith(":docker:")
         and step.key not in KERNREC_SKIP_STEPS
+        and step.device != DeviceType.ARM_CPU  # no GPU kernels to record
     )
 
 
@@ -666,6 +672,9 @@ def _fnrec_applies(step: Step, setup_profile: SetupProfile) -> bool:
         and not step.label.startswith(":docker:")
         and not (step.num_nodes and step.num_nodes >= 2)
         and not any(FNREC_BLIND_RUNNER.search(c) for c in step.commands or [])
+        # Never recorded while it ran through its hardware runner, and the
+        # recorder has not been tried in this queue's containers.
+        and step.device != DeviceType.ARM_CPU
     )
 
 

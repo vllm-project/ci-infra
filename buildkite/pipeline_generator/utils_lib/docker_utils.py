@@ -21,10 +21,11 @@ def get_image(cpu: bool = False, arm64: bool = False) -> str:
     # postmerge tag (no overwrite / race with the regular postmerge image).
     if global_config.get("torch_nightly") == "1":
         image = f"{image}-torch-nightly"
-    if cpu:
-        image = f"{image}-cpu"
+    # arm64 before cpu: the Arm CPU image is tagged -arm64-cpu.
     if arm64:
         image = f"{image}-arm64"
+    if cpu:
+        image = f"{image}-cpu"
     return image
 
 
