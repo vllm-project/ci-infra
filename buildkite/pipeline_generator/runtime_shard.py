@@ -9,9 +9,9 @@ pipeline, from the vLLM checkout it runs in:
             --ignore options.
   timings   main's median time per file for the step (ci.vllm.ai), with
             per-test medians for a file over one shard's budget, and its
-            median setup per job. Read from a snapshot of that endpoint,
-            refreshed hourly in S3 and downloaded once per run; the endpoint
-            itself only for a step the snapshot lacks, or with no snapshot.
+            median setup per job. When the endpoint fails (timeout, 5xx,
+            outage), from a snapshot of it refreshed hourly in S3, downloaded
+            at most once per run.
   plan      whole files into the fewest shards that keep each job, setup and
             tests, within the budget, largest file first (at most 10). A file
             over the budget is split by test function, using its per-test
@@ -51,8 +51,8 @@ from constants import AgentQueue
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
 # The endpoint's answers for every step main ran lately, published hourly by
-# the alerting worker (vllm-dashboard alerting/timings_snapshot.py), so a slow
-# dashboard database no longer leaves steps unsharded.
+# the alerting worker (vllm-dashboard alerting/timings_snapshot.py), so an
+# outage of the dashboard or its database doesn't leave steps unsharded.
 SNAPSHOT_BUCKET_URL = "https://vllm-ci-timings.s3.amazonaws.com"
 SNAPSHOT_POINTER = "ci/timings/latest.json"
 SNAPSHOT_TIMEOUT_SECONDS = 15
@@ -334,7 +334,7 @@ def discover(command: str, cwd: str, root: str) -> Dict:
 
 def _snapshot_entries() -> Dict:
     """The timings snapshot's entries, downloaded on the first call of the
-    run; {} if it can't be read, so every step asks the endpoint as before."""
+    run; {} if it can't be read."""
     global _snapshot
     if _snapshot is not None:
         return _snapshot
@@ -356,9 +356,20 @@ def _snapshot_entries() -> Dict:
         print(f"runtime-shard: timings snapshot of {snapshot.get('published_at')}, "
               f"{len(_snapshot)} steps", file=sys.stderr)
     except Exception as error:  # S3 down, no snapshot yet, bad body
-        print(f"runtime-shard: no timings snapshot ({error}); each step asks "
-              "the endpoint", file=sys.stderr)
+        print(f"runtime-shard: no timings snapshot ({error})", file=sys.stderr)
     return _snapshot
+
+
+def _from_snapshot(step_key: str, queue: AgentQueue) -> Optional[Dict]:
+    """The snapshot's stored answer for the step, for when the endpoint
+    failed; None if it has none."""
+    entry = _snapshot_entries().get(f"{step_key}|{queue.value}")
+    response = entry.get("response") if isinstance(entry, dict) else None
+    if not (isinstance(response, dict) and isinstance(response.get("files"), list)):
+        return None
+    print(f"runtime-shard: {step_key}: timings from the snapshot fetched "
+          f"{entry.get('fetched_at')}", file=sys.stderr)
+    return dict(response, snapshotFetchedAt=entry.get("fetched_at"))
 
 
 def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
@@ -366,26 +377,16 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     for the files over one shard's budget; None if there are none or the
     endpoint is down.
 
-    The snapshot's answer, whatever its age, when it has the step. Otherwise
-    the endpoint: a read that times out or fails gets one longer retry, and
-    after MAX_TIMINGS_FAILURES steps in a row fail, the rest of the run skips
-    the endpoint, so an outage costs a few reads instead of two per step.
+    A read that times out or fails gets one longer retry. After
+    MAX_TIMINGS_FAILURES steps in a row fail, the rest of the run skips the
+    endpoint, so an outage costs a few reads instead of two per step. A step
+    whose read failed, or was skipped, takes the snapshot's answer instead.
     """
-    entry = _snapshot_entries().get(f"{step_key}|{queue.value}")
-    # An entry that isn't a stored answer falls through to the endpoint.
-    response = entry.get("response", False) if isinstance(entry, dict) else False
-    if response is None or (isinstance(response, dict)
-                            and isinstance(response.get("files"), list)):
-        if response is None:
-            print(f"runtime-shard: no timings for {step_key} (snapshot of "
-                  f"{entry.get('fetched_at')}: no passing main build)", file=sys.stderr)
-            return None
-        return dict(response, snapshotFetchedAt=entry.get("fetched_at"))
     global _timings_failures
     if _timings_failures >= MAX_TIMINGS_FAILURES:
         print(f"runtime-shard: no timings for {step_key} (endpoint skipped after "
               f"{_timings_failures} failed steps)", file=sys.stderr)
-        return None
+        return _from_snapshot(step_key, queue)
     query = {
         "stepKey": step_key,
         "queue": queue.value,
@@ -399,7 +400,9 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
             _timings_failures = 0
             return timings
         except urllib.error.HTTPError as error:
-            if error.code < 500:  # 404: no passing main build, so no plan
+            # 404: no passing main build, so no plan. Final: the snapshot is
+            # built from this endpoint, so it can't know better.
+            if error.code < 500:
                 _timings_failures = 0  # the endpoint answered
                 print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
                 return None
@@ -408,7 +411,7 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
             last_error = error
     _timings_failures += 1
     print(f"runtime-shard: no timings for {step_key} ({last_error})", file=sys.stderr)
-    return None
+    return _from_snapshot(step_key, queue)
 
 
 def _least_loaded(sizes: List[float], count: int) -> Tuple[List[int], List[float]]:
@@ -785,7 +788,7 @@ def _snapshot_note(result: Dict) -> str:
     fetched_at = result.get("timingSource", {}).get("snapshotFetchedAt")
     if not fetched_at:
         return ""
-    note = f" Timings from the snapshot fetched {fetched_at}."
+    note = f" The endpoint failed, so these timings are from the snapshot fetched {fetched_at}."
     if snapshot_stale(result):
         note += (f" :warning: That is {_snapshot_hours(result):.0f} h old: the "
                  "hourly refresh on the alerting worker is failing.")
