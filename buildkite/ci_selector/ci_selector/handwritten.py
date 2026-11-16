@@ -526,6 +526,9 @@ MIRROR_OVERRIDABLE = {
     # Listed, never honored: the generator passes the parent's parallelism, so
     # a mirror asking for its own is silently ignored upstream.
     "parallelism",
+    # Only splits a mirror job into shards. Whether the job runs, and which
+    # tests it runs, never read it, so selection needs nothing from it.
+    "automatic_shard",
 }
 
 # The env var the generator reads. Absent means "your rules"; present means

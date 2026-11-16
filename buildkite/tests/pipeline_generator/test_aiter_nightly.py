@@ -105,13 +105,20 @@ class AiterNightlyBuild:
         self.calls = []
         self.early_jobs = {}  # uploaded ahead of the pipeline
         self.sharded_keys = []
+        self.meta_data = {}
+
+    def _generator(self):
+        generator = object.__new__(pipeline_generator.PipelineGenerator)
+        generator.output_file_path = str(self.pipeline_file)
+        return generator
 
     def generate(self):
         """Returns the pipeline's jobs, by key."""
-        generator = object.__new__(pipeline_generator.PipelineGenerator)
-        generator.output_file_path = str(self.pipeline_file)
-        generator.generate()
+        self._generator().generate()
         return _jobs(yaml.safe_load(self.pipeline_file.read_text()))
+
+    def generate_images_only(self):
+        self._generator().generate_images_only()
 
     @property
     def uploads(self):
@@ -135,6 +142,14 @@ class AiterNightlyBuild:
         if cmd[1:3] == ["pipeline", "upload"]:
             with open(cmd[3]) as f:
                 self.early_jobs.update(_jobs(yaml.safe_load(f)))
+        if cmd[1:3] == ["meta-data", "set"]:
+            self.meta_data[cmd[3]] = cmd[4]
+        if cmd[1:3] == ["meta-data", "exists"]:
+            return subprocess.CompletedProcess(
+                cmd, 0 if cmd[3] in self.meta_data else 100
+            )
+        if cmd[1:3] == ["meta-data", "get"]:
+            return subprocess.CompletedProcess(cmd, 0, self.meta_data[cmd[3]], "")
         return subprocess.CompletedProcess(cmd, 0)
 
     def _plan_step(self, key, *args):
@@ -198,6 +213,19 @@ def test_runs_the_amd_build_steps_and_gfx942_gfx950_jobs(build, platform):
         assert set(job.get("depends_on") or []) <= set(jobs), job["key"]
     assert jobs["native-on-image-build"]["depends_on"] == ["image-build-amd"]
     assert build.early_jobs == {}  # everything goes up in one upload
+
+
+def test_images_step_leaves_the_images_to_bootstrap(build, monkeypatch, capsys):
+    # It never learns the nightly's run keys, which leave out the CUDA image.
+    monkeypatch.setenv(pipeline_generator.IMAGES_STEP_ENV_VAR, "bootstrap-images")
+
+    build.generate_images_only()
+    assert "Images step failed" not in capsys.readouterr().out
+    jobs = build.generate()
+
+    assert build.meta_data == {pipeline_generator.EARLY_IMAGES_META_KEY: ""}
+    assert build.early_jobs == {}
+    assert set(jobs) == NIGHTLY_JOBS
 
 
 def test_builds_into_vllm_dev_with_vllms_build_sh(build):

@@ -149,6 +149,27 @@ def test_init_global_config_reads_only_step_keys(
 
 
 @pytest.mark.parametrize(
+    "line, expected", [("", False), ("automatic_shard_default: true\n", True)]
+)
+def test_init_global_config_reads_the_sharding_default(
+    tmp_path, monkeypatch, line, expected
+):
+    import buildkite.pipeline_generator.global_config as global_config
+
+    path = tmp_path / "ci_config.yaml"
+    path.write_text(
+        f"{line}name: test\njob_dirs: [{tmp_path}]\nregistries: reg\n"
+        "repositories: {main: repo}\n"
+    )
+    monkeypatch.setattr(global_config, "get_merge_base_commit", lambda: "sha")
+    monkeypatch.setattr(global_config, "get_list_file_diff", lambda *args: [])
+    monkeypatch.setattr(global_config, "get_pr_labels", lambda *args: [])
+    monkeypatch.setenv("BUILDKITE_BRANCH", "test-branch")
+    init_global_config(str(path))
+    assert global_config.config["automatic_shard_default"] is expected
+
+
+@pytest.mark.parametrize(
     "value, torch_nightly, expected",
     [
         (None, False, None),

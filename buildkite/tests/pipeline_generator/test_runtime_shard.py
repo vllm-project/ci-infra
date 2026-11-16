@@ -9,9 +9,11 @@ import time
 import urllib.error
 
 import pytest
+import yaml
 
 import buildkite_step
 import runtime_shard as rs
+import runtime_shard_plugin
 from constants import AgentQueue
 from step import Step
 
@@ -904,15 +906,18 @@ def test_generator_runs_an_enrolled_step_as_parallel_shards(
     # log headers and tracing labels, so main's timings keep matching. Each
     # test command exports its position, and runs only in the shards that
     # have its tests.
-    assert step.commands[:2] == rs.shard_job_setup()
-    jobs = step.commands[2:]
+    setup = rs.shard_job_setup()
+    assert step.commands[: len(setup)] == setup
+    jobs = step.commands[len(setup) :]
     assert len(jobs) == len(plain.commands)
     tagged = [job for job, own in zip(jobs, plain.commands) if job != own]
     assert len(tagged) == 2
-    assert tagged[0].startswith(f"export {rs.COMMAND_ENV}=2 && pytest -v -s model_executor")
+    assert tagged[0].startswith(f"{{ export {rs.COMMAND_ENV}=2 {rs.APPLIED_ENV}=")
+    assert "{\npytest -v -s model_executor" in tagged[0]
     assert TESTS[1] in tagged[1]  # the one-file command
     assert tagged[1].startswith('case "$${BUILDKITE_PARALLEL_JOB:-0}" in')
-    assert f"export {rs.COMMAND_ENV}=3 && pytest -v -s entrypoints" in tagged[1]
+    assert f"{{ export {rs.COMMAND_ENV}=3 {rs.APPLIED_ENV}=" in tagged[1]
+    assert "{\npytest -v -s entrypoints" in tagged[1]
     assert step.env["PYTEST_ADDOPTS"] == "-p no:pytest-shard -p runtime_shard_plugin"
     plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
     assert plan["shards"] == 3
@@ -930,7 +935,12 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "files": {"tests/a.py": 2},
         "split": {"tests/b.py": {"shards": {"0": 2, "1": 0}}},
     }
-    script = rs.guard("echo RAN", planned, 3).replace("$$", "$")
+    # Stands in for the plugin, which creates the marker's directory itself.
+    applied = (
+        f'echo RAN && mkdir -p "$$(dirname "$${rs.APPLIED_ENV}")"'
+        f' && touch "$${rs.APPLIED_ENV}"'
+    )
+    script = rs.guard(applied, planned, 3).replace("$$", "$")
     ran = {}
     for job in range(3):
         env = dict(os.environ, BUILDKITE_PARALLEL_JOB=str(job))
@@ -949,7 +959,69 @@ def test_a_command_runs_only_in_the_shards_with_its_tests():
         "files": {"tests/a.py": 0, "tests/c.py": 1, "tests/d.py": 2},
         "split": {},
     }
-    assert rs.guard("echo RAN", everywhere, 3) == f"export {rs.COMMAND_ENV}=1 && echo RAN"
+    assert rs.guard("echo RAN", everywhere, 3).startswith(
+        f"{{ export {rs.COMMAND_ENV}=1 {rs.APPLIED_ENV}={rs.PLUGIN_DIR}/applied-1;"
+    )
+
+
+def _guarded(command):
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    script = rs.guard(command, planned, 1).replace("$$", "$")
+    return subprocess.run(["sh", "-ec", script], capture_output=True, text=True)
+
+
+def test_a_command_that_passes_without_the_plan_applied_fails():
+    # A pytest that didn't load the plugin, or didn't match the planned
+    # command, ran all of its tests or none: it must not pass as a shard.
+    run = _guarded("echo RAN")
+    assert run.returncode == 1
+    assert "RAN" in run.stdout
+    assert "pytest ran without applying the shard plan" in run.stderr
+
+
+@pytest.mark.parametrize("shards", [1, 2])
+def test_a_failing_command_stops_the_job_with_its_own_status(shards):
+    # A job runs its commands as lines under `set -e`, and the generator adds
+    # lines after each command. A failing pytest must still stop the job,
+    # whether or not the command is wrapped to run in only some shards.
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    script = rs.guard("(exit 3)", planned, shards).replace("$$", "$")
+    run = subprocess.run(
+        ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
+    )
+    assert run.returncode == 3 and run.stdout == "" and run.stderr == ""
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the mode"
+)
+def test_a_marker_that_cannot_be_cleared_stops_the_job(tmp_path, monkeypatch):
+    # Otherwise the command and the check are skipped, and the job passes.
+    monkeypatch.setattr(rs, "PLUGIN_DIR", str(tmp_path))
+    (tmp_path / "applied-0").touch()
+    tmp_path.chmod(0o555)
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    script = rs.guard("echo RAN", planned, 1).replace("$$", "$")
+    try:
+        run = subprocess.run(
+            ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
+        )
+    finally:
+        tmp_path.chmod(0o755)
+    assert run.returncode != 0 and run.stdout == ""
+
+
+def test_a_command_ending_in_a_comment_still_runs_guarded():
+    planned = {"position": 0, "files": {"tests/a.py": 0}, "split": {}}
+    command = (
+        f'mkdir -p "$$(dirname "$${rs.APPLIED_ENV}")" && touch "$${rs.APPLIED_ENV}"'
+        " # a note"
+    )
+    script = rs.guard(command, planned, 1).replace("$$", "$")
+    run = subprocess.run(
+        ["sh", "-ec", script + "\necho NEXT"], capture_output=True, text=True
+    )
+    assert run.returncode == 0 and run.stdout == "NEXT\n", run.stderr
 
 
 def test_generator_keeps_the_single_job_without_a_plan(
@@ -1021,7 +1093,8 @@ def test_generator_shards_on_a_recording_build_too(
     monkeypatch.setattr(buildkite_step, "kernrec_enabled", lambda: True)
     [step] = _render(_step(automatic_shard=True))
     assert step.parallelism == 3
-    assert step.commands[:2] == rs.shard_job_setup()
+    setup = rs.shard_job_setup()
+    assert step.commands[: len(setup)] == setup
 
 
 def _mirror_step(**amd):
@@ -1317,33 +1390,134 @@ def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     [plain] = _render(_step(device="l4"))
     [step] = _render(_step(device="l4", automatic_shard=True))
     assert "kubernetes" in step.plugins[0] and step.plugins == plain.plugins
-    assert step.retry == plain.retry == buildkite_step.K8S_RETRY
-    assert step.parallelism == 3 and len(step.commands[2:]) == len(plain.commands)
+    assert step.retry == plain.retry == buildkite_step.ensure_infra_failure_retry(
+        buildkite_step.K8S_RETRY
+    )
+    jobs = step.commands[len(rs.shard_job_setup()) :]
+    assert step.parallelism == 3 and len(jobs) == len(plain.commands)
     # The same commands, each tagged with its position, the one-file command
     # run only by the shard with it.
-    changed = [new for new, old in zip(step.commands[2:], plain.commands) if new != old]
-    assert len(changed) == 2 and changed[0].startswith(f"export {rs.COMMAND_ENV}=")
+    changed = [new for new, old in zip(jobs, plain.commands) if new != old]
+    assert len(changed) == 2 and changed[0].startswith(f"{{ export {rs.COMMAND_ENV}=")
     assert changed[1].startswith("case ")
 
 
-def test_shard_job_setup_installs_the_plugin_for_any_python():
-    script = "\n".join(rs.shard_job_setup()).replace("$$", "$")
-    script += '\npython3 -c "import runtime_shard_plugin as p; print(p.__file__)"'
-    env = dict(os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH="/x")
-    env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env["PATH"]
-    run = subprocess.run(
-        ["bash", "-ec", script + '\necho "$PYTHONPATH"'],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=True,
+def _venv(path, pytest_python=None):
+    """A venv whose `pytest` runs pytest_python (its own python by default)."""
+    if not path.exists():
+        subprocess.run(
+            [sys.executable, "-m", "venv", "--without-pip", path], check=True
+        )
+    pytest = path / "bin" / "pytest"
+    pytest.write_text(f"#!{pytest_python or path / 'bin' / 'python3'}\n")
+    pytest.chmod(0o755)
+    return path
+
+
+def _run_after_setup(tmp_path, command, pythonpath="/x", venv=None):
+    """A shard job's setup, then the command, with python3 and pytest a fresh
+    venv's: the setup's copies go there and not into the python running these
+    tests."""
+    venv = venv or _venv(tmp_path / "venv")
+    script = "\n".join(rs.shard_job_setup() + [command]).replace("$$", "$")
+    env = dict(
+        os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH=pythonpath
     )
+    env["PATH"] = str(venv / "bin") + os.pathsep + env["PATH"]
+    return subprocess.run(
+        ["bash", "-ec", script], env=env, capture_output=True, text=True, check=True
+    )
+
+
+FIND_PLUGIN = (
+    'python3 -c "import importlib.util as u;'
+    " print(u.find_spec('runtime_shard_plugin').origin)\""
+)
+
+
+def test_shard_job_setup_installs_the_plugin_for_any_python(tmp_path):
+    run = _run_after_setup(tmp_path, FIND_PLUGIN + '\necho "$PYTHONPATH"')
     path, pythonpath = run.stdout.split()
     assert path == f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"
     assert pythonpath == f"{rs.PLUGIN_DIR}:/x"
     source = os.path.join(os.path.dirname(rs.__file__), "runtime_shard_plugin.py")
     with open(path) as installed, open(source) as original:
         assert installed.read() == original.read()
+
+
+def test_a_command_setting_its_own_pythonpath_still_finds_the_plugin(tmp_path):
+    # vLLM's entrypoints-integration-api-server runs
+    # `PYTHONPATH=/vllm-workspace pytest ...`, which replaces the exported path.
+    for command in (
+        f"PYTHONPATH=/vllm-workspace {FIND_PLUGIN}",
+        f"export PYTHONPATH=/x; {FIND_PLUGIN}",
+        f"env -u PYTHONPATH {FIND_PLUGIN}",
+    ):
+        run = _run_after_setup(tmp_path, command)
+        [found] = run.stdout.split()
+        assert found.startswith(str(tmp_path / "venv" / "lib")), (command, found)
+        assert found.endswith("/site-packages/runtime_shard_plugin.py")
+
+
+# What pip writes after `#!/bin/sh` when the python's path is too long for a
+# shebang line.
+PIP_EXEC_LINES = "'''exec' /no/python3 \"$0\" \"$@\"\n' '''\n"
+
+
+@pytest.mark.parametrize(
+    "script, expected",
+    [
+        ("#!{bin}/python3\n", "{bin}/python3"),
+        ("#!/usr/bin/env python3\n", "{bin}/python3"),
+        # pip's form for a long path; the python needn't be on PATH.
+        ("#!/bin/sh\n" + PIP_EXEC_LINES, "/no/python3"),
+        ("#!/usr/bin/sh\n" + PIP_EXEC_LINES, "/no/python3"),
+        ("#!/bin/bash\n", None),
+        ("", None),
+    ],
+)
+def test_the_python_pytest_runs_comes_from_its_shebang(
+    tmp_path, monkeypatch, script, expected
+):
+    (tmp_path / "python3").symlink_to(sys.executable)
+    pytest_script = tmp_path / "pytest"
+    pytest_script.write_text(script.format(bin=tmp_path))
+    pytest_script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    found = runtime_shard_plugin._pytest_python()
+    assert found == (expected and expected.format(bin=tmp_path))
+
+
+def test_no_pytest_on_path_means_no_second_python(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assert runtime_shard_plugin._pytest_python() is None
+
+
+def test_shard_job_setup_installs_the_plugin_for_pytests_own_python(tmp_path):
+    # python3 and the python that runs `pytest` can differ: both get a copy.
+    other = _venv(tmp_path / "other")
+    venv = _venv(tmp_path / "venv", pytest_python=other / "bin" / "python3")
+    _run_after_setup(tmp_path, "true", venv=venv)
+    for each in (venv, other):
+        [site] = (each / "lib").glob("python*/site-packages")
+        assert (site / "runtime_shard_plugin.py").exists(), each
+
+
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores the mode"
+)
+def test_shard_job_setup_runs_where_site_packages_is_read_only(tmp_path):
+    # The copy is best effort, and says so: the exported PYTHONPATH still
+    # covers the job.
+    venv = _venv(tmp_path / "venv")
+    [site] = (venv / "lib").glob("python*/site-packages")
+    site.chmod(0o555)
+    try:
+        run = _run_after_setup(tmp_path, FIND_PLUGIN)
+    finally:
+        site.chmod(0o755)
+    assert run.stdout.split() == [f"{rs.PLUGIN_DIR}/runtime_shard_plugin.py"]
+    assert "runtime-shard: couldn't install the plugin for" in run.stderr
 
 
 # The plugin, in real pytest runs: each shard runs the step's command as is.
@@ -1627,3 +1801,336 @@ def test_the_plugin_leaves_other_pytest_runs_alone(tmp_path):
     # Arguments the plan doesn't cover: the whole run, in any shard.
     run = _run(tmp_path, "pytest -v inner", plan, 1)
     assert run.returncode == 0 and "2 passed" in run.stdout
+
+
+# automatic_shard_default: true, on a branch whose pipeline config opted in.
+
+
+@pytest.fixture
+def by_default(fake_global_config, checkout):
+    fake_global_config["run_all"] = True
+    fake_global_config["automatic_shard_default"] = True
+    buildkite_step.ONE_JOB_REASONS.clear()
+    yield checkout
+    buildkite_step.ONE_JOB_REASONS.clear()
+
+
+AMD = {"device": "mi325_1", "dind": False}
+
+
+@pytest.mark.parametrize(
+    "step_flag, mirror_flag, step_shards, mirror_shards",
+    [
+        (None, None, True, True),  # no flags: both shard
+        (True, None, True, True),
+        (None, True, True, True),
+        (True, True, True, True),
+        (False, None, False, False),  # a mirror follows its step's false
+        (False, False, False, False),
+        (None, False, True, False),  # a mirror opts out alone
+        (True, False, True, False),
+        (False, True, False, True),  # a mirror opts in alone
+    ],
+)
+def test_default_on_flag_combinations(
+    by_default, step_flag, mirror_flag, step_shards, mirror_shards
+):
+    amd = dict(AMD)
+    if mirror_flag is not None:
+        amd["automatic_shard"] = mirror_flag
+    fields = {} if step_flag is None else {"automatic_shard": step_flag}
+    step = _step(mirror={"amd": amd}, **fields)
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    [job], [mirror] = group.steps, amd_group.steps
+    assert (job.parallelism == 3) is step_shards
+    assert ("Shard %N/%t" in job.label) is step_shards
+    assert (mirror.parallelism == 3) is mirror_shards
+    assert ("Shard %N/%t" in mirror.label) is mirror_shards
+    if step_shards:
+        assert "RUNTIME_SHARD_PLAN" in job.env
+    else:
+        assert "RUNTIME_SHARD_PLAN" not in (job.env or {})
+    reasons = buildkite_step.ONE_JOB_REASONS
+    assert ("model-executor" in reasons) is not step_shards
+    assert ("amd-model-executor" in reasons) is not mirror_shards
+
+
+@pytest.mark.parametrize(
+    "step_flag, mirror_flag, step_shards, mirror_shards",
+    [
+        (None, None, False, False),  # no flags: nothing shards
+        (True, None, True, False),  # a mirror needs its own flag
+        (None, True, False, False),  # and its step's
+        (True, True, True, True),
+        (False, True, False, False),
+        (True, False, True, False),
+    ],
+)
+def test_without_the_default_flags_work_as_before(
+    fake_global_config, checkout, step_flag, mirror_flag, step_shards, mirror_shards
+):
+    fake_global_config["run_all"] = True
+    buildkite_step.ONE_JOB_REASONS.clear()
+    amd = dict(AMD)
+    if mirror_flag is not None:
+        amd["automatic_shard"] = mirror_flag
+    fields = {} if step_flag is None else {"automatic_shard": step_flag}
+    step = _step(mirror={"amd": amd}, **fields)
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    assert (group.steps[0].parallelism == 3) is step_shards
+    assert (amd_group.steps[0].parallelism == 3) is mirror_shards
+
+
+@pytest.mark.parametrize("value", ["true", "on", 1, None])
+def test_a_mirror_flag_that_is_not_a_boolean_is_an_error(by_default, value):
+    step = _step(mirror={"amd": {**AMD, "automatic_shard": value}})
+    with pytest.raises(
+        ValueError,
+        match=f"^amd-model-executor: automatic_shard must be true or false, not {value!r}$",
+    ):
+        buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+
+
+def test_yaml_on_and_off_are_booleans():
+    # What a YAML `automatic_shard: on` parses to, on a step and in a mirror.
+    parsed = yaml.safe_load("a: on\nb: off\n")
+    assert parsed == {"a": True, "b": False}
+    assert Step(label="x", commands=["true"], automatic_shard="on").automatic_shard is True
+
+
+def test_a_standalone_amd_step_shards_with_no_flag(by_default):
+    step = _step(device="mi325_1", dind=False)
+    [job] = _render(step)
+    assert job.parallelism == 3 and "Shard %N/%t" in job.label
+
+
+def test_a_standalone_amd_step_that_forgets_dind_false_is_listed(by_default):
+    [job] = _render(_step(device="mi325_1"))
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == "dind"
+
+
+@pytest.mark.parametrize(
+    "fields, reason",
+    [
+        (dict(commands=["python3 run.py"]), "commands aren't all plain pytest"),
+        (dict(no_plugin=True), "no_plugin"),
+        (dict(num_nodes=2, num_devices=2), "multi-node"),
+        (dict(automatic_shard=False), "opted out (`automatic_shard: false`)"),
+    ],
+)
+def test_a_job_that_cannot_shard_is_listed_quietly(by_default, capsys, fields, reason):
+    [job] = _render(_step(**fields))
+    assert job.parallelism is None and "Shard" not in job.label
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == reason
+    assert "automatic_shard ignored" not in capsys.readouterr().out
+    assert by_default == []  # no per-step annotation
+
+
+def test_without_the_default_an_enrolled_job_that_cannot_shard_still_warns(
+    fake_global_config, checkout, capsys
+):
+    fake_global_config["run_all"] = True
+    buildkite_step.ONE_JOB_REASONS.clear()
+    _render(_step(commands=["python3 run.py"], automatic_shard=True))
+    assert (
+        "automatic_shard ignored on model-executor: only single-node, non-dind "
+        "steps whose test commands are all plain pytest can be sharded\n"
+    ) in capsys.readouterr().out
+    assert buildkite_step.ONE_JOB_REASONS == {}
+
+
+def test_no_timings_lists_the_job_instead_of_annotating_it(by_default, monkeypatch):
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    [job] = _render(_step())
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == (
+        "**Runtime sharding for `model-executor`:** no plan (main has no timing "
+        "for the step's files). The step runs as one job, as it would without sharding."
+    )
+    assert by_default == []
+
+
+def test_a_planner_error_is_listed_with_its_message(by_default, monkeypatch):
+    def broken(command, cwd, root):
+        raise RuntimeError("bad | glob\nin the command")
+
+    monkeypatch.setattr(rs, "discover", broken)
+    [job] = _render(_step())
+    assert job.parallelism is None
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[job])
+    assert (
+        "| Model Executor | **Runtime sharding for `model-executor`:** no plan "
+        "(bad \\| glob in the command). "
+        "The step runs as one job, as it would without sharding. |"
+    ) in buildkite_step.one_job_annotation([group])
+
+
+def test_without_the_default_no_timings_still_annotates(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    _render(_step(automatic_shard=True))
+    assert [style for _, _, style in checkout] == ["warning"]
+
+
+def test_a_job_that_fits_in_one_job_is_not_listed(by_default, monkeypatch):
+    timings = _timings(TESTS[0], {f: 10 for f in ME_FILES})
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 10})["files"]
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    [job] = _render(_step())
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS == {}
+
+
+def test_rollback_switch_runs_everything_as_one_job(by_default, monkeypatch):
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")
+    [job] = _render(_step())
+    assert job.parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["model-executor"] == "VLLM_CI_RUNTIME_SHARD=off"
+
+
+def test_a_step_not_in_this_build_is_not_listed(by_default, fake_global_config):
+    fake_global_config["only_step_keys"] = frozenset({"other"})
+    buildkite_step.convert_group_step_to_buildkite_step(
+        {"g": [_step(automatic_shard=False)]}
+    )
+    assert buildkite_step.ONE_JOB_REASONS == {}
+
+
+def test_one_job_annotation_lists_this_builds_jobs_and_skips_the_rest(by_default):
+    reasons = buildkite_step.ONE_JOB_REASONS
+    [one] = _render(_step(commands=["python3 run.py"]))
+    [image] = _render(_step(label=":docker: Build", key="image"))
+    reasons["image"] = "commands aren't all plain pytest"
+    image.parallelism = None  # fits in one job, and still isn't a test job
+    [deferred] = _render(_step(label="Later", key="later", commands=["python3 x.py"]))
+    deferred.deferred = True
+    [sharded] = _render(_step(label="Big", key="big"))
+    group = buildkite_step.BuildkiteGroupStep(
+        group="g", steps=[one, image, deferred, sharded]
+    )
+    text = buildkite_step.one_job_annotation([group])
+    assert text == (
+        "<details><summary>1 job ran as one job without a shard plan</summary>\n\n"
+        "| Job | Why |\n| --- | --- |\n"
+        "| Model Executor | commands aren't all plain pytest |\n\n</details>"
+    )
+
+
+def test_one_job_annotation_counts_and_stays_away_when_empty(by_default):
+    [sharded] = _render(_step())
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded])
+    assert buildkite_step.one_job_annotation([group]) is None
+    [a] = _render(_step(label="A", key="a", automatic_shard=False))
+    [b] = _render(_step(label="B", key="b", automatic_shard=False))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[a, b])
+    text = buildkite_step.one_job_annotation([group])
+    assert "2 jobs ran as one job" in text
+    opted_out = "opted out (`automatic_shard: false`)"
+    assert f"| A | {opted_out} |\n| B | {opted_out} |\n" in text
+
+
+def test_without_the_default_there_is_no_one_job_annotation(
+    by_default, fake_global_config, monkeypatch
+):
+    monkeypatch.setenv("VLLM_CI_RUNTIME_SHARD", "off")
+    [job] = _render(_step())
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[job])
+    assert "1 job ran as one job" in buildkite_step.one_job_annotation([group])
+    fake_global_config["automatic_shard_default"] = False
+    assert buildkite_step.one_job_annotation([group]) is None
+
+
+def test_generate_posts_the_one_job_list_as_one_warning(
+    by_default, fake_global_config, tmp_path, monkeypatch
+):
+    import pipeline_generator as generator
+
+    steps = [
+        _step(depends_on=None),
+        _step(label="Script", key="script", depends_on=None, commands=["python3 run.py"]),
+    ]
+    monkeypatch.setattr(generator, "get_global_config", lambda: fake_global_config)
+    monkeypatch.setattr(generator, "read_steps_from_job_dir", lambda d: steps)
+    monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
+    monkeypatch.setenv("PATH", "")  # no buildkite-agent: uploads are skipped
+    fake_global_config["job_dirs"] = ["x"]
+    pipeline = generator.PipelineGenerator.__new__(generator.PipelineGenerator)
+    pipeline.output_file_path = str(tmp_path / "out.yaml")
+    pipeline.generate()
+    [(key, text, style)] = by_default
+    assert (key, style) == ("one-job", "warning")
+    assert "1 job ran as one job" in text and "| Script | commands aren't all plain pytest |" in text
+
+    del by_default[:]
+    fake_global_config["automatic_shard_default"] = False
+    pipeline.generate()
+    assert by_default == []
+
+
+@pytest.mark.parametrize("flag", [None, True, False])
+def test_a_fixed_split_and_the_mirror_that_inherits_it_run_as_they_do_today(by_default, flag):
+    fields = {} if flag is None else {"automatic_shard": flag}
+    step = _step(parallelism=2, mirror={"amd": dict(AMD)}, **fields)
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    for job in (group.steps[0], amd_group.steps[0]):
+        assert job.parallelism == 2 and "Shard %N/%t" not in job.label
+        assert "RUNTIME_SHARD_PLAN" not in (job.env or {})
+    assert by_default.calls == []  # neither is planned
+    assert buildkite_step.one_job_annotation([group, amd_group]) is None
+
+
+def test_a_fixed_split_on_a_mirror_or_a_standalone_amd_step_stays(by_default):
+    mirrored = _step(mirror={"amd": {**AMD, "parallelism": 4}})
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [mirrored]})
+    assert group.steps[0].parallelism == 3  # the step itself still shards
+    assert amd_group.steps[0].parallelism == 4
+    assert "Shard %N/%t" not in amd_group.steps[0].label
+    job = _render_mirror(_step(device="mi325_1", dind=False, parallelism=2))
+    assert job.parallelism == 2 and "Shard %N/%t" not in job.label
+
+
+def test_pytest_xdist_can_not_be_sharded():
+    for args in ("-n 4", "-n=4", "-n4", "-nauto", "-nlogical", "--numprocesses=4"):
+        assert rs.split_commands([f"pytest tests {args}"]) is None
+    assert rs.split_commands(["pytest tests -name-like-arg"]) is not None
+    for args in ("--num-shards=2", "--shard-id=0"):
+        assert rs.split_commands([f"pytest tests {args}"]) is None
+    assert rs.split_commands(["pytest tests  # not with -n 4"]) is not None
+    # An inline PYTEST_ADDOPTS replaces the job's, which loads the shard plugin.
+    assert rs.split_commands(["PYTEST_ADDOPTS=-q pytest tests"]) is None
+    assert rs.split_commands(["OTHER=-q pytest tests"]) is not None
+    # A command that doesn't parse can't be planned; it must not stop the build.
+    assert rs.split_commands(["pytest tests -k 'unterminated"]) is None
+
+
+def test_xdist_in_a_jobs_environment_keeps_it_one_job(by_default):
+    reason = "`PYTEST_ADDOPTS` sets its own shards or pytest-xdist"
+    # pytest reads the variable as a shell would: quotes, and a value it can't parse.
+    for addopts in ("-v -n 4", "'-n4'", '"-n" "4"', "--num-shards=2", "-k 'unterminated"):
+        buildkite_step.ONE_JOB_REASONS.clear()
+        [job] = _render(_step(env={"PYTEST_ADDOPTS": addopts}))
+        assert job.parallelism is None, addopts
+        assert buildkite_step.ONE_JOB_REASONS == {"model-executor": reason}
+    # A mirror's own environment counts for the mirror only.
+    amd = {**AMD, "env": {"PYTEST_ADDOPTS": "-nauto"}}
+    step = _step(env={"PYTEST_ADDOPTS": "-p plug"}, mirror={"amd": amd})
+    [group, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [step]})
+    assert group.steps[0].parallelism == 3 and amd_group.steps[0].parallelism is None
+    assert buildkite_step.ONE_JOB_REASONS["amd-model-executor"] == reason
+
+
+def test_excluded_hand_splits_keep_their_split_and_are_not_called_one_job(by_default):
+    job = _render_mirror(
+        _step(automatic_shard=False, device="mi325_1", dind=False, parallelism=2)
+    )
+    assert job.parallelism == 2 and "Shard %N/%t" not in job.label
+    [nvidia] = _render(_step(automatic_shard=False, parallelism=2))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[job, nvidia])
+    assert buildkite_step.one_job_annotation([group]) is None
+    mirrored = _step(mirror={"amd": {**AMD, "parallelism": 4, "automatic_shard": False}})
+    [_, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [mirrored]})
+    assert amd_group.steps[0].parallelism == 4
+

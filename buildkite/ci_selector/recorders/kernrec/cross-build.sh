@@ -70,7 +70,7 @@ KT=$(grep -o '} CUpti_ActivityKernel[0-9]*;' "$INC/cupti_activity.h" | sed 's/} 
 
 $ZIG cc -target x86_64-linux-gnu.2.28 -std=gnu11 -O2 -Wall -Wextra -shared -fPIC \
   -DKERNREC_KERNEL_T="$KT" -I"$INC" -I"$CUDA_INC" \
-  kernrec.c "$CUPTI_SO" -o libkernrec.so -lpthread -Wl,--strip-all
+  kernrec.c "$CUPTI_SO" -o libkernrec.so -lpthread -ldl -Wl,--strip-all
 
 "$WORK/venv/bin/python" - <<'PY'
 from elftools.elf.elffile import ELFFile

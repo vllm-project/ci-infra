@@ -1,46 +1,44 @@
 /* kernrec: record the set of GPU kernels a process launches.
  *
- * A CUPTI injection library. When CUDA_INJECTION64_PATH names this file, the
- * CUDA driver dlopens it during cuInit and calls InitializeInjection(), so no
- * command needs wrapping and every child process that touches CUDA records
- * itself. Nothing loads when the variable is unset, so PR jobs pay nothing.
+ * A CUPTI injection library: when CUDA_INJECTION64_PATH names it, the driver
+ * loads it during cuInit and calls InitializeInjection(), so every process
+ * that touches CUDA records itself.
  *
- * Output: $KERNREC_DIR/kern.<pid>.txt (default .kernrec/$BUILDKITE_JOB_ID,
- * this recorder's own tree). One mangled kernel name per line,
- * appended the first time the name is seen, so a SIGKILL loses nothing that
- * was written before it. Lines starting with '#' are metadata.
+ * Output: $KERNREC_DIR/kern.<pid>.txt (default .kernrec/$BUILDKITE_JOB_ID).
+ * One mangled kernel name per line, written the first time it is seen, each
+ * line a single write(2). Lines starting with '#' are metadata, and
+ * "# end ..." is the footer written at exit.
  *
- * Written, not just recorded: CUPTI hands records over only when a buffer
- * fills or someone flushes, and one 8 MiB buffer holds more kernel records
- * than most processes ever launch. Flushing only at exit meant every process
- * that never reaches atexit (engine cores and Ray workers SIGKILLed at
- * teardown, os._exit after fork) left nothing at all, about fifteen CUDA
- * steps per nightly. So a thread flushes on a timer (KERNREC_FLUSH_MS,
- * default 1000; 0 turns it off): a plain flush every tick, which returns
- * buffers whose records are all complete, and a forced one every
- * KERNREC_FORCE_EVERY ticks (default 5), which also returns the buffer a
- * busy process always has a kernel in flight in. A kill loses at most the
- * last few seconds of new names. The file is opened at cuInit, so a process
- * that initialised CUDA and was killed before any flush still says so.
+ * Launch-time names (header sync=1): driver-API callbacks name each kernel
+ * when it is launched or added to a CUDA graph, before it can run, so the
+ * file is complete even if the process is killed or skips atexit. They are
+ * enabled all or nothing; without them the header omits sync=1.
  *
- * Why the Activity API and not the Callback API: kernels replayed from a
- * CUDA graph never pass through cuLaunchKernel, but CUPTI still reports one
- * kernel activity record per graph node. Only the set of names is kept, not
- * the timeline, which is what keeps the overhead and the output small.
+ * Cross-check: the Activity API reports every kernel that ran. A name no
+ * callback wrote is logged as "# error=callback-missed <name>", and a handle
+ * the lookups cannot name as "# error=callback-unresolved".
  *
- * One activity client per process: CUPTI allows only one. When torch.profiler
- * (Kineto) took over mid-run, it was handed this recorder's half-filled
- * buffer, dropped it as "unknown", and reported no GPU activity at all
- * (vLLM's bench-forward tests, nightly 98753 onwards). kernrec_torch.py
- * calls kernrec_release() just before a CUDA profiler prepares. The release
- * disables kernel activity, drains this recorder's buffers into its own file,
- * and steps aside. The file then carries "# error=released-to-profiler": its
- * names stay positive evidence, but the row is no longer complete. When the
- * profiler starts before CUDA is initialised, KERNREC_RELEASED_PID keeps
- * this recorder from arming in that one process.
+ * Flushing: CUPTI hands activity records over only when a buffer fills or is
+ * flushed. A thread flushes every KERNREC_FLUSH_MS (default 1000, 0 turns it
+ * off), and every KERNREC_FORCE_EVERY ticks (default 5) forces the flush so
+ * the buffer with a kernel in flight is returned too.
+ *
+ * Idle processes: header activity=1 promises "# gpu_active", written when the
+ * first CUDA context is created. A file without it launched nothing.
+ *
+ * CUPTI allows one callback subscriber per process. The marker and the launch
+ * callbacks share it for the process's life; without launch callbacks the
+ * recorder unsubscribes once the marker is written.
+ *
+ * CUPTI allows one activity client per process. kernrec_torch.py calls
+ * kernrec_release() before a CUDA profiler prepares; the release drains this
+ * recorder's buffers, frees CUPTI, and writes "# error=released-to-profiler".
+ * KERNREC_RELEASED_PID keeps the recorder from arming in a process whose
+ * profiler started before CUDA was initialised.
  */
 #define _GNU_SOURCE
 #include <cupti.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
@@ -66,6 +64,7 @@ typedef KERNREC_KERNEL_T KernelRec;
 
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static FILE *g_out = NULL;
+static char g_out_path[4096];
 static int g_out_failed = 0;
 static pid_t g_out_pid = 0;
 static char **g_keys = NULL; /* open-addressing set of strdup'd names */
@@ -74,12 +73,12 @@ static unsigned long g_records = 0, g_dropped = 0;
 static unsigned long g_errors = 0, g_unresolved = 0;
 
 static FILE *output(void);
+static void write_line(const char *prefix, const char *text);
 
 /* Caller holds g_lock. Errors survive even when the workload passes. */
 static void record_error(const char *operation) {
   g_errors++;
-  FILE *f = output();
-  if (f) fprintf(f, "# error=%s\n", operation);
+  if (output()) write_line("# error=", operation);
 }
 
 static void check_status(CUptiResult status, const char *operation) {
@@ -91,6 +90,13 @@ static void check_status(CUptiResult status, const char *operation) {
 static int g_initialized = 0;
 static int g_armed = 0;
 static int g_released = 0;
+/* The context-creation marker; see the header comment. g_subscriber_pid is
+ * the process whose header promised it (activity=1). */
+static CUpti_SubscriberHandle g_subscriber;
+static pid_t g_subscriber_pid = 0;
+static int g_active = 0;
+/* The process whose header says sync=1. */
+static pid_t g_sync_pid = 0;
 
 /* Flush thread; see the header comment. g_flush_pid guards the join: a forked
  * child inherits the atexit handler but not the thread. */
@@ -172,6 +178,18 @@ static int mkdir_p(const char *path) {
   return mkdir_open(tmp);
 }
 
+/* A line that cannot be written may be a name, so empty the file: with no
+ * header it never reads as complete. Caller holds g_lock. */
+static void fail_closed(void) {
+  g_errors++;
+  fprintf(stderr, "kernrec: cannot write %s; recording dropped\n", g_out_path);
+  if (truncate(g_out_path, 0) != 0)
+    fprintf(stderr, "kernrec: cannot empty %s: %s\n", g_out_path, strerror(errno));
+  fclose(g_out);
+  g_out = NULL;
+  g_out_failed = 1;
+}
+
 /* Opened at cuInit and keyed by pid, so a process that forks after CUDA init
  * (unsupported by CUDA, but it happens) opens its own file on its first
  * record instead of writing into its parent's. Caller holds g_lock. */
@@ -193,10 +211,9 @@ static FILE *output(void) {
     snprintf(dirbuf, sizeof dirbuf, ".kernrec/%s", job && *job ? job : "local");
     dir = dirbuf;
   }
-  char path[4096];
-  int length = snprintf(path, sizeof path, "%s/kern.%ld.txt", dir, (long)pid);
-  if (mkdir_p(dir) || length < 0 || (size_t)length >= sizeof path ||
-      !(g_out = fopen(path, "a"))) {
+  int length = snprintf(g_out_path, sizeof g_out_path, "%s/kern.%ld.txt", dir, (long)pid);
+  if (mkdir_p(dir) || length < 0 || (size_t)length >= sizeof g_out_path ||
+      !(g_out = fopen(g_out_path, "a"))) {
     fprintf(stderr, "kernrec: cannot write under %s: %s\n", dir,
             strerror(errno));
     g_out_failed = 1;
@@ -206,12 +223,321 @@ static FILE *output(void) {
   setvbuf(g_out, NULL, _IOLBF, 0);
   char exe[1024] = {0};
   ssize_t r = readlink("/proc/self/exe", exe, sizeof exe - 1);
-  fprintf(g_out, "# kernrec v1 backend=cuda recorder=cupti pid=%ld ppid=%ld exe=%s\n", (long)pid,
+  fprintf(g_out, "# kernrec v1 backend=cuda recorder=cupti%s%s pid=%ld ppid=%ld exe=%s\n",
+          g_subscriber_pid == pid ? " activity=1" : "",
+          g_sync_pid == pid ? " sync=1" : "", (long)pid,
           (long)getppid(), r > 0 ? exe : "?");
+  if (ferror(g_out)) {
+    fail_closed();
+    return NULL;
+  }
   return g_out;
 }
 
+/* Appends prefix + text + newline to g_out as one write(2), so a kill leaves
+ * whole lines only; any failure fails closed. Caller holds g_lock and has
+ * called output(). */
+static void write_line(const char *prefix, const char *text) {
+  if (!g_out) return; /* failed closed earlier in this call */
+  size_t prefix_len = strlen(prefix), text_len = strlen(text);
+  size_t n = prefix_len + text_len + 1;
+  char stackbuf[4096];
+  char *buf = n <= sizeof stackbuf ? stackbuf : malloc(n);
+  int ok = 0;
+  if (buf) {
+    memcpy(buf, prefix, prefix_len);
+    memcpy(buf + prefix_len, text, text_len);
+    buf[n - 1] = '\n';
+    int fd = fileno(g_out);
+    if (fflush(g_out) == 0)
+      ok = fd >= 0 ? write(fd, buf, n) == (ssize_t)n
+                   : fwrite(buf, 1, n, g_out) == n && fflush(g_out) == 0;
+    if (buf != stackbuf) free(buf);
+  }
+  if (!ok) fail_closed();
+}
+
+/* ---- launch-time names --------------------------------------------------- */
+
+typedef CUresult (*name_lookup_t)(const char **, void *);
+static name_lookup_t g_func_name = NULL, g_kernel_name = NULL;
+static pid_t g_unresolved_pid = 0;
+
+/* Driver entry points that launch a kernel or add one to a graph. Graph
+ * replays run nodes these already named. */
+static const CUpti_CallbackId LAUNCH_CALLBACKS[] = {
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunch,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid,
+    CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphAddKernelNode,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphAddKernelNode_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphKernelNodeSetParams,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphKernelNodeSetParams_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphExecKernelNodeSetParams,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphExecKernelNodeSetParams_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphAddNode,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphAddNode_v2,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphNodeSetParams,
+    CUPTI_DRIVER_TRACE_CBID_cuGraphExecNodeSetParams,
+};
+#define N_LAUNCH_CALLBACKS (sizeof LAUNCH_CALLBACKS / sizeof LAUNCH_CALLBACKS[0])
+
+/* Handles already named, read without the lock. A full probe run only costs
+ * a repeat lookup. */
+#define HANDLE_BITS 16
+#define HANDLE_SLOTS (1u << HANDLE_BITS)
+#define HANDLE_PROBES 64
+static uintptr_t g_handles[HANDLE_SLOTS];
+
+static size_t handle_slot(uintptr_t handle) {
+  return (size_t)(((uint64_t)handle * 0x9E3779B97F4A7C15ULL) >> (64 - HANDLE_BITS));
+}
+
+static int handle_seen(uintptr_t handle) {
+  size_t i = handle_slot(handle);
+  for (int k = 0; k < HANDLE_PROBES; ++k, i = (i + 1) & (HANDLE_SLOTS - 1)) {
+    uintptr_t v = __atomic_load_n(&g_handles[i], __ATOMIC_ACQUIRE);
+    if (v == handle) return 1;
+    if (v == 0) return 0;
+  }
+  return 0;
+}
+
+static void handle_mark(uintptr_t handle) { /* caller holds g_lock */
+  size_t i = handle_slot(handle);
+  for (int k = 0; k < HANDLE_PROBES; ++k, i = (i + 1) & (HANDLE_SLOTS - 1)) {
+    uintptr_t v = g_handles[i];
+    if (v == handle) return;
+    if (v == 0) {
+      __atomic_store_n(&g_handles[i], handle, __ATOMIC_RELEASE);
+      return;
+    }
+  }
+}
+
+/* An unloaded module's handles can be reused for other kernels. */
+static void forget_handles(void) {
+  for (size_t i = 0; i < HANDLE_SLOTS; ++i)
+    __atomic_store_n(&g_handles[i], 0, __ATOMIC_RELEASE);
+}
+
+/* torch passes CUkernel handles as CUfunction; each lookup rejects the other
+ * kind. */
+static const char *handle_name(void *handle, int is_kernel) {
+  name_lookup_t first = is_kernel ? g_kernel_name : g_func_name;
+  name_lookup_t second = is_kernel ? g_func_name : g_kernel_name;
+  const char *name = NULL;
+  if (first(&name, handle) == CUDA_SUCCESS && name && *name) return name;
+  name = NULL;
+  if (second(&name, handle) == CUDA_SUCCESS && name && *name) return name;
+  return NULL;
+}
+
+/* The lookups run before g_lock is taken: context creation and activity
+ * flushes take g_lock from inside the driver. */
+static void record_handle(void *handle, int is_kernel) {
+  if (!handle) return; /* the launch fails */
+  uintptr_t key = (uintptr_t)handle;
+  if (handle_seen(key) || g_sync_pid != getpid()) return;
+  const char *name = handle_name(handle, is_kernel);
+  pthread_mutex_lock(&g_lock);
+  if (!name) {
+    if (g_unresolved_pid != g_sync_pid) {
+      g_unresolved_pid = g_sync_pid;
+      record_error("callback-unresolved");
+    }
+  } else if (set_insert(name) && output()) {
+    write_line("", name);
+  }
+  handle_mark(key);
+  pthread_mutex_unlock(&g_lock);
+}
+
+static void record_node(const CUDA_KERNEL_NODE_PARAMS *node) {
+  if (!node) return;
+  if (node->func) record_handle((void *)node->func, 0);
+  else record_handle((void *)node->kern, 1);
+}
+
+/* v1 node params have no kern field. */
+static void record_node_v1(const CUDA_KERNEL_NODE_PARAMS_v1 *node) {
+  if (node) record_handle((void *)node->func, 0);
+}
+
+static void record_graph_node(const CUgraphNodeParams *node) {
+  if (!node || node->type != CU_GRAPH_NODE_TYPE_KERNEL) return;
+  if (node->kernel.func) record_handle((void *)node->kernel.func, 0);
+  else record_handle((void *)node->kernel.kern, 1);
+}
+
+static void record_launch(CUpti_CallbackId cbid, const void *params) {
+  switch (cbid) {
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel:
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernel_ptsz:
+    record_handle((void *)((const cuLaunchKernel_params *)params)->f, 0);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx:
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchKernelEx_ptsz:
+    record_handle((void *)((const cuLaunchKernelEx_params *)params)->f, 0);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel:
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernel_ptsz:
+    record_handle((void *)((const cuLaunchCooperativeKernel_params *)params)->f, 0);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchCooperativeKernelMultiDevice: {
+    const cuLaunchCooperativeKernelMultiDevice_params *p = params;
+    for (unsigned i = 0; p->launchParamsList && i < p->numDevices; ++i)
+      record_handle((void *)p->launchParamsList[i].function, 0);
+    break;
+  }
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunch:
+    record_handle((void *)((const cuLaunch_params *)params)->f, 0);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchGrid:
+    record_handle((void *)((const cuLaunchGrid_params *)params)->f, 0);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuLaunchGridAsync:
+    record_handle((void *)((const cuLaunchGridAsync_params *)params)->f, 0);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphAddKernelNode:
+    record_node_v1(((const cuGraphAddKernelNode_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphAddKernelNode_v2:
+    record_node(((const cuGraphAddKernelNode_v2_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphKernelNodeSetParams:
+    record_node_v1(((const cuGraphKernelNodeSetParams_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphKernelNodeSetParams_v2:
+    record_node(((const cuGraphKernelNodeSetParams_v2_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphExecKernelNodeSetParams:
+    record_node_v1(((const cuGraphExecKernelNodeSetParams_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphExecKernelNodeSetParams_v2:
+    record_node(((const cuGraphExecKernelNodeSetParams_v2_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphAddNode:
+    record_graph_node(((const cuGraphAddNode_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphAddNode_v2:
+    record_graph_node(((const cuGraphAddNode_v2_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphNodeSetParams:
+    record_graph_node(((const cuGraphNodeSetParams_params *)params)->nodeParams);
+    break;
+  case CUPTI_DRIVER_TRACE_CBID_cuGraphExecNodeSetParams:
+    record_graph_node(((const cuGraphExecNodeSetParams_params *)params)->nodeParams);
+    break;
+  default:
+    break;
+  }
+}
+
+/* A forked child may inherit a held lock. */
+static void reset_after_fork(void) { pthread_mutex_init(&g_lock, NULL); }
+
+/* Unloads and context teardown free handles the driver can reuse. */
+static const CUpti_CallbackId FORGET_CALLBACKS[] = {
+    CUPTI_CBID_RESOURCE_MODULE_UNLOAD_STARTING,
+    CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING,
+};
+#define N_FORGET_CALLBACKS (sizeof FORGET_CALLBACKS / sizeof FORGET_CALLBACKS[0])
+
+static void disable(CUpti_CallbackDomain domain, const CUpti_CallbackId *ids, size_t n) {
+  while (n--) cuptiEnableCallback(0, g_subscriber, domain, ids[n]);
+}
+
+static int enable_all(CUpti_CallbackDomain domain, const CUpti_CallbackId *ids, size_t n) {
+  size_t enabled = 0;
+  while (enabled < n &&
+         cuptiEnableCallback(1, g_subscriber, domain, ids[enabled]) == CUPTI_SUCCESS)
+    enabled++;
+  if (enabled == n) return 1;
+  disable(domain, ids, enabled);
+  return 0;
+}
+
+/* All or nothing: a missing launch path would lose names under sync=1.
+ * Caller is subscribed. */
+static void enable_launch_callbacks(void) {
+  void *cuda = dlopen("libcuda.so.1", RTLD_NOW | RTLD_NOLOAD);
+  void *scope = cuda ? cuda : RTLD_DEFAULT;
+  g_func_name = (name_lookup_t)dlsym(scope, "cuFuncGetName");
+  g_kernel_name = (name_lookup_t)dlsym(scope, "cuKernelGetName");
+  if (!g_func_name || !g_kernel_name) return; /* driver before CUDA 12.3 */
+  if (!enable_all(CUPTI_CB_DOMAIN_DRIVER_API, LAUNCH_CALLBACKS, N_LAUNCH_CALLBACKS))
+    return;
+  if (!enable_all(CUPTI_CB_DOMAIN_RESOURCE, FORGET_CALLBACKS, N_FORGET_CALLBACKS)) {
+    disable(CUPTI_CB_DOMAIN_DRIVER_API, LAUNCH_CALLBACKS, N_LAUNCH_CALLBACKS);
+    return;
+  }
+  pthread_atfork(NULL, NULL, reset_after_fork);
+  g_sync_pid = getpid();
+}
+
 /* ---- CUPTI callbacks --------------------------------------------------- */
+
+/* First CUDA context in this process: from here on it can launch kernels, so
+ * a later missing footer may hide some. Written before any launch, unbuffered,
+ * so a SIGKILL right after still leaves it. */
+static void mark_active(void) {
+  pthread_mutex_lock(&g_lock);
+  if (!g_active && g_subscriber_pid == getpid()) {
+    g_active = 1;
+    if (output()) write_line("# gpu_active", "");
+  }
+  pthread_mutex_unlock(&g_lock);
+}
+
+static void CUPTIAPI on_callback(void *userdata, CUpti_CallbackDomain domain,
+                                 CUpti_CallbackId cbid, const void *data) {
+  (void)userdata;
+  if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
+    if (cbid == CUPTI_CBID_RESOURCE_CONTEXT_CREATED) mark_active();
+    else if (cbid == CUPTI_CBID_RESOURCE_MODULE_UNLOAD_STARTING ||
+             cbid == CUPTI_CBID_RESOURCE_CONTEXT_DESTROY_STARTING)
+      forget_handles();
+    return;
+  }
+  const CUpti_CallbackData *call = data;
+  if (domain == CUPTI_CB_DOMAIN_DRIVER_API && call->callbackSite == CUPTI_API_ENTER)
+    record_launch(cbid, call->functionParams);
+}
+
+/* Arms the marker, then the launch callbacks on the same subscriber. */
+static void subscribe_activity_marker(void) {
+  if (cuptiSubscribe(&g_subscriber, (CUpti_CallbackFunc)on_callback, NULL) !=
+      CUPTI_SUCCESS)
+    return;
+  if (cuptiEnableCallback(1, g_subscriber, CUPTI_CB_DOMAIN_RESOURCE,
+                          CUPTI_CBID_RESOURCE_CONTEXT_CREATED) != CUPTI_SUCCESS) {
+    cuptiUnsubscribe(g_subscriber);
+    return;
+  }
+  g_subscriber_pid = getpid();
+  enable_launch_callbacks();
+}
+
+/* Frees the callback slot, launch callbacks included. Never call it from
+ * inside a callback. */
+static void unsubscribe_activity_marker(void) {
+  if (g_subscriber_pid != getpid()) return;
+  g_subscriber_pid = 0;
+  g_sync_pid = 0;
+  check_status(cuptiUnsubscribe(g_subscriber), "unsubscribe-marker");
+}
+
+static void release_marker_if_done(void) {
+  if (g_active && g_sync_pid != getpid()) unsubscribe_activity_marker();
+}
 
 static void CUPTIAPI buffer_requested(uint8_t **buffer, size_t *size,
                                       size_t *max_records) {
@@ -245,11 +571,14 @@ static void CUPTIAPI buffer_completed(CUcontext ctx, uint32_t stream_id,
     g_records++;
     if (!k->name || !*k->name) { g_unresolved++; continue; }
     if (set_insert(k->name)) {
-      FILE *f = output();
-      if (f) {
-        fputs(k->name, f);
-        fputc('\n', f);
+      if (!output()) continue;
+      /* Under sync=1 the callbacks already put every name in the set. The
+       * error goes first, so a kill between the lines still flags it. */
+      if (g_sync_pid == getpid()) {
+        g_errors++;
+        write_line("# error=callback-missed ", k->name);
       }
+      write_line("", k->name);
     }
   }
   /* A dropped record is a launch we never saw. Leave a mark so build-table
@@ -259,8 +588,9 @@ static void CUPTIAPI buffer_completed(CUcontext ctx, uint32_t stream_id,
   if (status != CUPTI_SUCCESS) record_error("read-drop-count");
   if (dropped) {
     g_dropped += dropped;
-    FILE *f = output();
-    if (f) fprintf(f, "# dropped=%zu\n", dropped);
+    char count[32];
+    snprintf(count, sizeof count, "%zu", dropped);
+    if (output()) write_line("# dropped=", count);
     fprintf(stderr, "kernrec: %zu activity records dropped\n", dropped);
   }
   pthread_mutex_unlock(&g_lock);
@@ -300,6 +630,7 @@ static void *flush_loop(void *arg) {
     int forced = g_force_every > 0 && tick % g_force_every == 0;
     check_status(cuptiActivityFlushAll(forced ? CUPTI_ACTIVITY_FLAG_FLUSH_FORCED : 0),
                  "periodic-flush");
+    release_marker_if_done();
     pthread_mutex_lock(&g_flush_lock);
   }
   pthread_mutex_unlock(&g_flush_lock);
@@ -337,14 +668,16 @@ static void stop_flush_thread(void) {
 int kernrec_release(void) {
   if (!g_armed || g_released) return 0;
   g_released = 1;
+  /* Before the unsubscribe, after which launches go unnamed. */
+  pthread_mutex_lock(&g_lock);
+  record_error("released-to-profiler");
+  pthread_mutex_unlock(&g_lock);
   stop_flush_thread();
+  unsubscribe_activity_marker();
   check_status(cuptiActivityDisable(CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL),
                "release-disable");
   check_status(cuptiActivityFlushAll(CUPTI_ACTIVITY_FLAG_FLUSH_FORCED),
                "release-flush");
-  pthread_mutex_lock(&g_lock);
-  record_error("released-to-profiler");
-  pthread_mutex_unlock(&g_lock);
   return 1;
 }
 
@@ -377,14 +710,17 @@ static const char *cupti_err(CUptiResult st) {
 int InitializeInjection(void) {
   if (g_initialized) return 1;
   g_initialized = 1;
+  const char *released = getenv("KERNREC_RELEASED_PID");
+  int released_here = released && strtol(released, NULL, 10) == (long)getpid();
+  /* Before the header, which says activity=1 only if this armed. */
+  if (!released_here) subscribe_activity_marker();
   pthread_mutex_lock(&g_lock);
   output();
   pthread_mutex_unlock(&g_lock);
   atexit(at_exit);
 
   /* Still writes a file, so the row shows this process ran unrecorded. */
-  const char *released = getenv("KERNREC_RELEASED_PID");
-  if (released && strtol(released, NULL, 10) == (long)getpid()) {
+  if (released_here) {
     g_released = 1;
     pthread_mutex_lock(&g_lock);
     record_error("released-to-profiler");

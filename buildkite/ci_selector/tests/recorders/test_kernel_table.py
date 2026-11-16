@@ -390,6 +390,7 @@ def test_native_health_requires_complete_error_free_recording(
 IDLE = (
     "# kernrec v1 backend=rocm recorder=rocprofiler-sdk activity=1 pid=7 ppid=1 exe=py"
 )
+CUDA_IDLE = "# kernrec v1 backend=cuda recorder=cupti activity=1 pid=7 ppid=1 exe=py"
 
 
 @pytest.mark.parametrize(
@@ -401,23 +402,117 @@ IDLE = (
         (f"{IDLE}\n# dropped=1\n", False),
         (f"{IDLE}\n# error=flush_failed\n", False),
         (IDLE.replace(" activity=1", "") + "\n", False),
-        (
-            IDLE.replace(
-                "backend=rocm recorder=rocprofiler-sdk", "backend=cuda recorder=cupti"
-            )
-            + "\n",
-            False,
-        ),
+        (f"{CUDA_IDLE}\n", True),
+        (f"{CUDA_IDLE}\n# gpu_active\n", False),
+        (f"{CUDA_IDLE}\n# gpu_active\nk\n", False),
+        (CUDA_IDLE.replace(" activity=1", "") + "\n", False),
     ],
-    ids=["idle", "active", "names", "dropped", "error", "no-activity", "cuda"],
+    ids=[
+        "idle",
+        "active",
+        "names",
+        "dropped",
+        "error",
+        "no-activity",
+        "cuda-idle",
+        "cuda-active",
+        "cuda-names",
+        "cuda-before-marker",
+    ],
 )
-def test_footerless_rocm_process_is_clean_only_if_it_never_loaded_gpu_code(
+def test_footerless_process_is_clean_only_if_it_never_went_active(
     tmp_path, text, clean
 ):
-    """A killed process that never loaded GPU code cannot have lost kernels."""
+    """A killed process that never went active (ROCm: loaded GPU code; CUDA:
+    created a context) cannot have lost kernels. A CUDA header without
+    activity=1 comes from a recorder that wrote no marker, so it stays strict."""
     path = tmp_path / "kern.7.txt"
     path.write_text(text)
     assert kernel_table.read_recording(path)[2] is clean
+
+
+SYNC = "# kernrec v1 backend=cuda recorder=cupti activity=1 sync=1 pid=7 ppid=1 exe=py"
+FOOTER = "# end records=1 unique=1 dropped=0 errors=0 unresolved=0"
+
+
+@pytest.mark.parametrize(
+    "text,clean",
+    [
+        (f"{SYNC}\n# gpu_active\nk\n", True),
+        (f"{SYNC}\n", True),
+        (f"{SYNC}\n# gpu_active\nk\n{FOOTER}\n", True),
+        (f"{SYNC}\n# gpu_active\nk\n# error=callback-missed m\nm\n", False),
+        (f"{SYNC}\n# gpu_active\nk\n{FOOTER.replace('unique=1', 'unique=2')}\n", False),
+        (f"{SYNC}\n# gpu_active\nk\n{FOOTER}\nlate\n", False),
+        (f"{SYNC}\n# gpu_active\nk\n{FOOTER}\n{SYNC}\nlate\n", False),
+        (f"{SYNC}\n# gpu_active\nk", False),
+        (f"{SYNC.replace('sync=1', 'sync=2')}\n# gpu_active\nk\n", False),
+        (
+            f"{IDLE.replace('activity=1', 'activity=1 sync=1')}\n# gpu_active\nk\n",
+            False,
+        ),
+    ],
+    ids=[
+        "killed-after-launch",
+        "idle",
+        "footer",
+        "callback-missed",
+        "footer-disagrees",
+        "name-after-footer",
+        "reopened-after-footer",
+        "torn-last-line",
+        "unknown-format",
+        "rocm-keeps-footer-rule",
+    ],
+)
+def test_launch_time_recording_is_complete_without_a_footer(tmp_path, text, clean):
+    """sync=1 needs no footer, but one that is present must agree. ROCm and
+    today's CUDA format keep the footer rule."""
+    path = tmp_path / "kern.7.txt"
+    path.write_text(text)
+    assert kernel_table.read_recording(path)[2] is clean
+    # Today's rule: a footer, or an idle process that never went active.
+    footer_rule = clean and ("# end " in text or "# gpu_active" not in text)
+    assert kernel_table.read_recording(path, footer_rule=True)[2] is footer_rule
+
+
+def test_launch_time_names_may_outnumber_kernel_records(tmp_path):
+    """A kernel named at launch or graph capture may never run (a graph never
+    replayed, a rejected launch), so the footer counts fewer records than
+    names. Complete under sync=1; the footer rule still says no."""
+    path = tmp_path / "kern.7.txt"
+    path.write_text(
+        f"{SYNC}\n# gpu_active\nk\n{FOOTER.replace('records=1', 'records=0')}\n"
+    )
+    assert kernel_table.read_recording(path)[2] is True
+    assert kernel_table.read_recording(path, footer_rule=True)[2] is False
+
+
+def test_table_reports_misses_and_what_the_footer_rule_would_give(tmp_path):
+    root = tmp_path / ".kernrec"
+    for job, step, text in [
+        ("job-a", "killed", f"{SYNC}\n# gpu_active\nk\n"),
+        ("job-b", "footer", f"{SYNC}\n# gpu_active\nk\n{FOOTER}\n"),
+        ("job-c", "missed", f"{SYNC}\n# gpu_active\nk\n# error=callback-missed m\nm\n"),
+        ("job-d", "dropped", f"{SYNC}\n# gpu_active\nk\n# dropped=2\n"),
+        ("job-e", "mixed", f"{SYNC}\n# gpu_active\nk\n{FOOTER}\n"),
+        ("job-f", "mixed", f"{SYNC}\n# gpu_active\nk\n"),
+    ]:
+        _sidecar(root / job, step=step)
+        (root / job / "kern.7.txt").write_text(text)
+    table, _ = _build_kernrec(tmp_path, root)
+    rows = table["rows"]
+    assert [s for s in sorted(rows) if kernel_table.usable(rows[s])] == [
+        "footer",
+        "killed",
+        "mixed",
+    ]
+    assert "m" in table["names"]
+    stats = table["stats"]
+    assert stats["rows_usable"] == 3
+    # One footerless job is enough to lose the row under the footer rule.
+    assert stats["rows_usable_footer_rule"] == 1
+    assert stats["callback_missed"] == 1
 
 
 @pytest.mark.parametrize("missing", [False, True], ids=["all-present", "one-missing"])

@@ -158,6 +158,28 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
     assert [v["name"] for v in pod["volumes"]] == ["devshm"]
 
 
+def test_amd_cpu_step_gets_only_the_repo_wide_retries():
+    step = Step(
+        label="AMD build",
+        group="Hardware - AMD Build",
+        key="amd-build-no-yaml-retry",
+        device="amd_cpu",
+        commands=["build"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"signal_reason": "stack_error", "limit": 1},
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
+            {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
@@ -167,6 +189,8 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, False, "1"),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, True, "1"),
     ],
 )
 def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
@@ -189,7 +213,12 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert group_step.group == "Hardware-AMD Tests"
     # Optional, so it waits in the "Run more jobs" input step.
     assert command_step.deferred
-    tag = {"mi300_4": "MI300", "mi325_1": "MI325", "mi355_dpx": "MI355 DPX"}[device]
+    tag = {
+        "mi300_4": "MI300",
+        "mi325_1": "MI325",
+        "mi355_dpx": "MI355 DPX",
+        "mi300_dpx": "MI300 DPX",
+    }[device]
     assert command_step.label == f":amd: ({tag}) AMD direct test"
     assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
@@ -208,7 +237,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
         assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
-        if device == "mi355_dpx":
+        if device.endswith("_dpx"):
             assert "resources" not in container
         else:
             assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
@@ -236,13 +265,16 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         amd.AMD_NATIVE_BASE_IMAGE if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
     )
 
-    assert command_step.retry == amd.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 7
-    assert command_step.retry["automatic"][0] == {
-        "signal_reason": "stack_error",
-        "limit": 1,
-    }
-    assert {"exit_status": 134, "limit": 1} in command_step.retry["automatic"]
+    # AMD's own retries plus the repo-wide infra ones (255, 94, 201-205).
+    assert command_step.retry == buildkite_step.ensure_infra_failure_retry(
+        amd.AMD_RETRY
+    )
+    automatic = command_step.retry["automatic"]
+    assert {"exit_status": 94, "limit": 1} in automatic
+    assert {"exit_status": 255, "limit": 1} in automatic
+    assert {"exit_status": [201, 202, 203, 204, 205], "limit": 1} in automatic
+    assert {"signal_reason": "stack_error", "limit": 1} in automatic
+    assert {"exit_status": 134, "limit": 1} in automatic
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
@@ -260,7 +292,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
-@pytest.mark.parametrize("device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1)])
+@pytest.mark.parametrize(
+    "device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1), ("mi300_dpx", 1)]
+)
 def test_amd_device_rejects_conflicting_gpu_count(device, gpu_count):
     step = Step(
         label="AMD GPU count mismatch",
@@ -333,6 +367,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX),
     ],
 )
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
@@ -419,6 +454,7 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX),
     ],
 )
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device, queue):
@@ -455,7 +491,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
     assert amd_command_step.plugins is not None
     pod_patch = amd_command_step.plugins[0]["kubernetes"]["podSpecPatch"]
     container = pod_patch["containers"][0]
-    if device == "mi355_dpx":
+    if device.endswith("_dpx"):
         assert "resources" not in container
     else:
         assert container["resources"] == {
@@ -464,7 +500,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
         }
 
 
-@pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx"])
+@pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx", "mi300_dpx"])
 def test_native_amd_no_gpu_preserves_allocation_contract(device):
     step = Step(
         label="Native AMD CPU test",
@@ -485,7 +521,7 @@ def test_native_amd_no_gpu_preserves_allocation_contract(device):
     container = command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
     container_env = {entry["name"]: entry for entry in container["env"]}
     assert container_env["VLLM_CI_EXPECTED_GPU_COUNT"]["value"] == "0"
-    if device == "mi355_dpx":
+    if device.endswith("_dpx"):
         assert "resources" not in container
     else:
         assert container["resources"] == {
@@ -639,6 +675,10 @@ def test_amd_mirror_enforces_its_own_timeout(
     # timeout up to the standard AMD limit.
     assert default_command_step.timeout_in_minutes == 40
     assert amd_command_step.timeout_in_minutes == expected_timeout
+    # A mirror gets the same retries as a direct AMD step.
+    assert amd_command_step.retry == buildkite_step.ensure_infra_failure_retry(
+        amd.AMD_RETRY
+    )
 
 
 def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
@@ -735,6 +775,7 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
             ":amd: (MI325) Docker Build Metadata",
         ),
         ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
+        ("LM Eval Small Models", "mi300_dpx", ":amd: (MI300 DPX) LM Eval Small Models"),
         (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
         (":docker: Refresh ROCm base", "amd_cpu", ":docker: Refresh ROCm base"),
     ],

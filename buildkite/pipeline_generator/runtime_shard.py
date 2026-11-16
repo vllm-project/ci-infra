@@ -1,4 +1,5 @@
-"""Runtime sharding for steps enrolled with `automatic_shard: true`.
+"""Runtime sharding for steps enrolled with `automatic_shard: true`, or by
+the pipeline config's `automatic_shard_default`.
 
 The pipeline generator plans an enrolled step's shards while it generates the
 pipeline, from the vLLM checkout it runs in:
@@ -75,11 +76,16 @@ PLAN_ENV = "RUNTIME_SHARD_PLAN"
 # The position of the step command a job is running, for the plugin to tell
 # apart commands whose pytest args differ only in env vars.
 COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
+# The file the plugin writes once it has applied the plan, which the guard
+# checks after the command.
+APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
 # pytest-shard would select a subset a second time on top of the plan.
-_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id")
+# -n: pytest-xdist workers don't get the plan, so each shard would run it all.
+_UNSHARDABLE_ARGS = ("--num-shards", "--shard-id", "-n", "--numprocesses")
+_ATTACHED_XDIST = re.compile(r"-n(\d+|auto|logical)")
 _SHELL_SYNTAX = ("&&", "||", ";", "|", ">", "<", "`", "$", "\n")
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # pytest options that take their value as the next argument, so that value is
@@ -193,12 +199,24 @@ def split_commands(commands: List[str]) -> Optional[Tuple[List[str], List[str]]]
     for command in tests:
         if _program(command) != "pytest" or any(s in command for s in _SHELL_SYNTAX):
             return None
-        if any(
-            a.split("=")[0] in _UNSHARDABLE_ARGS
-            for a in shlex.split(command, comments=True)
-        ):
+        if unshardable(command):
             return None
     return commands[:first], tests
+
+
+def unshardable(arguments: str) -> bool:
+    """Whether a pytest command, or a PYTEST_ADDOPTS value, can't run under a
+    shard plan: it sets its own shards or pytest-xdist, it replaces the
+    PYTEST_ADDOPTS that loads the shard plugin, or it doesn't parse."""
+    try:
+        words = shlex.split(arguments, comments=True)
+    except ValueError:
+        return True
+    return any(
+        a.split("=")[0] in _UNSHARDABLE_ARGS + ("PYTEST_ADDOPTS",)
+        or _ATTACHED_XDIST.fullmatch(a)
+        for a in words
+    )
 
 
 def _picks_tests(command: str) -> bool:
@@ -780,8 +798,25 @@ def owners(planned: Dict) -> List[int]:
 
 def guard(command: str, planned: Dict, shards: int) -> str:
     """A job's command, run only by the shards that have its tests. The others
-    say where they run instead of starting pytest to deselect everything."""
-    command = f"export {COMMAND_ENV}={planned['position']} && {command}"
+    say where they run instead of starting pytest to deselect everything.
+
+    The command fails if it passed without the plugin applying the plan: a
+    pytest that didn't load the plugin, or whose args didn't match the planned
+    command's, would have run all of the command's tests in every shard, or
+    none of them, and passed."""
+    position = planned["position"]
+    applied = f"{PLUGIN_DIR}/applied-{position}"
+    # Each step exits on failure itself: a job runs its lines under `set -e`,
+    # which ignores a failure inside a `&&` chain and goes on to the next line.
+    # The command sits on its own line, so a trailing comment ends there. The
+    # outer braces keep it one command in AMD's `&&`-joined list.
+    command = (
+        f"{{ export {COMMAND_ENV}={position} {APPLIED_ENV}={applied};"
+        f" rm -f {applied} || exit $$?; {{\n{command}\n}} || exit $$?;"
+        f' [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
+        " applying the shard plan (the plugin didn't load, or didn't match the"
+        ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
+    )
     runs = owners(planned)
     if len(runs) == shards:
         return command
@@ -816,6 +851,10 @@ def shard_job_setup() -> List[str]:
         f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
         # On the path of whichever python runs pytest (a venv's included).
         f'export PYTHONPATH="{PLUGIN_DIR}$${{PYTHONPATH:+:$$PYTHONPATH}}"',
+        # And in the site-packages of python3 and of pytest's python, which a
+        # command that sets its own PYTHONPATH (PYTHONPATH=/vllm-workspace
+        # pytest ...) doesn't replace. It exits 0: a failed copy only warns.
+        f"python3 {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
     ]
 
 

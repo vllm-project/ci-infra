@@ -26,12 +26,17 @@ The `environment` hook maps each agent's spawn number to a MIG slice UUID using
 the MIG profile created on the GPUs, `spawn` in `buildkite-agent.cfg`, and
 `SLICES_PER_GPU` in `environment`.
 
+A whole-GPU host (no MIG) sets `spawn=1` and `SLICES_PER_GPU=0`; the hook then
+skips the slice mapping and the image pre-pull (one agent has nothing to
+serialize, and other pipelines on its queue, such as perf-eval, have no CI
+image), and the job gets every GPU.
+
 ## Files
 
 | File | Install to | Purpose |
 |------|-----------|---------|
 | `buildkite-agent.cfg` | `/etc/buildkite-agent/buildkite-agent.cfg` | Agent config: queue tag, `spawn` (see table above), build/git-mirror paths. |
-| `environment` | `/etc/buildkite-agent/hooks/environment` | Exports secrets, logs into ECR, maps agent spawn # → MIG slice UUID, serializes the first docker pull, sets shallow git flags. |
+| `environment` | `/etc/buildkite-agent/hooks/environment` | Exports secrets, logs into ECR once per host every 10 h (`/tmp/buildkite-ecr-login.success`; delete it to force a fresh login), maps agent spawn # → MIG slice UUID, serializes the first docker pull, sets shallow git flags. |
 | `buildkite-gpu-cdi-env.sh` | `/usr/local/libexec/buildkite-gpu-cdi-env.sh` | Converts the MIG GPU selection into a CDI device (`nvidia.com/gpu=...`) and validates it exists. Sourced by `environment`. |
 | `pre-checkout` | `/etc/buildkite-agent/hooks/pre-checkout` | Injects a GitHub read-only PAT (from the agent secret store) as a git HTTP header for the vllm / perf-eval repos. |
 | `post-checkout` | `/etc/buildkite-agent/hooks/post-checkout` | Removes the injected git header after fetch. |
@@ -70,14 +75,32 @@ sudo systemctl enable --now buildkite-agent
 
 - **Exit-code convention in the hooks.** Exit 1 means a genuine
   misconfiguration (wrong `spawn` count, stale CDI spec, invalid git config
-  state) and fails the job immediately. Exit 255 means a provider /
-  infrastructure failure — AWS CLI or ECR unreachable, registry or secret-store
-  blip, `docker pull` failure, `nvidia-smi` hiccup. The agent preserves a
-  hook's exit code as the job's exit status, and the generated pipeline steps
-  automatically retry `exit_status: 255` (alongside `exit_status: -1`,
-  agent-lost), so one network blip can't kill a whole build. Keep every
-  provider call behind an explicit `exit 255` guard;
-  never let it fall through to the default exit 1.
+  state) and fails the job immediately. A provider / infrastructure call that
+  fails every in-hook retry exits with its own code, so Buildkite shows which
+  call failed:
+
+  | Code | Hook | Call |
+  |---|---|---|
+  | 201 | `pre-checkout` | GitHub token from the agent secret store |
+  | 202 | `environment` | ECR public login |
+  | 203 | `environment` | ECR pull-through-cache login |
+  | 204 | `environment` | GPU discovery (`nvidia-smi -L`) |
+  | 205 | `environment` | `docker pull` |
+
+  The agent preserves a hook's exit code as the job's exit status, and the
+  generated pipeline steps retry 201-205 once (alongside -1 agent-lost, 255
+  agent-terminated and 94 Git mirror lock), so one network blip can't kill a
+  whole build. Buildkite's agent reserves 0, 1, 94, 255, -1 and 128 + a signal
+  number (https://buildkite.com/docs/agent/lifecycle#exit-codes), and no
+  test exited in 201-205 over three days of CI failures; keep new codes there. Every
+  provider call retries in place first (5 attempts, sleeping 2/4/8/16 s, then
+  its code), written inline in each hook. Keep every provider call behind that
+  loop; never let it fall through to the default exit 1. Each retry that fires
+  also writes the build meta-data key `infra-retry:<job id>:<class>`
+  (`github-token`, `ecr-public-login`, `ecr-cache-login`, `gpu-discovery`,
+  `image-pull`; value
+  `<class>,<attempts>,<recovered|exhausted>`); the write is capped at 10 s and
+  never fails the job.
   Hooks are re-read at every job start, but merging a template change here does
   not update running hosts — re-install the hook on each affected agent with
   the Quick install commands above.
@@ -109,4 +132,8 @@ Run the hook regression checks with:
 
 ```bash
 bash scripts/buildkite-agent/tests/pre-checkout.sh
+bash scripts/buildkite-agent/tests/environment.sh   # bash 4+ and GNU grep (agent host or Linux)
+bash scripts/buildkite-agent/tests/environment-race.sh   # real flock (agent host or Linux)
 ```
+
+None needs AWS credentials or a GPU: they stub every call that leaves the host.

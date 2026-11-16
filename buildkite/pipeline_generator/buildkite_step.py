@@ -46,15 +46,30 @@ PRECOMMIT_GROUP = "GitHub pre-commit check"
 # The CUDA image build. Every PR test step waits on it.
 CUDA_IMAGE_BUILD_STEP_KEY = "image-build"
 AMD_GROUP = "Hardware-AMD Tests"
-PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
+PRECOMMIT_MAX_WAIT = 3600  # 1 hour
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+# A job that hits its timeout also reports -1, with signal_reason "cancel",
+# and this rule retries it once. It gets no rule of its own: Buildkite counts
+# each rule's limit separately, so a second -1 rule would give a job that lost
+# its agent and then timed out a third run. Count timeouts by signal_reason.
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
-# The self-hosted GPU agent hooks exit 255 on provider/infrastructure failures
-# (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
-# exit code as the job's exit status, so retry 255 like agent-lost.
+# 255 is the agent being terminated, and what the self-hosted GPU agent hooks
+# exited with on any provider failure before they had codes of their own.
 EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
+# The hooks' own codes for a provider call that failed every in-hook retry,
+# one per call so each failure is told apart in Buildkite: 201 GitHub token
+# (pre-checkout), 202 ECR public login, 203 ECR cache login, 204 GPU discovery,
+# 205 docker pull (environment). No test or agent exits in this range.
+HOOK_FAILURE_EXIT_STATUSES = [201, 202, 203, 204, 205]
+EXIT_STATUS_HOOK_RETRY = {"exit_status": HOOK_FAILURE_EXIT_STATUSES, "limit": 1}
+# The agent's own "checkout timed out waiting for a Git mirrors lock", raised
+# before the step's command runs, so a retry can't hide a test failure. Of 8
+# such failures in two days, 7 passed when retried by hand. Crash statuses
+# (134, 139) are deliberately not here: they were mostly one real,
+# recurring crash that a retry would only repeat.
+EXIT_STATUS_94_RETRY = {"exit_status": 94, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -105,10 +120,13 @@ def _otel_setup_command() -> str:
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
         # Native AMD pods run from /vllm-workspace, which has no .git; their
-        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The CPU test image has no
+        # .git either and the docker plugin passes no checkout path in, so the
+        # last resort is the image's own copy. The fallback keeps the
         # assignment successful under `sh -e`; a missing helper stays fail-open.
         "$$(git rev-parse --show-toplevel 2>/dev/null || "
-        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-'
+        f'{runtime_shard.CONTAINER_WORKSPACE}}}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
@@ -122,20 +140,30 @@ def _otel_setup_command() -> str:
 # carries no shell variables (nothing for `buildkite-agent pipeline upload` to
 # interpolate) and needs no third-party Python packages on the agent.
 _PRECOMMIT_POLL_PROGRAM = """\
-import json, subprocess, time, urllib.request
+import http.client, json, subprocess, time, urllib.error, urllib.request
 commit = "{commit}"
 repo = "{repo}"
 api_url = "https://api.github.com/repos/" + repo + "/commits/" + commit + "/check-runs"
 max_wait = {max_wait}
 wait_interval = {wait_interval}
-elapsed = 0
+# Time from a fixed start, so requests that time out count against max_wait too.
+start = time.monotonic()
 while True:
     request = urllib.request.Request(api_url)
     request.add_header("User-Agent", "vllm-ci-precommit-check")
     request.add_header("Accept", "application/vnd.github+json")
-    with urllib.request.urlopen(request) as response:
-        check_runs = json.load(response).get("check_runs", [])
-    precommit_run = next((run for run in check_runs if run["name"] == "pre-commit"), None)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            check_runs = json.load(response).get("check_runs", [])
+    except (OSError, http.client.HTTPException) as error:
+        # A GitHub 5xx, timeout or dropped connection (also mid-body, which
+        # raises IncompleteRead) is no answer, so poll again within max_wait;
+        # a 4xx is a real error and still fails.
+        if isinstance(error, urllib.error.HTTPError) and error.code < 500:
+            raise
+        print("GitHub API request failed (" + type(error).__name__ + ": " + str(error) + "); polling again.")
+        check_runs = None
+    precommit_run = next((run for run in check_runs or [] if run["name"] == "pre-commit"), None)
     if precommit_run and precommit_run["status"] == "completed":
         conclusion = precommit_run["conclusion"]
         if conclusion == "success":
@@ -150,16 +178,17 @@ while True:
             raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
         print("pre-commit check did not fail (conclusion: " + str(conclusion) + "); allowing CI to proceed.")
         raise SystemExit(0)
+    elapsed = int(time.monotonic() - start)
     if elapsed >= max_wait:
         # Do not block CI if the check never completes; the pre-commit check on
         # the PR still surfaces a genuine failure independently.
         subprocess.run(["buildkite-agent", "annotate", ":warning: Timed out waiting for the pre-commit check to complete; allowing CI to proceed. See the pre-commit check on the PR for its status.", "--style", "warning"], check=False)
         print("Timed out after " + str(max_wait) + "s waiting for pre-commit check on commit " + commit + "; allowing CI to proceed.")
         raise SystemExit(0)
-    status = precommit_run["status"] if precommit_run else "not found"
+    status = precommit_run["status"] if precommit_run else ("unknown" if check_runs is None else "not found")
     print("pre-commit check is not yet complete (status: " + status + "). Waiting " + str(wait_interval) + "s... (" + str(elapsed) + "/" + str(max_wait) + "s)")
-    time.sleep(wait_interval)
-    elapsed += wait_interval
+    # Never sleep past max_wait, so the gate ends within one request of it.
+    time.sleep(min(wait_interval, max_wait - elapsed))
 """
 
 
@@ -184,6 +213,9 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         depends_on=[],
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+        # A failed gate blocks every test after it, so an infra failure
+        # before its check runs must retry, not fail the build.
+        retry=ensure_infra_failure_retry(None),
     )
     return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
 
@@ -479,11 +511,27 @@ KERNREC_SKIP_STEPS = {
     "quantization": "int4 per-token KV cache test fails under CUPTI",
 }
 
+# Key prefixes of steps the ROCm recorder stays off, and why. Applies to the
+# AMD mirror and leaves the CUDA step recording.
+KERNREC_AMD_SKIP_STEP_PREFIXES = {
+    # Dispatch tracing swaps each completion signal for a pooled one, and
+    # rocprofiler-sdk 1.3.5 can release it while HIP still uses it:
+    # SIGSEGV in pool<signal_t>::release <- AsyncSignalHandler after the
+    # first mid-serving Triton JIT (vllm/ci #101909, #102057). 2 in ~58
+    # recorded runs, 0 in ~900 unrecorded. Back on once the image's SDK
+    # carries ROCm/rocm-systems#14385.
+    "lm-eval-turboquant-": "rocprofiler-sdk dispatch-signal SIGSEGV",
+}
+
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
     if setup_profile == "amd":
-        enabled = kernrec_amd_enabled() and not (step.num_nodes and step.num_nodes > 1)
+        enabled = (
+            kernrec_amd_enabled()
+            and not (step.num_nodes and step.num_nodes > 1)
+            and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
+        )
     else:
         enabled = kernrec_enabled()
     return (
@@ -848,6 +896,7 @@ def _collect_step(
         soft_fail=True,
         # the wait, then downloading every job's recordings, which takes a while
         timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
+        retry=ensure_infra_failure_retry(None),
     )
 
 
@@ -1009,7 +1058,9 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
+    """Add one-time retries for agent-lost or timed-out (-1), agent-terminated
+    (255), Git mirror lock (94) and the hooks' provider failures (201-205). A
+    status the step already retries keeps the step's own rule."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -1034,17 +1085,85 @@ def ensure_infra_failure_retry(
             existing_statuses.update(exit_status)
         else:
             existing_statuses.add(exit_status)
-    infra_conditions = [
-        dict(condition)
-        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
-        if condition["exit_status"] not in existing_statuses
+    defaults = [
+        EXIT_STATUS_NEGATIVE_ONE_RETRY,
+        EXIT_STATUS_255_RETRY,
+        EXIT_STATUS_94_RETRY,
+        EXIT_STATUS_HOOK_RETRY,
     ]
+    infra_conditions = []
+    for condition in defaults:
+        status = condition["exit_status"]
+        if isinstance(status, list):
+            remaining = [s for s in status if s not in existing_statuses]
+            if remaining:
+                infra_conditions.append({**condition, "exit_status": remaining})
+        elif status not in existing_statuses:
+            infra_conditions.append(dict(condition))
     retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
     return retry_policy
 
 
 # "off" is the rollback switch: enrolled steps run as their normal single job.
 RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
+
+# Under automatic_shard_default: step key -> why the planner gave it no shards
+# in this build, for the one annotation that lists them (one_job_annotation).
+ONE_JOB_REASONS: Dict[str, str] = {}
+
+
+def _shard_by_default() -> bool:
+    return bool(get_global_config().get("automatic_shard_default"))
+
+
+def _automatic_shard_on(step: Step, amd: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the step wants shards. For an AMD mirror, `step` is the
+    mirror's effective step and `amd` its block.
+
+    Under automatic_shard_default a step shards unless it says false, and a
+    mirror follows its step unless it says otherwise. Elsewhere, on a branch
+    that hasn't opted in, a step says true and so does its mirror.
+    """
+    if not _shard_by_default():
+        return bool(step.automatic_shard) and (amd is None or bool(amd.get("automatic_shard")))
+    on = True if step.automatic_shard is None else step.automatic_shard
+    if amd is None:
+        return on
+    value = amd.get("automatic_shard", on)
+    if not isinstance(value, bool):  # pydantic checks a step's; a mirror is a dict
+        raise ValueError(
+            f"{step.key}: automatic_shard must be true or false, not {value!r}"
+        )
+    return value
+
+
+def one_job_annotation(groups: "List[BuildkiteGroupStep]") -> Optional[str]:
+    """Under automatic_shard_default, one collapsed list of this build's test
+    jobs the planner gave no shards, each with its reason; None when there are
+    none. A job whose tests fit in one job is planned, so it is not listed."""
+    if not _shard_by_default():
+        return None
+    rows = []
+    for group in groups:
+        for step in group.steps:
+            reason = ONE_JOB_REASONS.get(step.key)
+            # A fixed split that opted out still runs several jobs.
+            if (
+                reason
+                and not step.deferred
+                and not step.parallelism
+                and not step.label.startswith(":docker:")
+            ):
+                # A planner error is free text: keep it inside its table cell.
+                reason = reason.replace("|", "\\|").replace("\n", " ")
+                rows.append(f"| {step.label} | {reason} |")
+    if not rows:
+        return None
+    jobs = f"{len(rows)} job{'' if len(rows) == 1 else 's'}"
+    return (
+        f"<details><summary>{jobs} ran as one job without a shard plan</summary>\n\n"
+        "| Job | Why |\n| --- | --- |\n" + "\n".join(rows) + "\n\n</details>"
+    )
 
 
 def _runtime_shard_mode(
@@ -1053,11 +1172,12 @@ def _runtime_shard_mode(
     list_file_diff: List[str],
     amd: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """How to run a step with `automatic_shard: true`: "on" (as shards),
-    "shadow" (one job, plus an annotation of the plan), or None (as usual).
-    For an AMD mirror, `step` is the mirror's effective step and `amd` its
-    block, whose own `automatic_shard` must be set too."""
-    if not step.automatic_shard or (amd and not amd.get("automatic_shard")):
+    """How to run a step that wants shards: "on" (as shards), "shadow" (one
+    job, plus an annotation of the plan), or None (as usual). For an AMD
+    mirror, `step` is the mirror's effective step and `amd` its block."""
+    by_default = _shard_by_default()
+    on = _automatic_shard_on(step, amd)
+    if not by_default and not on:
         return None
     if amd:
         should_run = _amd_mirror_should_run(
@@ -1067,23 +1187,43 @@ def _runtime_shard_mode(
         should_run = _step_should_run(step, list_file_diff)
     if not should_run:
         return None
+    if by_default and step.parallelism:
+        # A fixed split, the step's own or the one its mirror inherits, runs
+        # as it does without the default.
+        return None
+    if not on:
+        ONE_JOB_REASONS[step_key] = "opted out (`automatic_shard: false`)"
+        return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
         if mode != "off":
             print(
                 f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
             )
+        ONE_JOB_REASONS[step_key] = f"{RUNTIME_SHARD_ENV_VAR}={mode}"
         return None
-    if (
-        runtime_shard.split_commands(step.commands or []) is None
-        or step.no_plugin
-        or (is_amd_device(step.device) and step.dind)
-        or (step.num_nodes and step.num_nodes >= 2)
-    ):
-        print(
-            f"automatic_shard ignored on {step_key}: only single-node, non-dind "
-            "steps whose test commands are all plain pytest can be sharded"
-        )
+    # What pytest reads its extra options from: the step's, then its mirror's.
+    env = dict(step.env or {})
+    env.update((amd or {}).get("env") or {})
+    reason = None
+    if step.num_nodes and step.num_nodes >= 2:
+        reason = "multi-node"
+    elif step.no_plugin:
+        reason = "no_plugin"
+    elif is_amd_device(step.device) and step.dind:
+        reason = "dind"
+    elif runtime_shard.split_commands(step.commands or []) is None:
+        reason = "commands aren't all plain pytest"
+    elif runtime_shard.unshardable(str(env.get("PYTEST_ADDOPTS", ""))):
+        reason = "`PYTEST_ADDOPTS` sets its own shards or pytest-xdist"
+    if reason:
+        if by_default:
+            ONE_JOB_REASONS[step_key] = reason
+        else:
+            print(
+                f"automatic_shard ignored on {step_key}: only single-node, non-dind "
+                "steps whose test commands are all plain pytest can be sharded"
+            )
         return None
     return mode
 
@@ -1110,6 +1250,10 @@ def _shard_at_generation(
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
+        return None
+    if result is None and _shard_by_default():
+        # One row in the one-job list, not an annotation per step.
+        ONE_JOB_REASONS[step_key] = text
         return None
     if (
         result is None
@@ -1320,8 +1464,9 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.plugins = [_get_step_plugin(step)]
                 # L4-on-EKS steps get a retry policy that also covers pod-level
                 # failures (agent stops), unless the step opted out explicitly.
+                # The repo-wide infra retries (-1, 255, 94) still apply.
                 if step.device == DeviceType.L4 and not step.retry:
-                    buildkite_step.retry = K8S_RETRY
+                    buildkite_step.retry = ensure_infra_failure_retry(K8S_RETRY)
 
             shard_mode = (
                 _runtime_shard_mode(step, step_key, list_file_diff)
@@ -1636,6 +1781,8 @@ def _create_amd_step(
     )
     if display_label:
         options["label"] = display_label
+    # AMD's own retries plus the repo-wide infra ones every other step gets.
+    options["retry"] = ensure_infra_failure_retry(options.get("retry"))
     if extra_artifact_paths:
         options["artifact_paths"] = _merge_artifact_paths(
             options.get("artifact_paths"), extra_artifact_paths

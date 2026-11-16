@@ -17,18 +17,85 @@ command the plan covers, it:
 Each job collects the same tests, so the parts of a split file add up to the
 file. Elsewhere (a setup command's pytest, a pytest a test starts) it does
 nothing. Standard library and pytest only.
+
+Run as a script (`python3 runtime_shard_plugin.py`), it copies itself into the
+site-packages of python3 and of the python that runs `pytest`, where a command
+that sets its own PYTHONPATH still finds it.
 """
 
 import base64
 import json
 import os
+import shutil
+import subprocess
 import sys
 import zlib
 
-import pytest
-
 PLAN_ENV = "RUNTIME_SHARD_PLAN"
 COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
+# The file the job's guard checks after a planned command: written once the
+# plugin has applied the plan, so a pytest that ran without it fails the job.
+APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
+
+
+def _pytest_python():
+    """The python the `pytest` on PATH runs, from its shebang, or None."""
+    script = shutil.which("pytest")
+    if not script:
+        return None
+    try:
+        with open(script) as f:
+            lines = f.read(4096).splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not lines or not lines[0].startswith("#!"):
+        return None
+    words = lines[0][2:].split()
+    if words and os.path.basename(words[0]) == "env":
+        words = words[1:]
+    if words and words[0] in ("/bin/sh", "/usr/bin/sh"):
+        # pip's form for long paths: #!/bin/sh, then '''exec' <python> "$0" ...
+        exec_line = next(
+            (line for line in lines[1:3] if line.startswith("'''exec' ")), ""
+        )
+        words = exec_line.split()[1:2]
+    if not words or "python" not in os.path.basename(words[0]):
+        return None
+    return shutil.which(words[0]) or words[0]
+
+
+def _install():
+    """Best effort, each python on its own: a failed copy only matters to a
+    command that also sets its own PYTHONPATH, so it warns."""
+    # Not deduplicated by realpath: a venv's python links to the one it was
+    # made from, but has its own site-packages.
+    for python in dict.fromkeys(p for p in (sys.executable, _pytest_python()) if p):
+        try:
+            site = subprocess.run(
+                [
+                    python,
+                    "-c",
+                    "import sysconfig; print(sysconfig.get_paths()['purelib'])",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            ).stdout.strip()
+            shutil.copy(os.path.abspath(__file__), site)
+        except Exception as error:
+            print(
+                f"runtime-shard: couldn't install the plugin for {python} ({error});"
+                " a command that sets its own PYTHONPATH won't find it",
+                file=sys.stderr,
+            )
+
+
+if __name__ == "__main__":
+    _install()
+    sys.exit(0)
+
+import pytest  # noqa: E402  (the install above runs without pytest)
 
 
 def pytest_configure(config):
@@ -51,6 +118,10 @@ def pytest_configure(config):
     config.pluginmanager.register(
         ShardPlugin(command, shard, plan["shards"]), "runtime_shard_job"
     )
+    applied = os.environ.get(APPLIED_ENV)
+    if applied:
+        os.makedirs(os.path.dirname(applied), exist_ok=True)
+        open(applied, "w").close()
 
 
 def _without_plugins(args):

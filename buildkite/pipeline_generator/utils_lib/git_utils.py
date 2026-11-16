@@ -1,7 +1,10 @@
 import subprocess
 import os
+import time
 from typing import List, Optional
 import requests
+
+LABEL_FETCH_ATTEMPTS = 5
 
 
 def get_merge_base_commit() -> Optional[str]:
@@ -53,10 +56,55 @@ def get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[st
         raise RuntimeError("Failed to determine merge base commit for git diff.")
 
 
+def _record_infra_retry(attempts: int, outcome: str) -> None:
+    """Best-effort Buildkite meta-data mark that a bootstrap call was retried."""
+    job_id = os.getenv("BUILDKITE_JOB_ID")
+    if not job_id:
+        return
+    try:
+        subprocess.run(
+            [
+                "buildkite-agent",
+                "meta-data",
+                "set",
+                f"infra-retry:{job_id}:bootstrap-labels",
+                f"bootstrap-labels,{attempts},{outcome}",
+            ],
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _is_transient(error: requests.RequestException) -> bool:
+    # A timeout is a connection failure too: a read timeout is not a
+    # ConnectionError subclass, but it is no answer from GitHub, unlike a 4xx.
+    if isinstance(error, requests.HTTPError):
+        return error.response.status_code >= 500
+    return isinstance(error, (requests.ConnectionError, requests.Timeout))
+
+
 def get_pr_labels(pull_request: str, repo_name: str) -> List[str]:
     if not pull_request or pull_request == "false":
         return []
     request_url = f"https://api.github.com/repos/{repo_name}/pulls/{pull_request}"
-    response = requests.get(request_url)
-    response.raise_for_status()
+    for attempt in range(1, LABEL_FETCH_ATTEMPTS + 1):
+        try:
+            response = requests.get(request_url, timeout=30)
+            response.raise_for_status()
+            break
+        except requests.RequestException as error:
+            if not _is_transient(error) or attempt == LABEL_FETCH_ATTEMPTS:
+                if attempt > 1:
+                    _record_infra_retry(attempt, "exhausted")
+                raise
+            delay = 2**attempt
+            print(
+                f"get_pr_labels failed (attempt {attempt}/{LABEL_FETCH_ATTEMPTS}); "
+                f"retrying in {delay}s: {error}"
+            )
+            time.sleep(delay)
+    if attempt > 1:
+        _record_infra_retry(attempt, "recovered")
     return [label["name"] for label in response.json()["labels"]]
