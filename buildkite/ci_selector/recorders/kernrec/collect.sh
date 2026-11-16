@@ -30,11 +30,13 @@
 #
 # Fails the step (soft, so the build stays green) when a backend the generator
 # armed (KERNREC_EXPECTED_JOBS_CUDA / _ROCM) did not come out whole: fewer than
-# KERNREC_MIN_DELIVERED_SHARE of its jobs uploaded a recording, or its
+# CI_SELECTOR_MIN_DELIVERED_SHARE of its jobs uploaded a recording, or its
 # table/map pair did not validate. Such a backend is not published, so the
 # previous pair stays current. Without the counts (an older generator, a
-# manual fold) only what arrived is judged, as before. Either way the step
-# leaves kernrec_collect_summary.json as an artifact and an annotation.
+# manual fold) only what arrived is judged, as before; without the share, an
+# armed backend is judged on its pair but not on how many of its jobs
+# delivered. Either way the step leaves kernrec_collect_summary.json as an
+# artifact and an annotation.
 set -uo pipefail
 
 BRANCH="${VLLM_CI_BRANCH:-main}"
@@ -55,7 +57,7 @@ fi
 
 declare -A expected=([cuda]="${KERNREC_EXPECTED_JOBS_CUDA:-}" [rocm]="${KERNREC_EXPECTED_JOBS_ROCM:-}")
 declare -A delivered=([cuda]=0 [rocm]=0) rows=([cuda]=0 [rocm]=0) verdict=()
-MIN_SHARE="${KERNREC_MIN_DELIVERED_SHARE:-0.8}"
+MIN_SHARE="${CI_SELECTOR_MIN_DELIVERED_SHARE:-}"
 
 # The summary and annotation, on every way out; and the step fails if an armed
 # backend did not come out whole, whatever the publishing below did.
@@ -196,8 +198,12 @@ from kernel_table import usable
 print(sum(1 for row in json.load(gzip.open(sys.argv[1], "rt"))["rows"].values() if usable(row)))
 PY
   )
+  # Checked whatever the pair's validity, so a backend with too few
+  # deliveries reads short rather than as an invalid pair.
   want="${expected[$backend]:-}"
-  if [[ "$usable" == yes && -n "$want" && "$want" -gt 0 ]] \
+  if [[ -n "$want" && "$want" -gt 0 && -z "$MIN_SHARE" ]]; then
+    echo "$backend: no delivery share from the generator; delivered/expected is not checked" >&2
+  elif [[ -n "$want" && "$want" -gt 0 ]] \
       && ! "${KERNREC_PYTHON:-python3}" -c 'import sys; d, e, s = map(float, sys.argv[1:]); sys.exit(0 if d >= s * e else 1)' \
         "${delivered[$backend]}" "$want" "$MIN_SHARE"; then
     echo "$backend: only ${delivered[$backend]} of $want armed jobs delivered (< ${MIN_SHARE}); not publishing it" >&2
@@ -210,8 +216,13 @@ PY
     cp "out/$table" "out/$map" "publish/$backend/"
     publish+=("$backend")
   else
-    [[ -n "${verdict[$backend]:-}" ]] || verdict[$backend]="no valid table/map pair"
-    echo "$backend has no valid table/map pair; retaining artifacts without publishing" >&2
+    if [[ -n "${verdict[$backend]:-}" ]]; then
+      echo "$backend not published (${verdict[$backend]}); retaining artifacts" >&2
+    else
+      # vllm-dashboard's log parser matches this wording.
+      verdict[$backend]="no valid table/map pair"
+      echo "$backend has no valid table/map pair; retaining artifacts without publishing" >&2
+    fi
   fi
 done
 

@@ -495,19 +495,17 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     )
 
 
-def test_collect_waits_for_recording_steps_in_its_command_up_to_a_deadline(
+def test_collect_waits_for_recording_steps_in_its_command_up_to_a_cap(
     monkeypatch, fake_global_config
 ):
-    """A cancelled or timed-out dependency ends a step waiting_failed,
-    allow_dependency_failure or not, and it cannot be retried (full runs
-    95480, 95553, 95634). So the collect step depends only on the image build
-    and waits for the recording steps itself, up to COLLECT_AFTER_MINUTES."""
+    """The collect waits for the recording steps in its command, not through
+    depends_on, and fixes no deadline in its env (test_collect_step.py runs
+    the wait)."""
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     fake_global_config["nightly"] = "1"
-    monkeypatch.setattr(buildkite_step.time, "time", lambda: 1_000_000)
     (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
-    assert step.env["CI_SELECTOR_COLLECT_DEADLINE"] == str(
-        1_000_000 + buildkite_step.COLLECT_AFTER_MINUTES * 60
+    assert not any("DEADLINE" in name for name in step.env), (
+        "nothing time-dependent is fixed when the pipeline is generated"
     )
     assert step.commands[0] == buildkite_step.COLLECT_WAIT
     assert step.timeout_in_minutes > buildkite_step.COLLECT_AFTER_MINUTES
