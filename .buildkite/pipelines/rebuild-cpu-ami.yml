@@ -9,11 +9,13 @@
 # Automation Flow:
 #   1. Build AMI in us-east-1
 #   2. Update SSM parameter with new AMI ID
-#   3. Update Launch Templates and ASGs directly
-#   4. Cleanup old AMIs
+#   3. Update Launch Templates and ASGs directly (CI build queues only;
+#      release queues use an AMI promoted by hand)
+#   4. Cleanup old AMIs, keeping the one promoted to the release queues
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+  SSM_PARAM_RELEASE_US_EAST_1: "/buildkite/release-cpu-build-ami/us-east-1"
   SSM_PARAM_SECURITY_GROUP: "/buildkite/packer/security-group-id"
   SSM_PARAM_SUBNET: "/buildkite/packer/subnet-id"
   STACK_VERSION: "6.21.0"
@@ -275,8 +277,10 @@ steps:
         echo "New AMI ID: $$NEW_AMI"
 
         # bk-cpu-queue-premerge-us-east-1 runs Elastic CI Stack v7 on its own
-        # AMI; this v6 AMI must not reach its launch template.
-        for STACK_NAME in bk-cpu-queue-postmerge-us-east-1 bk-small-cpu-queue-release bk-cpu-queue-release; do
+        # AMI; this v6 AMI must not reach its launch template. Release stacks
+        # are not updated here either: they boot an AMI promoted by hand (see
+        # packer/cpu/README.md).
+        for STACK_NAME in bk-cpu-queue-postmerge-us-east-1; do
           echo ""
           echo "--- Processing stack: $$STACK_NAME"
 
@@ -393,8 +397,23 @@ steps:
         DELETE_COUNT=$$((TOTAL - KEEP))
         echo "Keeping $$KEEP AMIs for rollback, deleting $$DELETE_COUNT older AMIs"
 
+        # The release queues boot the AMI promoted to this parameter by hand;
+        # never delete it, however old it is.
+        RELEASE_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_RELEASE_US_EAST_1}" \
+          --query 'Parameter.Value' --output text --region us-east-1)
+        if [[ ! "$$RELEASE_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: cannot read the release AMI from $${SSM_PARAM_RELEASE_US_EAST_1} (got: $$RELEASE_AMI); not deleting anything"
+          exit 1
+        fi
+        echo "Keeping release AMI: $$RELEASE_AMI"
+
         for ((i=KEEP; i<TOTAL; i++)); do
           AMI_ID=$${AMI_ARRAY[$$i]}
+          if [[ "$$AMI_ID" == "$$RELEASE_AMI" ]]; then
+            echo "Skipping $$AMI_ID: promoted to the release queues"
+            continue
+          fi
           echo "Deleting AMI: $$AMI_ID"
 
           # Get snapshot ID before deregistering
