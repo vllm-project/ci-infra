@@ -383,26 +383,6 @@ def test_plan_step_reads_each_commands_timing_when_their_previews_match(
     assert result["estimates"] == [930]
 
 
-@pytest.mark.parametrize("main_seconds, shards", [(None, 2), (30, 1)])
-def test_plan_step_reads_the_steps_committed_timings_until_main_has_some(
-    tmp_path, monkeypatch, main_seconds, shards
-):
-    _project(tmp_path, {f"pkg/test_{n}.py": "def test_1(): pass\n" for n in "ab"})
-    command = "pytest -v pkg"
-    seed = _timings(command, {"pkg/test_a.py": 900, "pkg/test_b.py": 900})
-    (tmp_path / rs.SEED_TIMINGS_DIR).mkdir(parents=True)
-    (tmp_path / rs.SEED_TIMINGS_DIR / "k.json").write_text(json.dumps(seed))
-    main = main_seconds and _timings(
-        command, {"pkg/test_a.py": main_seconds, "pkg/test_b.py": main_seconds}
-    )
-    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: main or None)
-    result, text = rs.plan_step(
-        "k", [command], "/vllm-workspace/tests", str(tmp_path), AgentQueue.H200
-    )
-    assert result["shards"] == shards
-    assert (rs.SEED_TIMINGS_DIR in text) == (main_seconds is None)
-
-
 def test_plan_splits_a_file_over_the_budget_by_test_function():
     timings = _with_tests(
         _timings(TESTS[0], {"big.py": 2000}),

@@ -10,8 +10,6 @@ pipeline, from the vLLM checkout it runs in:
   timings   main's median time per file for the step (ci.vllm.ai), with
             per-test medians for a file over one shard's budget, and its
             median setup per job.
-            Until main has any, the step's committed timings in the same
-            format (SEED_TIMINGS_DIR), if it has some.
   plan      whole files into the fewest shards that keep each job, setup and
             tests, within the budget, largest file first (at most 10). A file
             over the budget is split by test function, using its per-test
@@ -48,9 +46,6 @@ from typing import Dict, List, Optional, Tuple
 from constants import AgentQueue
 
 TIMINGS_URL = "https://ci.vllm.ai/api/timings/latest"
-# Timings a step commits for itself, in the endpoint's format, for when main
-# has none yet: `<dir>/<step key>.json` in the vLLM checkout.
-SEED_TIMINGS_DIR = ".buildkite/shard_timings"
 # A first read can take over 15 s when the endpoint's cache is cold; the retry
 # waits longer.
 TIMINGS_TIMEOUTS_SECONDS = (15, 30)
@@ -363,24 +358,6 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     return None
 
 
-def seed_timings(root: str, step_key: str) -> Optional[Dict]:
-    """The step's committed timings (SEED_TIMINGS_DIR), or None if it has none.
-
-    Raises:
-        ValueError: The file is not in the endpoint's format.
-
-    """
-    relative = f"{SEED_TIMINGS_DIR}/{step_key}.json"
-    path = os.path.join(root, relative)
-    if not os.path.isfile(path):
-        return None
-    with open(path) as f:
-        timings = json.load(f)
-    if not isinstance(timings, dict) or not isinstance(timings.get("files"), list):
-        raise ValueError(f"{relative} has no list of files")
-    return {**timings, "seedFile": relative}
-
-
 def _least_loaded(sizes: List[float], count: int) -> Tuple[List[int], List[float]]:
     """Largest first, each to the least-loaded of `count` shards: the shard
     of each size, and each shard's load."""
@@ -653,8 +630,7 @@ def plan(
         # Fewer shards would be slower or mix commands past the budget.
         "fewest": _mixed_within(units, shard_of, loads, max_shard_seconds),
         "timingSource": {
-            k: (timings or {}).get(k)
-            for k in ("buildNumber", "buildNumbers", "seedFile")
+            k: (timings or {}).get(k) for k in ("buildNumber", "buildNumbers")
         },
     }
 
@@ -679,19 +655,13 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     allocation = (
         "one job" if result["shards"] == 1 else f"{result['shards']} shards"
     )
-    if source.get("seedFile"):
-        origin = f"`{source['seedFile']}`, since the endpoint had none for the step."
-    else:
-        origin = (
-            f"median of {builds} main build"
-            f"{'s' if builds != 1 else ''}, the newest {source.get('buildNumber')}."
-        )
     text = (
         f"**Runtime sharding for `{step_key}`:** {allocation} for "
         f"{result['files']} file{'s' if result['files'] != 1 else ''}; "
         "estimated test time per shard (min): "
         f"{estimates}, after {setup / 60:.1f} min of setup in each. Timings: "
-        + origin
+        f"median of {builds} main build"
+        f"{'s' if builds != 1 else ''}, the newest {source.get('buildNumber')}."
     )
     if result["unknownFiles"]:
         text += (
@@ -795,8 +765,7 @@ def plan_step(
         ]
         if not any(entry["files"] for entry in discovered):
             raise ValueError("no test files found")
-        timings = fetch_timings(step_key, queue) or seed_timings(root, step_key)
-        result = plan(discovered, timings)
+        result = plan(discovered, fetch_timings(step_key, queue))
         if result is None:
             reason = "main has no timing for the step's files"
         else:
