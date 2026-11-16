@@ -480,6 +480,19 @@ def test_file_outside_the_map_leaves_the_map_alone(tmp_path):
     assert r.reasons["selected-by-a-file-outside-the-map"] == 1
 
 
+@pytest.mark.parametrize(
+    "map_extra, backend",
+    [({}, "cuda"), ({"version": 2, "backend": "rocm"}, "rocm")],
+    ids=["cuda-by-default", "rocm"],
+)
+def test_the_pair_description_names_its_backend(tmp_path, map_extra, backend):
+    """A commit alone does not say which backend's recording was read."""
+    rows = {"step": {"kernels": ["k"], "backend": backend}}
+    ev = _evidence(tmp_path, rows, [_obj("csrc/a.cu", ["k"])], **map_extra)
+    assert ev.unavailable == "" and ev.symbol_map.backend == backend, "fixture"
+    assert ev.describe().startswith(f"{backend} table abc ")
+
+
 def test_unmatched_pair_and_stale_file_only_select(tmp_path):
     ev = _evidence(
         tmp_path,

@@ -437,3 +437,125 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+# ---- which recordings a run uses -------------------------------------------
+
+
+class _Response:
+    """What `urllib.request.urlopen` returns, enough for `_latest`."""
+
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self):
+        return self.body.encode()
+
+
+class _Publishing:
+    """`latest.json` for each recorder, as S3 serves it while a publish lands:
+    the first read gets build 1, every later read build 2."""
+
+    def __init__(self):
+        self.reads = {"fnrec": 0, "kernrec": 0}
+
+    @staticmethod
+    def pointer(recorder, build):
+        return {"build": build, "commit": f"{recorder}-{build}".ljust(40, "0")}
+
+    def urlopen(self, url, timeout=None):
+        recorder = url.split("/ci/")[1].split("/")[0]
+        self.reads[recorder] += 1
+        return _Response(
+            json.dumps(self.pointer(recorder, min(self.reads[recorder], 2)))
+        )
+
+
+def _fake_selector_run(monkeypatch, publishing):
+    """Stub every process `run_ci_select` starts. A publish lands while
+    `ci-select` runs: every pointer read after that sees build 2."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        if "ci-select" in cmd:
+            # The publish: count a read even for a gate that has not read
+            # yet, so its first read after the run already sees build 2.
+            for recorder in publishing.reads:
+                publishing.reads[recorder] = max(publishing.reads[recorder], 1)
+            stdout = json.dumps({"omit": False, "reason": "", "keys": ["y"]})
+        else:
+            stdout = "c" * 40 + "\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(selector_gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(selector_gate.shutil, "which", lambda _: "/bin/uv")
+    monkeypatch.setattr(selector_gate.urllib.request, "urlopen", publishing.urlopen)
+    return calls
+
+
+def test_a_publish_mid_run_cannot_change_which_recordings_are_recorded(monkeypatch):
+    """Each pointer is read once, before anything downloads. Both downloads
+    are pinned to it and the record is that same read."""
+    publishing = _Publishing()
+    calls = _fake_selector_run(monkeypatch, publishing)
+
+    result = selector_gate.run_ci_select("/vllm", "a" * 40, "b" * 40, "vllm_ci")
+
+    first = {r: _Publishing.pointer(r, 1) for r in ("fnrec", "kernrec")}
+    assert result["records"] == first
+    assert publishing.reads == {"fnrec": 1, "kernrec": 1}
+    (kernel_fetch,) = [cmd for cmd, _ in calls if "ci-fetch-kernel-record" in cmd]
+    assert (
+        kernel_fetch[kernel_fetch.index("--commit") + 1] == first["kernrec"]["commit"]
+    )
+    ((select, select_kw),) = [(c, kw) for c, kw in calls if "ci-select" in c]
+    assert "--table" not in select, "ci-select downloads the table itself"
+    assert select_kw["env"][selector_gate.FNREC_COMMIT_ENV] == first["fnrec"]["commit"]
+    assert selector_gate.FNREC_COMMIT_ENV not in os.environ, "set on ci-select only"
+
+
+@pytest.mark.parametrize(
+    "pointer, error",
+    [(OSError("S3 unreachable"), OSError), ({"build": 3}, ValueError)],
+    ids=["unreachable", "no-commit"],
+)
+def test_an_unusable_pointer_stops_the_run_before_anything_downloads(
+    monkeypatch, pointer, error
+):
+    """Without a commit there is no saying which recording would be used, so
+    the run raises and the build keeps today's rules."""
+    calls = _fake_selector_run(monkeypatch, _Publishing())
+
+    def urlopen(url, timeout=None):
+        if isinstance(pointer, Exception):
+            raise pointer
+        return _Response(json.dumps(pointer))
+
+    monkeypatch.setattr(selector_gate.urllib.request, "urlopen", urlopen)
+    with pytest.raises(error):
+        selector_gate.run_ci_select("/vllm", "a" * 40, "b" * 40, "vllm_ci")
+    assert not [
+        c for c, _ in calls if "ci-fetch-kernel-record" in c or "ci-select" in c
+    ]
+
+
+def test_the_pin_uses_the_name_ci_select_reads():
+    """The gate and `ci-select` ship separately and share only this name, so a
+    typo on either side silently brings the race back."""
+    selector = os.path.join(
+        os.path.dirname(selector_gate.__file__),
+        "..",
+        "ci_selector",
+        "ci_selector",
+        "scripts",
+        "fetch_functions.py",
+    )
+    with open(selector) as f:
+        assert f'"{selector_gate.FNREC_COMMIT_ENV}"' in f.read()

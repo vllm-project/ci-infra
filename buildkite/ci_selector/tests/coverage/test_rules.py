@@ -152,10 +152,17 @@ OWNER = RowKeys({"vllm_ci"}, {"vllm_ci": 1.0})
 class FakeStep:
     """The slice of `Step` that `RowKeys.candidates()` and `restrict_to` read."""
 
-    def __init__(self, manual_only: bool = False, identity: tuple | None = None):
+    def __init__(
+        self,
+        manual_only: bool = False,
+        identity: tuple | None = None,
+        step_id: str | None = None,
+    ):
         self.manual_only = manual_only
         # Rename-tolerant, so a test can pose the same step under two labels.
         self.identity = identity
+        # Only base steps need one: `restrict_to` files a match under it.
+        self.step_id = step_id
 
 
 # CI outcomes are not part of a Selection; they reach the rule as keywords.
@@ -312,25 +319,138 @@ class TestTheAdditiveHalf:
         )
         assert reading.added == []
 
-    def test_a_renamed_step_keeps_its_add(self):
-        """The defect the two tests around this one structurally cannot see.
+    @pytest.mark.parametrize(
+        "spellings",
+        [{"vllm_ci:Old Label": "old-key"}, None],
+        ids=["resolved-spellings", "raw-ids"],
+    )
+    def test_a_renamed_step_keeps_its_add_under_its_base_id(self, spellings):
+        """The step exists at base under a different label, hence a different
+        `step_id`, and only `identity` says it is the same step.
 
-        Both compare hand-written literal ids, so a rename is not expressible
-        in them. Here the step exists at base under a different label, hence a
-        different `step_id`, and only `identity` says it is the same step. Id
-        alone deleted live candidates on most PRs of a measured sample.
+        It must come back under the base id, since the emitter names steps
+        from the base and an id it cannot find omits the whole emission. Its
+        row is still filed under the old spelling, so `key_for` reads that.
         """
-        renamed = FakeStep(identity=("vllm_ci", "a.yaml", ("pytest x",), None))
+        identity = ("vllm_ci", "a.yaml", ("pytest x",), None)
+        recorded = FakeStep(identity=identity)
+        at_base = FakeStep(identity=identity, step_id="vllm_ci:New Label")
         owner = RowKeys(
             {"vllm_ci"},
             {"vllm_ci": 1.0},
-            steps={"vllm_ci:Old Label": renamed},
+            spellings=spellings,
+            steps={"vllm_ci:Old Label": recorded},
+        )
+        owner.restrict_to(frozenset({"vllm_ci:New Label"}), {identity: (at_base,)})
+        assert owner.candidates() == ["vllm_ci:New Label"]
+        assert owner.steps["vllm_ci:New Label"] is at_base
+        expected_row = "old-key" if spellings else "Old Label"
+        assert owner.key_for("vllm_ci:New Label") == expected_row
+        assert owner.restricted_away == []
+
+    def test_an_identity_two_base_steps_share_is_dropped_and_counted(self, table):
+        """Two base steps with one identity are twins: nothing says which one
+        the row describes, so neither is guessed at. Counted as ambiguous, not
+        absent: the step is there, twice."""
+        identity = ("vllm_ci", "a.yaml", ("pytest x",), None)
+        twins = (
+            FakeStep(identity=identity, step_id="vllm_ci:twin-1"),
+            FakeStep(identity=identity, step_id="vllm_ci:twin-2"),
+        )
+        owner = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={"vllm_ci:Old Label": FakeStep(identity=identity)},
         )
         owner.restrict_to(
-            frozenset({"vllm_ci:New Label"}), frozenset({renamed.identity})
+            frozenset({"vllm_ci:twin-1", "vllm_ci:twin-2"}), {identity: twins}
         )
-        assert "vllm_ci:Old Label" in owner.candidates()
+        assert owner.candidates() == []
+        assert owner.restricted_ambiguous == ["vllm_ci:Old Label"]
         assert owner.restricted_away == []
+
+        query = query_for("vllm/other.py", "<module>")
+        reading = read_pr(
+            table,
+            result_for("vllm_ci:runs-plain", paths=("vllm/other.py",)),
+            query,
+            {},
+            KNOWN,
+            owner,
+        )
+        assert reading.reasons["candidate-ambiguous-at-base"] == 1
+        assert reading.reasons["candidate-absent-at-base"] == 0
+
+    def test_a_match_by_id_wins_over_a_match_by_identity(self):
+        """The base id a renamed step would move to is already held by a step
+        kept under its own id. The id match is the stronger evidence, so it
+        keeps its place and its row; the identity match is dropped and counted
+        rather than overwriting either."""
+        identity = ("vllm_ci", "a.yaml", ("pytest x",), None)
+        same_id = FakeStep(identity=("vllm_ci", "b.yaml", ("pytest y",), None))
+        renamed = FakeStep(identity=identity)
+        at_base = FakeStep(identity=identity, step_id="vllm_ci:taken")
+        owner = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            spellings={"vllm_ci:taken": "taken-row", "vllm_ci:Old Label": "old-row"},
+            steps={"vllm_ci:taken": same_id, "vllm_ci:Old Label": renamed},
+        )
+        owner.restrict_to(frozenset({"vllm_ci:taken"}), {identity: (at_base,)})
+        assert owner.steps == {"vllm_ci:taken": same_id}
+        assert owner.key_for("vllm_ci:taken") == "taken-row"
+        assert owner.restricted_ambiguous == ["vllm_ci:Old Label"]
+        assert owner.restricted_away == []
+
+    def test_two_recorded_steps_claiming_one_base_step_are_both_dropped(self):
+        """Two table steps that both match one base step by identity: either
+        row could be the right one, so neither is used."""
+        identity = ("vllm_ci", "a.yaml", ("pytest x",), None)
+        at_base = FakeStep(identity=identity, step_id="vllm_ci:New")
+        owner = RowKeys(
+            {"vllm_ci"},
+            {"vllm_ci": 1.0},
+            steps={
+                "vllm_ci:Old A": FakeStep(identity=identity),
+                "vllm_ci:Old B": FakeStep(identity=identity),
+            },
+        )
+        owner.restrict_to(frozenset({"vllm_ci:New"}), {identity: (at_base,)})
+        assert owner.candidates() == []
+        assert owner.restricted_ambiguous == ["vllm_ci:Old A", "vllm_ci:Old B"]
+        assert owner.restricted_away == []
+
+    def test_a_renamed_step_the_map_selected_is_judged_by_its_old_row(self, table):
+        """`key_for` serves the drop side too. A renamed step the map selected
+        had no row under its new id, so it was always kept. Re-keyed, it reads
+        the row recorded under its old id, which can drop it like any step
+        matched by id."""
+        identity = ("vllm_ci", "a.yaml", ("pytest x",), None)
+        at_base = FakeStep(identity=identity, step_id="vllm_ci:renamed")
+        query = query_for("vllm/mod.py", "plain")
+
+        def reading(re_keyed: bool):
+            owner = RowKeys(
+                {"vllm_ci"},
+                {"vllm_ci": 1.0},
+                spellings={"vllm_ci:elsewhere": "elsewhere"},
+                steps={"vllm_ci:elsewhere": FakeStep(identity=identity)},
+            )
+            if re_keyed:
+                owner.restrict_to(
+                    frozenset({"vllm_ci:renamed"}), {identity: (at_base,)}
+                )
+            return read_pr(
+                table,
+                result_for("vllm_ci:renamed"),
+                query,
+                unknown_names(query, UNION, {}),
+                KNOWN,
+                owner,
+            )
+
+        assert reading(re_keyed=False).dropped == [], "no row: kept"
+        assert reading(re_keyed=True).dropped == ["vllm_ci:renamed"]
 
     def test_a_step_that_really_left_is_still_dropped_and_counted(self):
         """Widening the survival test must not disarm it. A step present in
@@ -340,9 +460,10 @@ class TestTheAdditiveHalf:
         owner = RowKeys(
             {"vllm_ci"}, {"vllm_ci": 1.0}, steps={"vllm_ci:elsewhere": gone}
         )
+        other = ("vllm_ci", "other.yaml", ("pytest z",), None)
         owner.restrict_to(
             frozenset({"vllm_ci:runs-plain"}),
-            frozenset({("vllm_ci", "other.yaml", ("pytest z",), None)}),
+            {other: (FakeStep(identity=other, step_id="vllm_ci:runs-plain"),)},
         )
         assert owner.candidates() == []
         assert owner.restricted_away == ["vllm_ci:elsewhere"]

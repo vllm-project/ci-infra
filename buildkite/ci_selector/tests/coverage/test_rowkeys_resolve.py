@@ -85,3 +85,48 @@ def test_resolve_reads_the_table_commit_not_the_checkout(pipeline_repo):
     at_later = RowKeys.resolve(table, repo.root, later)
     assert "vllm_ci:later" not in at_recorded.steps
     assert "vllm_ci:later" in at_later.steps
+
+
+def test_a_step_renamed_after_the_table_is_filed_under_its_new_id(
+    tmp_path, monkeypatch
+):
+    """Against real yaml: the table's commit spells a step `old-key`, the
+    base renames it. `_steps_at` maps each identity to the base steps holding
+    it (twins included), and `restrict_to` files the step under its base id
+    while its row stays `old-key`."""
+    from ci_selector.decide import _steps_at
+
+    monkeypatch.setattr(worktree, "WORKTREE_CACHE", tmp_path / "cache")
+    worktree.clear_state_cache()
+    (tmp_path / "repo").mkdir()
+    repo = Repo(tmp_path / "repo")
+    twins = (
+        "  - label: Twin A\n    commands: [pytest tests/t.py]\n"
+        "  - label: Twin B\n    commands: [pytest tests/t.py]\n"
+    )
+    renamed = "  - label: Renamed\n    key: {key}\n    commands: [pytest tests/r.py]\n"
+    repo.write(".buildkite/ci_config.yaml", CI_CONFIG)
+    repo.write(
+        ".buildkite/test_areas/area.yaml",
+        "steps:\n" + renamed.format(key="old-key") + twins,
+    )
+    recorded = repo.commit("recorded")
+    repo.write(
+        ".buildkite/test_areas/area.yaml",
+        "steps:\n" + renamed.format(key="new-key") + twins,
+    )
+    base = repo.commit("rename")
+
+    keys = RowKeys.resolve(_table("old-key"), repo.root, recorded)
+    ids, holders = _steps_at(repo.root, base)
+    twin_identity = keys.steps["vllm_ci:Twin A"].identity
+    assert [s.step_id for s in holders[twin_identity]] == [
+        "vllm_ci:Twin A",
+        "vllm_ci:Twin B",
+    ]
+    assert "vllm_ci:old-key" not in ids
+
+    keys.restrict_to(ids, holders)
+    assert keys.steps["vllm_ci:new-key"].buildkite_key == "new-key"
+    assert keys.key_for("vllm_ci:new-key") == "old-key"
+    assert "vllm_ci:new-key" in keys.candidates()
