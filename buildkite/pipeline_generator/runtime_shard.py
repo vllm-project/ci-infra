@@ -680,7 +680,7 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
         "one job" if result["shards"] == 1 else f"{result['shards']} shards"
     )
     if source.get("seedFile"):
-        origin = f"`{source['seedFile']}`, since main has none yet."
+        origin = f"`{source['seedFile']}`, since the endpoint had none for the step."
     else:
         origin = (
             f"median of {builds} main build"

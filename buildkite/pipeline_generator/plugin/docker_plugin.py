@@ -128,7 +128,7 @@ amd_zen5_plugin_template = {
 
 
 # Arm's CPU agents: one per instance, no GPUs and no /fsx. The HF cache is the
-# one run-cpu-test-arm.sh mounted for the agent user.
+# buildkite-agent user's, kept across jobs so shards don't download models again.
 arm_cpu_plugin_template = {
     "image": "",
     "always-pull": True,
