@@ -181,7 +181,7 @@ vLLM keeps changing underneath the tool, so the checks are part of it rather tha
 
 **Detection floors.** Every check asks whether anything unknown is present, and that question reports green when the detector has stopped detecting, because zero findings and zero capability look identical from outside. So checks assert their own output volume. The comparison against the generator fails if it verified fewer than a thousand cases, so a parser that stops finding things fails loudly rather than reporting a clean repository.
 
-**Preflight, on every selection.** Nine derived tables are checked for emptiness, an unknown yaml field on a step force-selects that step, an unreadable command force-selects, and a device outside the known hardware taxonomy switches off the rules that depend on it.
+**Preflight, on every selection.** Nine derived tables are checked for emptiness, an unknown yaml field on a step force-selects that step, an unreadable command force-selects, and a device outside the known hardware taxonomy keeps its own steps through every family narrowing, since they could belong to any family, and switches off the rule that runs nothing when a family has no steps.
 
 **Crosscheck.** Given real pull request numbers, it rebuilds the tool's state at each base, runs both inputs and a replica of today's generator, and compares all three against the jobs Buildkite ran and which of those failed.
 

@@ -11,7 +11,14 @@ from ci_selector.codemap.claim import matches_source_dependency
 from ci_selector.codemap.classify import select
 from ci_selector.gitdiff import DiffFile, changed_paths
 from ci_selector.validate.generator_replica import today_select
-from helpers import HW, always_run_ids, declaring_steps, drift_message, steps_by_id
+from helpers import (
+    HW,
+    always_run_ids,
+    declaring_steps,
+    drift_message,
+    steps_by_id,
+    with_unmapped_device,
+)
 
 
 def _selected(sel, pipeline="vllm_ci"):
@@ -1528,6 +1535,20 @@ def test_unmapped_device_disables_no_hardware_rule(state):
     st2 = dataclasses.replace(state, preflight=pf)
     sel = select(st2, ["vllm/platforms/tpu.py"])
     assert sel.claims[0].rule != "no-hardware"
+
+
+def test_unmapped_device_keeps_build_map_scoping_for_mapped_steps(state, monkeypatch):
+    """An unclaimed csrc/rocm/ file fails open to its family, scoped by the
+    build map. A device the taxonomy cannot place keeps its own steps in, and
+    takes no other step's scoping with it."""
+    path = "csrc/rocm/attention.cu"
+    assert state.build_map.families.get(path) == frozenset({"amd"})
+    stray_state, stray, on = with_unmapped_device(state, monkeypatch, "xpu", path)
+    sel = select(stray_state, [path])
+    assert sel.claims[0].rule == "fail-open"
+    picked = set(sel.selected)
+    assert stray in picked
+    assert picked - {stray} == on, sorted(picked ^ (on | {stray}))[:5]
 
 
 # ---- examples-step recall (demoted members must keep their example steps) --

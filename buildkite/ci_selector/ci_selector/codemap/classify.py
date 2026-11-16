@@ -1790,7 +1790,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
         # source cannot break a suite whose build never compiles it. Steps that
         # invoke the file directly are kept either way.
         fams = state.build_map.families.get(path)
-        if fams and not state.preflight.unmapped_devices and build_map.mode() == "on":
+        if fams and build_map.mode() == "on":
             direct = {
                 sid
                 for p in state.pipelines
@@ -1829,7 +1829,7 @@ def _classify_inner(state: RepoState, path: str, ctx: DiffContext | None) -> Cla
     # here also lets the coverage stage work on the rest of the diff, where
     # the old run_all vetoed every drop PR-wide.
     fams = state.build_map.families.get(path)
-    if fams and not state.preflight.unmapped_devices and build_map.mode() == "on":
+    if fams and build_map.mode() == "on":
         direct = {
             sid
             for p in state.pipelines
