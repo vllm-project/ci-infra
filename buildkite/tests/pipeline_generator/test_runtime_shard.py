@@ -1,3 +1,4 @@
+import gzip
 import io
 import json
 import os
@@ -1383,6 +1384,220 @@ def test_fetch_timings_success_resets_the_failure_count(monkeypatch):
     assert rs._timings_failures == 0
 
 
+# Read at import, before the autouse fixture stands in an empty snapshot.
+_SNAPSHOT_AT_IMPORT = rs._snapshot
+
+
+def test_fetch_timings_starts_with_the_snapshot_unread():
+    assert _SNAPSHOT_AT_IMPORT is None
+
+
+def _snapshot_server(monkeypatch, snapshot, live=None):
+    """Serve `snapshot` from the bucket and `live` from the endpoint: a dict is
+    its answer, an int an HTTP error, bytes a raw body, anything else a read
+    timeout. Records every URL read."""
+    urls = []
+
+    def urlopen(url, timeout):
+        urls.append(url)
+        if url.startswith(rs.SNAPSHOT_BUCKET_URL):
+            assert timeout == 15
+        if url == f"{rs.SNAPSHOT_BUCKET_URL}/{rs.SNAPSHOT_POINTER}":
+            if snapshot is None:
+                raise urllib.error.HTTPError(url, 403, "forbidden", {}, None)
+            pointer = {"published_at": "2026-11-13T12:05:00Z",
+                       "path": "ci/timings/2026-11-13T120500Z/timings.json.gz"}
+            return _Response(json.dumps(pointer).encode())
+        if url == f"{rs.SNAPSHOT_BUCKET_URL}/ci/timings/2026-11-13T120500Z/timings.json.gz":
+            return _Response(gzip.compress(json.dumps(snapshot).encode()))
+        if url.startswith(rs.TIMINGS_URL):
+            if isinstance(live, dict):
+                return _Response(json.dumps(live).encode())
+            if isinstance(live, int):
+                raise urllib.error.HTTPError(url, live, "error", {}, None)
+            if isinstance(live, bytes):
+                return _Response(live)
+        raise TimeoutError("read timed out")
+
+    monkeypatch.setattr(rs, "_snapshot", None)
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    return urls
+
+
+def _snapshot_of(entries, tests_over_ms=960000):
+    return {"published_at": "2026-11-13T12:05:00Z", "tests_over_ms": tests_over_ms,
+            "entries": entries}
+
+
+SNAPSHOT_TIMINGS = {"buildNumber": 9, "buildNumbers": [9, 8], "setupMs": 1000,
+                    "files": [{"command": "pytest a", "file": "a.py", "observedMs": 5}]}
+SNAPSHOT_ENTRY = {"fetched_at": "2026-11-13T12:05:00Z", "response": SNAPSHOT_TIMINGS}
+FROM_SNAPSHOT = dict(SNAPSHOT_TIMINGS, snapshotFetchedAt="2026-11-13T12:05:00Z")
+
+
+def test_a_healthy_endpoint_never_reads_the_snapshot(monkeypatch):
+    urls = _snapshot_server(monkeypatch, _snapshot_of(
+        {f"k|{AgentQueue.GPU_1.value}": SNAPSHOT_ENTRY}), live={"files": []})
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert len(urls) == 1 and urls[0].startswith(rs.TIMINGS_URL)
+    assert rs._snapshot is None
+
+
+@pytest.mark.parametrize("live, why", [
+    (None, "read timed out"),
+    (503, "HTTP Error 503: error"),
+    (b"<html>gateway</html>", "Expecting value: line 1 column 1 (char 0)"),
+])
+def test_a_failed_endpoint_falls_back_to_the_snapshot(monkeypatch, capsys, live, why):
+    entries = {f"k|{AgentQueue.GPU_1.value}": SNAPSHOT_ENTRY,
+               f"amd-k|{AgentQueue.AMD_MI325_1.value}": SNAPSHOT_ENTRY}
+    urls = _snapshot_server(monkeypatch, _snapshot_of(entries), live=live)
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == FROM_SNAPSHOT
+    assert rs.fetch_timings("amd-k", AgentQueue.AMD_MI325_1) == FROM_SNAPSHOT
+    # Each step tries the endpoint twice; the snapshot downloads once, on the
+    # first failure.
+    assert [u.split("?")[0] for u in urls] == [
+        rs.TIMINGS_URL, rs.TIMINGS_URL,
+        "https://vllm-ci-timings.s3.amazonaws.com/ci/timings/latest.json",
+        "https://vllm-ci-timings.s3.amazonaws.com"
+        "/ci/timings/2026-11-13T120500Z/timings.json.gz",
+        rs.TIMINGS_URL, rs.TIMINGS_URL,
+    ]
+    assert rs._timings_failures == 2
+    assert capsys.readouterr().err.splitlines()[:3] == [
+        f"runtime-shard: no timings for k ({why})",
+        "runtime-shard: timings snapshot of 2026-11-13T12:05:00Z, 2 steps",
+        "runtime-shard: k: timings from the snapshot fetched 2026-11-13T12:05:00Z",
+    ]
+
+
+def test_a_404_is_the_answer_and_never_reads_the_snapshot(monkeypatch, capsys):
+    urls = _snapshot_server(monkeypatch, _snapshot_of(
+        {f"k|{AgentQueue.GPU_1.value}": SNAPSHOT_ENTRY}), live=404)
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert len(urls) == 1 and rs._timings_failures == 0
+    assert capsys.readouterr().err == (
+        "runtime-shard: no timings for k (HTTP Error 404: error)\n")
+
+
+def test_with_the_endpoint_skipped_steps_read_the_snapshot(monkeypatch, capsys):
+    urls = _snapshot_server(monkeypatch, _snapshot_of(
+        {f"k|{AgentQueue.GPU_1.value}": SNAPSHOT_ENTRY}))
+    monkeypatch.setattr(rs, "_timings_failures", rs.MAX_TIMINGS_FAILURES)
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == FROM_SNAPSHOT
+    assert not any(u.startswith(rs.TIMINGS_URL) for u in urls)
+    assert capsys.readouterr().err.splitlines()[0] == (
+        "runtime-shard: no timings for k (endpoint skipped after 3 failed steps)")
+
+
+@pytest.mark.parametrize("snapshot, why", [
+    (None, "HTTP Error 403: forbidden"),
+    (_snapshot_of({}, tests_over_ms=1), "made with testsOverMs 1, not 960000"),
+    ({"tests_over_ms": 960000, "entries": []}, "no entries"),
+])
+def test_a_failed_endpoint_without_a_snapshot_has_no_timings(
+    monkeypatch, capsys, snapshot, why
+):
+    urls = _snapshot_server(monkeypatch, snapshot)
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert rs.fetch_timings("j", AgentQueue.GPU_1) is None
+    # The snapshot is tried once for the whole run.
+    assert sum(u.startswith(rs.SNAPSHOT_BUCKET_URL) for u in urls) == (1 if snapshot is None else 2)
+    assert (f"runtime-shard: no timings snapshot ({why})"
+            in capsys.readouterr().err.splitlines())
+
+
+@pytest.mark.parametrize("entry", [
+    # A stored 404, or anything that isn't a stored answer.
+    {"fetched_at": "x", "response": None},
+    {"fetched_at": "x"},
+    {"fetched_at": "x", "response": "garbled"},
+    {"fetched_at": "x", "response": {"files": "garbled"}},
+    {"fetched_at": "x", "response": {}},
+    "garbled",
+])
+def test_a_failed_endpoint_with_no_usable_snapshot_entry_has_no_timings(monkeypatch, entry):
+    _snapshot_server(monkeypatch, _snapshot_of({f"k|{AgentQueue.GPU_1.value}": entry}))
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+
+
+def test_a_failed_endpoint_and_a_step_missing_from_the_snapshot(monkeypatch):
+    # The key is per queue: k on gpu_1 is not k on gpu_4.
+    _snapshot_server(monkeypatch, _snapshot_of({f"k|{AgentQueue.GPU_1.value}": SNAPSHOT_ENTRY}))
+
+    assert rs.fetch_timings("k", AgentQueue.GPU_4) is None
+
+
+def _planned_from(fetched_at):
+    timings = {"setupMs": 172_000, "buildNumber": 9, "buildNumbers": [9, 8],
+               "snapshotFetchedAt": fetched_at,
+               "files": [{"command": "pytest -v -s a", "file": "a/test_1.py",
+                          "observedMs": 60_000}]}
+    discovered = [{"command": "pytest -v -s a", "span_label": "pytest -v -s a",
+                   "files": ["a/test_1.py"], "selected": ["a/test_1.py"]}]
+    return rs.plan(discovered, timings)
+
+
+@pytest.mark.parametrize("fetched_at, warning", [
+    ("2026-11-14T12:05:00Z", ""),
+    # Exactly the limit is not stale; ten seconds past it is.
+    ("2026-11-13T13:00:00Z", ""),
+    ("2026-11-13T12:59:50Z", " :warning: That is 24 h old: the hourly refresh "
+                             "on the alerting worker is failing."),
+    ("2026-11-13T12:05:00Z", " :warning: That is 25 h old: the hourly refresh "
+                             "on the alerting worker is failing."),
+])
+def test_summary_names_the_snapshot_and_warns_when_it_is_stale(
+    monkeypatch, fetched_at, warning
+):
+    class Clock(rs.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return rs.datetime(2026, 11, 14, 13, 0, tzinfo=tz)
+
+    monkeypatch.setattr(rs, "datetime", Clock)
+
+    assert rs.summary("k", _planned_from(fetched_at)).endswith(
+        "fit in one job (1.0 min of tests, 2.9 min of setup). "
+        "The endpoint failed, so these timings are from the snapshot "
+        f"fetched {fetched_at}.{warning}")
+
+
+@pytest.mark.parametrize("fetched_at, stale", [
+    ("2026-11-13T13:00:00Z", False), ("2026-11-13T12:59:50Z", True),
+    (None, False), ("garbled", False),
+])
+def test_snapshot_stale_past_a_day(monkeypatch, fetched_at, stale):
+    class Clock(rs.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return rs.datetime(2026, 11, 14, 13, 0, tzinfo=tz)
+
+    monkeypatch.setattr(rs, "datetime", Clock)
+
+    assert rs.snapshot_stale(_planned_from(fetched_at)) is stale
+    assert rs.snapshot_stale(None) is False
+
+
+def test_summary_without_the_snapshot_does_not_mention_it():
+    assert "snapshot" not in rs.summary("k", _planned_from(None))
+
+
+def test_summary_of_a_sharded_plan_names_the_snapshot():
+    result = _planned_from("garbled")
+    result.update(shards=2, estimates=[60.0, 50.0])
+
+    assert ("median of 2 main builds, the newest 9. The endpoint failed, so "
+            "these timings are from the snapshot fetched garbled.") in rs.summary("k", result)
+
+
 def test_generator_shards_a_kubernetes_step_with_its_pod_spec(
     fake_global_config, checkout
 ):
@@ -1973,6 +2188,27 @@ def test_without_the_default_no_timings_still_annotates(
     monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
     _render(_step(automatic_shard=True))
     assert [style for _, _, style in checkout] == ["warning"]
+
+
+@pytest.mark.parametrize("fetched_at, styles", [
+    ("2026-11-13T12:05:00Z", ["warning"]), ("2026-11-14T12:05:00Z", []),
+])
+def test_a_plan_from_a_stale_snapshot_is_annotated(
+    fake_global_config, checkout, monkeypatch, fetched_at, styles
+):
+    class Clock(rs.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return rs.datetime(2026, 11, 14, 13, 0, tzinfo=tz)
+
+    fake_global_config["run_all"] = True
+    timings = _timings(TESTS[0], {f: 10 for f in ME_FILES})
+    timings["files"] += _timings(TESTS[1], {ENTRYPOINT: 10})["files"]
+    timings["snapshotFetchedAt"] = fetched_at
+    monkeypatch.setattr(rs, "datetime", Clock)
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: timings)
+    _render(_step(automatic_shard=True))
+    assert [style for _, _, style in checkout] == styles
 
 
 def test_a_job_that_fits_in_one_job_is_not_listed(by_default, monkeypatch):
