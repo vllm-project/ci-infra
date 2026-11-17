@@ -4,12 +4,21 @@
 stable-agent path, verifying a pinned SHA256 checksum and the Secrets CLI.
 It preserves the stack's service, hooks, boot configuration, and beta channel.
 The daily CPU AMI build also runs this installer so it retains the upgrade.
+If the base image's stable agent is already at least as new as the pin, the
+installer keeps it instead: newer stack bases ship a newer agent and their
+watchdog terminates downgraded agents, so canary builds on those bases are
+protected without any pipeline flag.
 
 For a release-only image bake, run the existing `rebuild-cpu-build-ami` pipeline
 with `AGENT_ONLY=1`, `AGENT_SOURCE_AMI_AMD64`, and `AGENT_SOURCE_AMI_ARM64` set
 to the current worker AMIs. This preserves the x86 Docker cache and produces
 two manifest artifacts. This mode does not update SSM, launch templates or
 ASGs, or delete old images. Ordinary image publication is limited to `main`.
+
+The `AGENT_ONLY` bake passes `REQUIRE_EXACT_AGENT_VERSION=true`, so release
+workers always carry exactly agent 3.138.2: the installer keeps the base
+agent only when it matches the pin, and installs the pinned agent over newer
+or older bases.
 
 Before rollout, boot each image and verify agent registration, checkout and a
 job using step-level Buildkite Secrets. Update release ASGs to new launch

@@ -130,3 +130,40 @@ terraform destroy \
 ### Cleanup deletes wrong AMIs
 - The filter uses `vllm-buildkite-stack-linux-cpu-build-*` pattern
 - Only AMIs matching this pattern and older than 3 days are considered
+- Canary AMIs (`vllm-buildkite-stack-canary-linux-cpu-build-*`) never match and are deleted by hand only: an age-based rule could deregister an AMI still referenced by SSM or a launch template. Automatic canary cleanup waits for a reference-aware retention workflow.
+
+## Canary Build for a New Elastic CI Stack Version
+
+Validates a newer stack base AMI before a queue upgrade, without changing what
+the queues run. Uses only this public repository; the SSM parameter and launch
+template switch happen later in the private Terraform repository.
+
+Verified by direct source checks for stack v7.2.0: the stack installs its
+agent at `/usr/bin/buildkite-agent-stable` (the path `install-agent.sh`'s
+version guard inspects), and its hosted `aws-stack.yml` maps `linuxamd64` to
+`ami-0e204e732d353c3b8`.
+
+1. Trigger the "Rebuild CPU Build AMI" pipeline manually with environment
+   variable `CANARY_STACK_VERSION=<new-stack-version>` (for example `7.2.0`). Any
+   branch works; the build step is allowed to run off `main` in canary mode.
+2. Verify the build log shows the canary banner, the base AMI comes from the
+   `<new-stack-version>` CloudFormation template, Packer gets
+   `ami_name_prefix=vllm-buildkite-stack-canary-linux-cpu-build`, and
+   `install-agent.sh` reports keeping the base image's newer agent.
+3. Verify the update-SSM, update-launch-templates and cleanup steps are all
+   skipped, even if the build is on `main`.
+4. Verify the resulting AMI is named `vllm-buildkite-stack-canary-linux-cpu-build-*`
+   and the cleanup step's filter does not match it.
+5. Optionally boot a bare instance from the canary AMI to inspect it. Note the
+   Buildkite agent service only starts from the Elastic CI Stack's user-data,
+   so a bare boot will NOT register an agent; limit this to package/config
+   checks (Docker, BuildKit cache, `/etc/vllm-ami-info`) and confirm the base
+   image's agent binary is present and was not replaced by an older pinned one.
+6. Actual agent registration, checkout and a real job can only be validated
+   during the private Terraform stack update, when the stack's user-data boots
+   instances from the canary AMI. In the private repository, point a separate
+   SSM parameter at the canary AMI, rebuild the queue's stack at
+   `<new-stack-version>` and switch the launch template in the same update.
+   Preserve the previous launch template version for rollback and let running
+   jobs finish naturally.
+7. Deregister the canary AMI manually once the rollout is confirmed.
