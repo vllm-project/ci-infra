@@ -71,6 +71,11 @@ def test_intel_k8s_step_uses_workspace_image_and_per_gpu_resources(
         "name": "hf-token-secret",
         "key": "token",
     }
+    assert env["BUILDKITE_ANALYTICS_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "buildkite-analytics-token-secret",
+        "key": "token",
+        "optional": True,
+    }
     assert container["resources"]["requests"] == {
         "cpu": cpu_request,
         "memory": memory_request,

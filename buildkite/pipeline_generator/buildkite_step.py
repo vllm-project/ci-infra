@@ -254,9 +254,7 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 SetupProfile = Literal["nvidia", "amd", "none"]
 
 
-def _get_setup_profile(step: Step, *, amd: bool = False) -> SetupProfile:
-    if amd:
-        return "amd"
+def _get_setup_profile(step: Step) -> SetupProfile:
     if step.device == DeviceType.INTEL_GPU_K8S:
         return "none"
     return "nvidia"
@@ -1366,7 +1364,7 @@ def convert_group_step_to_buildkite_step(
                     _prepare_commands(
                         step,
                         variables_to_inject,
-                        setup_profile=_get_setup_profile(step, amd=True),
+                        setup_profile="amd",
                     )
                 )
                 amd_parallelism = step.parallelism
@@ -1489,9 +1487,7 @@ def convert_group_step_to_buildkite_step(
             elif is_amd_device(step.device):
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
                     _recording_timeout(
-                        step,
-                        get_amd_timeout_in_minutes(step.timeout_in_minutes),
-                        _get_setup_profile(step, amd=True),
+                        step, get_amd_timeout_in_minutes(step.timeout_in_minutes), "amd"
                     )
                 )
             elif step.timeout_in_minutes:
@@ -1573,9 +1569,7 @@ def convert_group_step_to_buildkite_step(
                     amd_commands = _prepare_commands(
                         amd_command_step,
                         variables_to_inject,
-                        setup_profile=_get_setup_profile(
-                            amd_command_step, amd=True
-                        ),
+                        setup_profile="amd",
                     )
                 else:
                     amd_command_step = step.model_copy(
@@ -1588,9 +1582,7 @@ def convert_group_step_to_buildkite_step(
                     amd_commands = _prepare_commands(
                         amd_command_step,
                         variables_to_inject,
-                        setup_profile=_get_setup_profile(
-                            amd_command_step, amd=True
-                        ),
+                        setup_profile="amd",
                     )
 
                 extra_env = dict(step.env or {})
@@ -1862,9 +1854,7 @@ def _create_amd_step(
         concurrency_group=concurrency_group,
         timeout_in_minutes=_get_timeout_in_minutes(
             _recording_timeout(
-                recorded_step,
-                get_amd_timeout_in_minutes(timeout_in_minutes),
-                _get_setup_profile(recorded_step, amd=True),
+                recorded_step, get_amd_timeout_in_minutes(timeout_in_minutes), "amd"
             )
             if recorded_step is not None
             else get_amd_timeout_in_minutes(timeout_in_minutes)
