@@ -48,8 +48,8 @@ def step_should_run(step: Step, paths: list[str], run_all: bool) -> bool:
 
     if step.always_runs:
         return True
-    # The generator's own AMD test, not `family_of_device`: this rule also
-    # covers the amd_cpu build lane, which our family table files under cpu.
+    # Every AMD step, the amd_cpu image builds too, so the generator's own
+    # check rather than the GPU-only one below.
     if is_amd_device(step.device) and any(p in paths for p in AMD_ROCM_STACK_FILES):
         return True
     if step.optional:

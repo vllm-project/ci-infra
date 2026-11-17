@@ -313,9 +313,9 @@ def test_our_replica_behaves_like_the_generators_own_rule():
     Upstream needs a few things we have to supply: its global config, a step
     type, and its AMD-GPU test, which we substitute with our own
     `family_of_device`. So this checks the branch structure and its order, not
-    those substituted parts, which have their own guards. Its broader
-    `is_amd_device` is not substituted: the replica imports that one, since our
-    family table files the amd_cpu build lane under cpu. The branches we
+    those substituted parts, which have their own guards. Its `is_amd_device`
+    is not substituted: the replica imports it, since it also covers the
+    amd_cpu image builds, which `family_of_device` counts as CPU. The branches we
     deliberately do not model (AITER nightly, NOAUTO, only_step_keys, nightly)
     are pinned off here rather than left to chance.
 
