@@ -87,3 +87,17 @@ def test_get_pr_labels_retries_read_timeout(buildkite_job):
 
     assert get.call_args.kwargs["timeout"] == 30
     assert buildkite_job.call_args.args[0][-1] == "bootstrap-labels,2,recovered"
+
+
+def test_get_list_file_diff_diffs_against_the_base_ref(buildkite_job):
+    with patch.object(git_utils.subprocess, "check_output") as check_output:
+        check_output.return_value = "a.py\n\n.buildkite/x.yaml\n"
+        assert git_utils.get_list_file_diff("pr", " abc ") == [
+            "a.py",
+            ".buildkite/x.yaml",
+        ]
+        assert check_output.call_args[0][0][-1] == "abc"
+        git_utils.get_list_file_diff("main", None)
+        assert check_output.call_args[0][0][-1] == "HEAD~1"
+    with pytest.raises(RuntimeError, match="merge base"):
+        git_utils.get_list_file_diff("pr", None)
