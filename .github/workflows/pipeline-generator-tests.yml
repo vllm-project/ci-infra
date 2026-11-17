@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/pipeline-generator-tests.yml"
+      - ".buildkite/pipelines/rebuild-cpu-ami.yml"
+      - "packer/agent/install-agent.sh"
       - "buildkite/pipeline_generator/**"
       - "buildkite/tests/**"
       - "buildkite/bootstrap-amd.sh"
