@@ -44,12 +44,14 @@ FAMILY_DEVICE_PREFIXES: dict[str, tuple[str, ...]] = {
     "cuda": ("h100", "h200", "a100", "b200", "gh200", "dgx"),
     "amd": ("mi",),
     "tpu": ("tpu",),
+    # A prefix, so intel_gpu_k8s (the same Arc B70 cards, scheduled through
+    # Kubernetes) and any later intel_gpu_* queue land in the family.
+    "xpu": ("intel_gpu",),
 }
 FAMILY_DEVICE_EXACT: dict[str, frozenset[str]] = {
     # Exact, not a prefix: "l4" would also match filename tokens.
     "cuda": frozenset({"l4"}),
     "cpu": frozenset({"intel_cpu", "arm_cpu", "amd_cpu"}),
-    "xpu": frozenset({"intel_gpu"}),
     "hpu": frozenset({"intel_hpu"}),
     "npu": frozenset({"ascend_npu"}),
 }

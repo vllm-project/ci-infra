@@ -58,13 +58,11 @@ def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim
     # brings back the very over-selection the exclusive-family rule exists for.
     family = hardware.exclusive_family_of_path(path)
     if family and path not in state.exclusive_disabled:
-        steps &= state.family_steps(family)
+        steps &= state.family_steps(family) | _unplaced_steps(state)
     # A mapped file only reaches the images whose builds compile it. Keep this
-    # before `added` is computed. An unmapped path keeps the full set, and so
-    # does everything if the device list has gaps, since family_steps() is then
-    # incomplete and cannot be trusted to subtract.
+    # before `added` is computed. An unmapped path keeps the full set.
     fams = state.build_map.families.get(path)
-    if fams and not state.preflight.unmapped_devices and build_map.mode() == "on":
+    if fams and build_map.mode() == "on":
         steps &= _build_map_allowed(state, fams)
     added = steps - claim.step_ids
     if added:
@@ -81,15 +79,33 @@ def _apply_image_input_union(state: RepoState, path: str, claim: Claim) -> Claim
     return claim
 
 
+def _unplaced_steps(state: RepoState) -> set[str]:
+    """The auto steps on a device the taxonomy cannot place.
+
+    Their family is unknown, so no family's narrowing may drop them.
+    """
+    unmapped = state.preflight.unmapped_devices
+    if not unmapped:
+        return set()
+    _per, _union, nonfamily = state.family_partition()
+    return {
+        s.step_id
+        for p in state.pipelines
+        for s in p.steps
+        if s.step_id in nonfamily and s.device in unmapped
+    }
+
+
 def _build_map_allowed(state: RepoState, fams: frozenset[str]) -> set[str]:
     """The steps these families may keep.
 
     "cuda" is the remainder that carries no device token, which is where the
     main image's GPU suites live; reading it as a token family would drop them
-    all. "other" is every token family except amd and cpu.
+    all. "other" is every token family except amd and cpu. Steps on a device
+    the taxonomy cannot place are always allowed.
     """
     per, union, nonfamily = state.family_partition()
-    allowed: set[str] = set()
+    allowed = _unplaced_steps(state)
     if build_map.CUDA in fams:
         allowed |= nonfamily
     if build_map.AMD in fams:
