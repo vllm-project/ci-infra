@@ -46,6 +46,9 @@ CI_INFRA_REPO = "https://github.com/vllm-project/ci-infra.git"
 RECORD_URL = (
     "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/{recorder}/latest.json"
 )
+# Tells ci-select which function table to download instead of following
+# latest.json itself (ci_selector/scripts/fetch_functions.py reads it).
+FNREC_COMMIT_ENV = "CI_SELECTOR_FUNCTION_RECORD_COMMIT"
 # The whole selector run, fetches included. Past it the build keeps today's
 # rules rather than wait.
 SELECTOR_TIMEOUT_SECONDS = 20 * 60
@@ -269,21 +272,26 @@ def _uv(workdir: str) -> str:
     return os.path.join(install_dir, "uv")
 
 
-def _latest(recorder: str) -> Optional[Dict[str, Any]]:
-    try:
-        with urllib.request.urlopen(
-            RECORD_URL.format(recorder=recorder), timeout=30
-        ) as r:
-            return json.loads(r.read())
-    except Exception as error:  # noqa: BLE001 - informational only
-        return {"error": str(error)}
+def _latest(recorder: str) -> Dict[str, Any]:
+    """The recorder's `latest.json`: which recording to use, and the metadata
+    the decision records for it. Raises if it cannot be read."""
+    with urllib.request.urlopen(RECORD_URL.format(recorder=recorder), timeout=30) as r:
+        pointer = json.loads(r.read())
+    if not isinstance(pointer, dict) or not pointer.get("commit"):
+        raise ValueError(f"{recorder} latest.json names no commit: {pointer!r}")
+    return pointer
 
 
 def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, Any]:
     """Run `ci-select --emit-keys` on base...head with the latest published
-    recordings; returns the emission, the recordings' metadata and the log."""
+    recordings; returns the emission, the recordings' metadata and the log.
+
+    Each recording's pointer is read once, first, and every download is pinned
+    to it, so the record names what was loaded even if a publish lands mid-run.
+    """
     deadline = time.time() + SELECTOR_TIMEOUT_SECONDS
     left = lambda: max(30.0, deadline - time.time())  # noqa: E731
+    records = {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")}
     workdir = tempfile.mkdtemp(prefix="ci-selector-")
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     checkout = os.path.join(workdir, "ci-infra")
@@ -307,10 +315,20 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
     data = os.path.join(workdir, "data")
     explain_path = os.path.join(workdir, "explain.json")
-    # No function table is passed: ci-select downloads the latest one itself
+    _run(
+        run
+        + [
+            "ci-fetch-kernel-record",
+            "--commit",
+            records["kernrec"]["commit"],
+            "--out",
+            data,
+        ],
+        timeout=left(),
+    )
+    # No function table is passed: ci-select downloads the pinned one itself
     # and parses it once (about 1 GB of JSON), instead of a separate fetch
     # step that parsed it a first time only to check it.
-    _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
     out = subprocess.run(
         run
         + [
@@ -329,6 +347,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             "--explain",
             explain_path,
         ],
+        env={**os.environ, FNREC_COMMIT_ENV: records["fnrec"]["commit"]},
         capture_output=True,
         text=True,
         timeout=left(),
@@ -345,7 +364,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     return {
         "emission": json.loads(out.stdout),
         "explain": explain,
-        "records": {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")},
+        "records": records,
         "log": out.stderr[-4000:],
         "ci_infra_commit": ci_infra_commit,
     }

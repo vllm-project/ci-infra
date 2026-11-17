@@ -23,6 +23,9 @@ from ..coverage.table import Table, load
 
 DEFAULT_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec"
 URL_ENV = "CI_SELECTOR_FUNCTION_RECORD_URL"
+# The commit to download instead of following `latest.json`. The bootstrap gate
+# sets it to the pointer it read and records, so both name the same table.
+COMMIT_ENV = "CI_SELECTOR_FUNCTION_RECORD_COMMIT"
 TIMEOUT = 60
 
 
@@ -67,9 +70,14 @@ def fetch(
 
 
 def fetch_latest() -> Table:
-    """The latest published table, downloaded into coverage-data/ and parsed
-    once, for `ci-select` run without a table."""
-    return fetch(os.environ.get(URL_ENV, DEFAULT_URL), out=COVERAGE_DIR)[0]
+    """The latest published table, or the one CI_SELECTOR_FUNCTION_RECORD_COMMIT
+    pins, downloaded into coverage-data/ and parsed once, for `ci-select` run
+    without a table."""
+    return fetch(
+        os.environ.get(URL_ENV, DEFAULT_URL),
+        commit=os.environ.get(COMMIT_ENV) or None,
+        out=COVERAGE_DIR,
+    )[0]
 
 
 def main(argv: list[str] | None = None) -> int:

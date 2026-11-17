@@ -211,7 +211,10 @@ class KernelEvidence:
 
     def describe(self) -> str:
         t, m = self.table, self.symbol_map
-        pair = f"table {t.commit[:10] or '?'} (build {t.build}), map {m.commit[:10] or '?'}"
+        pair = (
+            f"{m.backend} table {t.commit[:10] or '?'} (build {t.build}), "
+            f"map {m.commit[:10] or '?'}"
+        )
         return pair + ("" if self.matched else ", DIFFERENT COMMITS")
 
 
