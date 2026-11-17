@@ -1694,6 +1694,15 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
     )
 
 
+def amd_mirror_step(step: Step) -> Optional[Step]:
+    """The step's AMD mirror as the generator decides whether to run it, or
+    None without one. For run decisions and key classification only: it
+    keeps the step's depends_on, not the mirror's, and its dind ignores
+    rocm_build_layout()."""
+    amd = (step.mirror or {}).get("amd")
+    return _get_amd_mirror_effective_step(step, amd) if amd else None
+
+
 def _source_file_dependencies_match(
     source_file_dependencies: Optional[List[str]], list_file_diff: List[str]
 ) -> bool:

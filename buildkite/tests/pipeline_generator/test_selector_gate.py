@@ -250,6 +250,7 @@ def test_optional_steps_stay_optional(pr_config, monkeypatch):
             optional=True,
             commands=["n"],
             depends_on=["image-build"],
+            mirror={"amd": {"device": "mi300_1"}},
         ),
     ]
     monkeypatch.setattr(
@@ -438,6 +439,83 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+def _mirrored(key, optional, mirror_optional=None):
+    amd = {"device": "mi300_1", "depends_on": ["image-build-amd"]}
+    if mirror_optional is not None:
+        amd["optional"] = mirror_optional
+    return Step(
+        label=key,
+        key=key,
+        optional=optional,
+        commands=["x"],
+        depends_on=["image-build"],
+        mirror={"amd": amd},
+    )
+
+
+@pytest.mark.parametrize(
+    "optional, mirror_optional, mirror_is_optional",
+    [
+        (True, False, False),
+        (False, True, True),
+        (True, None, True),  # the mirror inherits its step's
+        (False, None, False),
+    ],
+)
+def test_a_mirror_is_optional_as_the_generator_runs_it(
+    optional, mirror_optional, mirror_is_optional
+):
+    steps = [_mirrored("x", optional, mirror_optional)]
+    effective = buildkite_step._get_amd_mirror_effective_step(
+        steps[0], steps[0].mirror["amd"]
+    )
+    assert effective.optional is mirror_is_optional
+    assert ("amd-x" in selector_gate.optional_keys(steps)) is mirror_is_optional
+    assert ("x" in selector_gate.optional_keys(steps)) is optional
+    assert selector_gate.known_keys(steps) == {"x", "amd-x"}
+    assert selector_gate.amd_keys(steps) == {"amd-x"}
+
+
+def test_a_mirror_that_runs_on_prs_is_left_to_amds_rules_not_dropped_as_optional(
+    pr_config, monkeypatch
+):
+    """A mirror that runs on PRs under a nightly-only step is AMD's to run,
+    not an optional step to drop."""
+    steps = _steps() + [_mirrored("eplb", optional=True, mirror_optional=False)]
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission(["test-b", "eplb", "amd-eplb"])
+    )
+    record = pg._selector_decision(steps)
+    assert record["applied"] is True
+    assert record["selector_optional_dropped"] == ["eplb"]
+    assert record["selector_amd_left_to_todays_rules"] == ["amd-eplb"]
+    assert record["selector_keys"] == ["test-b"]
+    assert pr_config.get("selector_step_keys") == frozenset({"test-b"})
+
+
+def test_a_mirror_key_for_a_step_with_no_mirror_is_unknown(pr_config, monkeypatch):
+    """Only real mirrors are known: a key for a missing one means the
+    selector and the generator disagree, so the build keeps today's rules."""
+    steps = _steps() + [
+        Step(label="Nightly", key="test-nightly", optional=True, commands=["n"]),
+    ]
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission(["test-b", "amd-test-nightly"])
+    )
+    record = pg._selector_decision(steps)
+    assert record["applied"] is False
+    assert "amd-test-nightly" in record["fallback"]
+    assert pr_config.get("selector_step_keys") is None
+
+
+def test_a_step_without_a_key_is_not_classified():
+    steps = [_mirrored("x", optional=True)]
+    steps[0].key = None
+    assert selector_gate.known_keys(steps) == frozenset()
+    assert selector_gate.amd_keys(steps) == frozenset()
+    assert selector_gate.optional_keys(steps) == frozenset()
 
 
 # ---- which recordings a run uses -------------------------------------------
