@@ -92,11 +92,12 @@ with `{"fields": {"more-jobs": "<key>\n<key>"}}`.
 
 The test selector takes minutes per build, and no test can start before its
 image. So the CUDA image (`image-build`), its smoke test, the ROCm image
-(`image-build-amd`) and the AMD base steps go up before the selector runs
-(`EARLY_IMAGE_KEYS`). Every non-doc build needs them: the CUDA image is the
-selector's floor, and the AMD steps keep today's always-run rules. The other
-images (CPU, XPU, HPU, arm64, ...) go up with the pipeline, only when a
-selected step depends on them.
+(`image-build-amd`), the AMD base steps and the CPU image (`image-build-cpu`)
+go up before the selector runs (`EARLY_IMAGE_KEYS`). Every non-doc build needs
+the CUDA and AMD ones: the CUDA image is the selector's floor, and the AMD steps
+keep today's always-run rules. Most builds need the CPU image. The other images
+(Arm CPU, XPU, HPU, ...) go up with the pipeline, only when a selected step
+depends on them.
 
 Buildkite holds the steps a job uploads until that job exits. Uploaded by
 bootstrap, the early images still wait out the selector. To start them sooner,
