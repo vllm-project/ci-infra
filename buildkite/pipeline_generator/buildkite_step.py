@@ -362,6 +362,8 @@ def _get_step_plugin(step: Step):
     use_arm64 = step.device in (DeviceType.DGX_SPARK, DeviceType.GH200)
     if _uses_k8s_plugin(step):
         return get_k8s_plugin(step, get_image(use_cpu))
+    elif step.device == DeviceType.ARM_CPU:
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(True, True))}
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
 
