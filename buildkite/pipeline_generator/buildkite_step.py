@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
 import os
-import time
 import re
 import shlex
 
@@ -788,23 +787,30 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
 
 
 # A collect step folds what has been uploaded once every recording step has
-# finished, or this long after the pipeline was generated, whichever is first.
+# finished, or this long after the collect job started, whichever is first.
 # A job still running then is left out of the table, which reads its shard as
-# missing. The full runs finish their recording jobs well inside it; the long
-# tails are blocked or hung jobs.
+# missing. Counted from the job's start, like the step timeout, so the fold
+# keeps about the timeout's last 90 minutes (less up to one 300 s poll), and a
+# retried job gets a fresh cap.
 COLLECT_AFTER_MINUTES = 180
 
+# The share of its armed jobs a recorder (a backend, for kernels) must hear
+# from before it publishes; below it the previous table stays current. Passed
+# to both collect scripts beside the expected counts.
+COLLECT_MIN_DELIVERED_SHARE = 0.8
+
 # Polls each recording step's state through the agent until all have finished
-# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
+# or the cap passes. `$$`: Buildkite would interpolate a bare `$` at
 # upload time, in the bootstrap's environment. An unreadable state (an older
-# agent, a step that is not there) reads as unfinished, so the step waits to
-# the deadline rather than collecting early.
+# agent, a missing step, a failed API call) reads as unfinished, so the step
+# waits to the cap rather than collecting early. `|| true` keeps a failed read
+# from ending the step under the agent's `bash -e`.
 COLLECT_WAIT = (
-    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
+    f"deadline=$$(( $$(date +%s) + {COLLECT_AFTER_MINUTES * 60} )); "
     'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
     'pending=""; '
     "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null || true)"; '
     'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
     "done; "
     '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
@@ -837,17 +843,12 @@ def _collect_step(
     # uploads the kernel symbol map), not on the recording steps themselves:
     # one of those cancelled or timed out ended the step waiting_failed, and
     # the full runs of 2026-10-16 to 18 published nothing because of it. The
-    # command waits for them instead (COLLECT_WAIT), up to a deadline.
+    # command waits for them instead (COLLECT_WAIT), up to a cap.
     depends_on = []
     for dep in (d for s in armed for d in (s.depends_on or [])):
         if dep in runnable_keys and dep not in depends_on:
             depends_on.append(dep)
-    env = {
-        "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed),
-        "CI_SELECTOR_COLLECT_DEADLINE": str(
-            int(time.time()) + COLLECT_AFTER_MINUTES * 60
-        ),
-    }
+    env = {"CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed)}
     if count_armed:
         # The fold needs a denominator: its job list holds only what uploaded,
         # so without one a build that lost its recordings looks complete.
@@ -864,6 +865,7 @@ def _collect_step(
                 env[f"KERNREC_EXPECTED_JOBS_{backend.upper()}"] = str(
                     sum(s.parallelism or 1 for s in armed if _kernrec_backend(s) == backend)
                 )
+        env["CI_SELECTOR_MIN_DELIVERED_SHARE"] = str(COLLECT_MIN_DELIVERED_SHARE)
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
