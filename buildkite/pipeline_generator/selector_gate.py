@@ -37,7 +37,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional
 
 SELECTOR_ENV_VAR = "VLLM_CI_SELECTOR"
 DECISION_FILE = "ci_selector_decision.json"
@@ -370,15 +370,23 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     }
 
 
+def _keyed_steps(steps: Iterable[Any]) -> Iterator[Any]:
+    """Each keyed step, then its AMD mirror as the generator decides whether
+    to run it, so a mirror's own fields (its optional) are the ones read."""
+    from buildkite_step import amd_mirror_step
+
+    for step in steps:
+        if not step.key:
+            continue
+        yield step
+        mirror = amd_mirror_step(step)
+        if mirror is not None:
+            yield mirror
+
+
 def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
     """Every key the generator can schedule: step keys and AMD mirror keys."""
-    keys = set()
-    for step in steps:
-        if step.key:
-            keys.add(step.key)
-            if (step.mirror or {}).get("amd"):
-                keys.add(f"amd-{step.key}")
-    return frozenset(keys)
+    return frozenset(step.key for step in _keyed_steps(steps))
 
 
 def amd_keys(steps: Iterable[Any]) -> FrozenSet[str]:
@@ -386,23 +394,13 @@ def amd_keys(steps: Iterable[Any]) -> FrozenSet[str]:
     source_file_dependencies rules; the selector decides the rest."""
     from amd import is_amd_device
 
-    keys = set()
-    for step in steps:
-        if not step.key:
-            continue
-        if is_amd_device(step.device):
-            keys.add(step.key)
-        if (step.mirror or {}).get("amd"):
-            keys.add(f"amd-{step.key}")
-    return frozenset(keys)
+    return frozenset(
+        step.key for step in _keyed_steps(steps) if is_amd_device(step.device)
+    )
 
 
 def optional_keys(steps: Iterable[Any]) -> FrozenSet[str]:
-    """Keys of optional steps and their AMD mirrors: a PR build leaves these
-    to a manual unblock or the nightly, whatever the selector says."""
-    keys = set()
-    for step in steps:
-        if step.key and step.optional:
-            keys.add(step.key)
-            keys.add(f"amd-{step.key}")
-    return frozenset(keys)
+    """Keys of optional steps and mirrors: a PR build leaves these to a
+    manual unblock or the nightly, whatever the selector says. A mirror's
+    optional may differ from its step's."""
+    return frozenset(step.key for step in _keyed_steps(steps) if step.optional)
