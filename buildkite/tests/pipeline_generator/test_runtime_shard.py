@@ -1961,7 +1961,8 @@ def test_no_timings_lists_the_job_instead_of_annotating_it(by_default, monkeypat
     assert job.parallelism is None
     assert buildkite_step.ONE_JOB_REASONS["model-executor"] == (
         "**Runtime sharding for `model-executor`:** no plan (main has no timing "
-        "for the step's files). The step runs as one job, as it would without sharding."
+        "for the step's files; no timeout_in_minutes to size a fallback plan). The "
+        "step runs as one job, as it would without sharding."
     )
     assert by_default == []
 
@@ -2149,3 +2150,205 @@ def test_excluded_hand_splits_keep_their_split_and_are_not_called_one_job(by_def
     [_, amd_group] = buildkite_step.convert_group_step_to_buildkite_step({"g": [mirrored]})
     assert amd_group.steps[0].parallelism == 4
 
+
+# Without timings: a fallback plan from the step's timeout
+
+_FETCH_TIMINGS = rs.fetch_timings
+UNPROCESSABLE = urllib.error.HTTPError("u", 422, "Unprocessable Entity", {}, None)
+
+
+def test_fetch_timings_retries_a_422_once(monkeypatch, capsys):
+    # 422: the server failed to assemble the step's data, which a second read
+    # has been known to fix.
+    urlopen, timeouts = _urlopen_answering(UNPROCESSABLE, {"files": []})
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) == {"files": []}
+    assert timeouts == list(rs.TIMINGS_TIMEOUTS_SECONDS)
+
+
+def test_fetch_timings_gives_up_on_a_second_422_without_counting_it(
+    monkeypatch, capsys
+):
+    urlopen, timeouts = _urlopen_answering(UNPROCESSABLE, UNPROCESSABLE)
+    monkeypatch.setattr(rs, "_timings_failures", 2)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert len(timeouts) == 2
+    # The endpoint answered: it is up, so earlier failures stop counting.
+    assert rs._timings_failures == 0
+    assert rs._timings_error == "HTTP Error 422: Unprocessable Entity"
+    assert capsys.readouterr().err == (
+        "runtime-shard: no timings for k (HTTP Error 422: Unprocessable Entity)\n"
+    )
+
+
+def test_a_422_then_a_timeout_counts_as_a_failed_step(monkeypatch):
+    urlopen, _ = _urlopen_answering(UNPROCESSABLE, TimeoutError("read timed out"))
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    assert rs.fetch_timings("k", AgentQueue.GPU_1) is None
+    assert rs._timings_failures == 1
+
+
+@pytest.mark.parametrize(
+    "minutes, shards",
+    [(10, 1), (19, 1), (20, 2), (30, 3), (50, 4), (120, 10), (600, 10)],
+)
+def test_fallback_shards_cover_the_timeout(minutes, shards):
+    # One shard's budget or less: one job. Over it: shards of two thirds of
+    # the budget, which leaves room for a split that is only a guess.
+    assert rs.fallback_shards(minutes) == shards
+
+
+def test_fallback_plan_packs_files_by_size_largest_first():
+    commands = _commands(TESTS[0], ["a.py", "b.py", "c.py", "d.py", "e.py"])
+    commands += _commands(TESTS[1], ["f.py"])
+    sizes = {
+        "a.py": 900,
+        "b.py": 500,
+        "c.py": 400,
+        "d.py": 300,
+        "e.py": 100,
+        "f.py": 50,
+    }
+    result = rs.fallback_plan(
+        commands, 30, "HTTP Error 404: not found", lambda f: sizes[f[len("tests/") :]]
+    )
+    assert result["shards"] == 3 and result["files"] == 6
+    me, entrypoint = result["commands"]
+    # Largest first, each to the lightest shard: 900 | 500 + 100 + 50 | 400 + 300.
+    assert me["files"] == {
+        "tests/a.py": 0,
+        "tests/b.py": 1,
+        "tests/c.py": 2,
+        "tests/d.py": 2,
+        "tests/e.py": 1,
+    }
+    assert entrypoint["files"] == {"tests/f.py": 1}
+    assert all(not planned["split"] for planned in result["commands"])
+    text = rs.summary("kernels-moe-test", result)
+    assert text.startswith(
+        "**Runtime sharding for `kernels-moe-test`:** no timings (HTTP Error 404: "
+        "not found); fallback: 3 shards by file size for 6 files, from its "
+        "30-min timeout"
+    )
+
+
+def test_fallback_plan_has_no_more_shards_than_files():
+    commands = _commands(TESTS[0], ["a.py", "b.py"])
+    result = rs.fallback_plan(commands, 120, "down", lambda f: 1)
+    assert result["shards"] == 2
+
+
+def test_fallback_plan_within_one_shard_is_one_job():
+    commands = _commands(TESTS[0], ["a.py", "b.py"])
+    result = rs.fallback_plan(commands, 15, "HTTP Error 404: not found", lambda f: 1)
+    assert result["shards"] == 1
+    assert rs.summary("k", result) == (
+        "**Runtime sharding for `k`:** no timings (HTTP Error 404: not found); "
+        "fallback: one job for 2 files, as its 15-min timeout fits one shard's "
+        "19 min. The step runs as one job, as it would without sharding."
+    )
+
+
+def test_generator_shards_a_step_by_its_timeout_after_a_422(
+    fake_global_config, checkout, monkeypatch
+):
+    """kernels-moe-test on 2026-11-17: the endpoint answered 422 twice. The
+    step's 50-min timeout makes 4 shards, not one job that times out."""
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", _FETCH_TIMINGS)
+    urlopen, timeouts = _urlopen_answering(UNPROCESSABLE, UNPROCESSABLE)
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    [step] = _render(_step(automatic_shard=True, timeout_in_minutes=50))
+    assert len(timeouts) == 2
+    assert step.parallelism == 4 and step.label == "Model Executor Shard %N/%t"
+    assert step.timeout_in_minutes == 50
+    plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
+    assert plan["shards"] == 4
+    me, entrypoint = plan["commands"]
+    assert sorted(me["files"]) == [f"tests/{f}" for f in ME_FILES]
+    assert list(entrypoint["files"]) == [f"tests/{ENTRYPOINT}"]
+    # Every shard runs some test.
+    assert set(me["files"].values()) | set(entrypoint["files"].values()) == {0, 1, 2, 3}
+    [(key, text, style)] = checkout
+    assert key == "model-executor" and style == "warning"
+    assert text.startswith(
+        "**Runtime sharding for `model-executor`:** no timings (HTTP Error 422: "
+        "Unprocessable Entity); fallback: 4 shards by file size for 7 files, "
+        "from its 50-min timeout"
+    )
+
+
+def test_generator_shards_a_step_main_never_timed_by_its_timeout(
+    fake_global_config, checkout, monkeypatch
+):
+    """404: main has no passing build of the step (a new step, say). Its
+    timeout still sizes the shards until main's timings take over."""
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", _FETCH_TIMINGS)
+    missing = urllib.error.HTTPError("u", 404, "not found", {}, None)
+    urlopen, timeouts = _urlopen_answering(missing)
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    [step] = _render(_step(automatic_shard=True, timeout_in_minutes=30))
+    assert len(timeouts) == 1 and step.parallelism == 3
+    assert (
+        "no timings (HTTP Error 404: not found); fallback: 3 shards" in checkout[0][1]
+    )
+
+
+def test_generator_shards_a_step_whose_files_main_never_timed(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    other = _timings(TESTS[0], {"gone.py": 600})
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: other)
+    [step] = _render(_step(automatic_shard=True, timeout_in_minutes=30))
+    assert step.parallelism == 3
+    assert (
+        "no timings (main has no timing for the step's files); fallback: 3 shards"
+        in checkout[0][1]
+    )
+
+
+def test_generator_runs_a_short_step_without_timings_as_one_job(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    [plain] = _render(_step(timeout_in_minutes=15))
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    [step] = _render(_step(automatic_shard=True, timeout_in_minutes=15))
+    assert step.to_yaml() == plain.to_yaml()
+    [(_, text, style)] = checkout
+    assert style == "warning" and "fallback: one job for 7 files" in text
+
+
+def test_a_short_step_without_timings_is_listed_quietly_by_default(
+    by_default, monkeypatch
+):
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    [job] = _render(_step(timeout_in_minutes=15))
+    assert job.parallelism is None
+    assert "fallback: one job" in buildkite_step.ONE_JOB_REASONS["model-executor"]
+    assert by_default == []
+
+
+def test_timings_keep_their_plan_whatever_the_timeout(fake_global_config, checkout):
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True, timeout_in_minutes=120))
+    plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
+    assert step.parallelism == 3 and plan["shards"] == 3
+    assert checkout == []
+
+
+def test_a_mirror_without_timings_shards_by_its_own_timeout(
+    fake_global_config, checkout, monkeypatch
+):
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", lambda key, queue: None)
+    assert _render_mirror(_mirror_step(timeout_in_minutes=40)).parallelism == 4
+    # Without its own timeout (AMD's 3-hour default is no size), one job.
+    assert _render_mirror(_mirror_step()).parallelism is None

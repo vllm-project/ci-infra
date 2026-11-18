@@ -1239,6 +1239,7 @@ def _shard_at_generation(
     commands: List[str],
     env: Optional[Dict[str, str]],
     mode: str,
+    timeout_in_minutes: Optional[int] = None,
 ) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
     and, in "on" mode, turn its job's prepared commands and env into one
@@ -1247,20 +1248,29 @@ def _shard_at_generation(
     leave the job as it is: short of a plan of two or more shards, so
     sharding never blocks the step's tests. "shadow" only annotates the plan.
     The NVIDIA job and a native AMD mirror's both go through here.
+    `timeout_in_minutes`, the job's own as its YAML sets it, sizes a
+    fallback plan when main has no timings for the step.
     """
     result, text = runtime_shard.plan_step(
-        step_key, step.commands or [], step.working_dir, os.getcwd(), queue
+        step_key,
+        step.commands or [],
+        step.working_dir,
+        os.getcwd(),
+        queue,
+        timeout_in_minutes,
     )
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
-    if result is None and _shard_by_default():
+    fallback = bool(result and result.get("fallbackPlan"))
+    if (result is None or (fallback and result["shards"] < 2)) and _shard_by_default():
         # One row in the one-job list, not an annotation per step.
         ONE_JOB_REASONS[step_key] = text
         return None
     if (
         result is None
+        or fallback
         or result["overBudget"]
         or runtime_shard.setup_too_long(result)
     ):
@@ -1349,6 +1359,7 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         amd_env,
                         amd_shard_mode,
+                        step.timeout_in_minutes,
                     )
                     if amd_shard_mode
                     else None
@@ -1485,6 +1496,7 @@ def convert_group_step_to_buildkite_step(
                     buildkite_step.commands,
                     buildkite_step.env,
                     shard_mode,
+                    step.timeout_in_minutes,
                 )
                 if shard_mode
                 else None
@@ -1570,6 +1582,8 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         extra_env,
                         amd_shard_mode,
+                        # The mirror's own; AMD's 3-hour default sizes nothing.
+                        amd.get("timeout_in_minutes"),
                     )
                     if amd_shard_mode
                     else None

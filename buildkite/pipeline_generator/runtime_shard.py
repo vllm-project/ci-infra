@@ -21,8 +21,15 @@ job runs the step's commands unchanged; runtime_shard_plugin.py, loaded into
 their pytest, keeps only the job's tests and opens a log group per file. The
 plan and the plugin ride in the job's environment, so a shard fetches nothing.
 
-Sharding never blocks the step: if discovery, timings or planning fail, the
-step is emitted as its normal single job, with a warning. Python 3.9: the
+Without timings (the endpoint fails or answers 4xx, or main never timed
+the step's files), a step whose timeout_in_minutes is over one shard's budget
+gets a fallback plan instead: shards sized from that timeout, its files
+split by size (fallback_plan()). Running it as one job would take the whole
+step past a timeout set for one shard, every time, and a retry can't help: the
+plan is fixed at upload. A shorter timeout runs the step as one job.
+
+Sharding never blocks the step: if discovery or planning fail, the step is
+emitted as its normal single job, with a warning. Python 3.9: the
 generator runs on the small CPU queue's python3.
 """
 
@@ -53,6 +60,8 @@ TIMINGS_TIMEOUTS_SECONDS = (15, 30)
 # endpoint is treated as down for the rest of the run.
 MAX_TIMINGS_FAILURES = 3
 _timings_failures = 0
+# Why the last fetch_timings() returned None, for the plan's summary.
+_timings_error = ""
 # One shard's job: its setup (main's setupMs) and its tests. Planned below the
 # 20-minute limit so run-to-run noise rarely pushes a real shard over it.
 MAX_SHARD_SECONDS = 1140
@@ -62,6 +71,10 @@ MAX_SETUP_SECONDS = 180
 # A step that needs more gets the best balance of this many shards it finds,
 # over the budget and flagged, rather than more jobs.
 MAX_NUMBER_OF_SHARDS = 10
+# A fallback plan (no timings) sizes shards to two thirds of the budget: its
+# split by file size is a guess, and its heaviest shard can run well over the
+# average. A step whose timeout fits in MAX_SHARD_SECONDS runs as one job.
+FALLBACK_SHARD_SECONDS = MAX_SHARD_SECONDS * 2 // 3
 # A file main has no timing for (new in the PR, say) counts as the step's
 # median file, and at least this. Under a command that picks tests by a
 # marker or keyword (`-m hybrid_model` over a directory of other models), it
@@ -324,14 +337,22 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
     for the files over one shard's budget; None if the endpoint has none or is
     down.
 
-    A read that times out or fails gets one longer retry. After
-    MAX_TIMINGS_FAILURES steps in a row fail, the rest of the run skips the
-    endpoint, so an outage costs a few reads instead of two per step.
+    A read that times out or fails gets one longer retry, and so does a 4xx
+    other than 404 (a 422 is the server failing to assemble the step's data,
+    which has passed on a second read). A 404 means main has no passing build
+    for the step: no retry. After MAX_TIMINGS_FAILURES steps in a row fail,
+    the rest of the run skips the endpoint, so an outage costs a few reads
+    instead of two per step; any answer under 500 shows the endpoint is up.
+    Why it returned None is left in _timings_error.
     """
-    global _timings_failures
+    global _timings_failures, _timings_error
+    _timings_error = ""
     if _timings_failures >= MAX_TIMINGS_FAILURES:
-        print(f"runtime-shard: no timings for {step_key} (endpoint skipped after "
-              f"{_timings_failures} failed steps)", file=sys.stderr)
+        _timings_error = f"endpoint skipped after {_timings_failures} failed steps"
+        print(
+            f"runtime-shard: no timings for {step_key} ({_timings_error})",
+            file=sys.stderr,
+        )
         return None
     query = {
         "stepKey": step_key,
@@ -346,14 +367,21 @@ def fetch_timings(step_key: str, queue: AgentQueue) -> Optional[Dict]:
             _timings_failures = 0
             return timings
         except urllib.error.HTTPError as error:
-            if error.code < 500:  # 404: no passing main build, so no plan
-                _timings_failures = 0  # the endpoint answered
-                print(f"runtime-shard: no timings for {step_key} ({error})", file=sys.stderr)
-                return None
             last_error = error
+            if error.code < 500:
+                answered = True
+                if error.code == 404:  # no passing main build: final
+                    break
+                continue
+            answered = False
         except Exception as error:  # timeout, connection refused
             last_error = error
-    _timings_failures += 1
+            answered = False
+    if answered:
+        _timings_failures = 0  # the endpoint is up
+    else:
+        _timings_failures += 1
+    _timings_error = str(last_error)
     print(f"runtime-shard: no timings for {step_key} ({last_error})", file=sys.stderr)
     return None
 
@@ -635,6 +663,86 @@ def plan(
     }
 
 
+def fallback_shards(timeout_in_minutes: int) -> int:
+    """The shards a step gets without timings, from its timeout: one if the
+    timeout fits one shard's budget, else enough shards of
+    FALLBACK_SHARD_SECONDS to cover it (at least two, at most
+    MAX_NUMBER_OF_SHARDS). The timeout is the only size of the step the
+    generator has: main's runs fit in it, sharded or not."""
+    seconds = timeout_in_minutes * 60
+    if seconds <= MAX_SHARD_SECONDS:
+        return 1
+    return min(
+        MAX_NUMBER_OF_SHARDS, max(2, math.ceil(seconds / FALLBACK_SHARD_SECONDS))
+    )
+
+
+def fallback_plan(
+    commands: List[Dict],
+    timeout_in_minutes: int,
+    reason: str,
+    file_size,
+) -> Dict:
+    """Assign one step's test files to shards without timings.
+
+    Args:
+        commands: Per pytest command, as for plan().
+        timeout_in_minutes: The step's timeout, which sets the shard count
+            (fallback_shards()).
+        reason: Why there are no timings, for the summary.
+        file_size: Bytes of a repo-relative test file, the stand-in for its
+            time: largest first, each to the shard with the fewest bytes.
+
+    Returns:
+        A plan in plan()'s shape, with "fallbackPlan" set to the reason and the
+        timeout. No file is split by test, and "estimates" are empty.
+    """
+    units = [
+        (index, file) for index, entry in enumerate(commands) for file in entry["files"]
+    ]
+    count = max(1, min(fallback_shards(timeout_in_minutes), len(units)))
+    sizes = [float(file_size(file)) for _, file in units]
+    shard_of, _ = _least_loaded(sizes, count)
+    planned: List[Dict] = [{"files": {}, "split": {}} for _ in commands]
+    for (index, file), shard in zip(units, shard_of):
+        planned[index]["files"][file] = shard
+    return {
+        "shards": count,
+        "estimates": [],
+        "commands": planned,
+        "files": len(units),
+        "unknownFiles": [],
+        "unknownFileSeconds": 0,
+        "filteredUnknownFiles": [],
+        "oversizedFiles": [],
+        "overBudget": False,
+        "setupSeconds": 0,
+        "longTest": None,
+        "fewest": False,
+        "timingSource": {},
+        "fallbackPlan": {"reason": reason, "timeoutMinutes": timeout_in_minutes},
+    }
+
+
+def _fallback_summary(step_key: str, result: Dict) -> str:
+    fallback = result["fallbackPlan"]
+    timeout = fallback["timeoutMinutes"]
+    files = f"{result['files']} file{'s' if result['files'] != 1 else ''}"
+    head = f"**Runtime sharding for `{step_key}`:** no timings ({fallback['reason']}); "
+    if result["shards"] == 1:
+        return head + (
+            f"fallback: one job for {files}, as its {timeout}-min timeout fits "
+            f"one shard's {MAX_SHARD_SECONDS / 60:.0f} min. The step runs as one "
+            "job, as it would without sharding."
+        )
+    return head + (
+        f"fallback: {result['shards']} shards by file size for {files}, from its "
+        f"{timeout}-min timeout ({FALLBACK_SHARD_SECONDS / 60:.1f} min per shard). "
+        "Without timings the split is a guess: shards may be unbalanced, and "
+        "large files are not split by test."
+    )
+
+
 def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
     """One paragraph on a plan, for the generator's log and annotations."""
     if result is None:
@@ -642,6 +750,8 @@ def summary(step_key: str, result: Optional[Dict], reason: str = "") -> str:
             f"**Runtime sharding for `{step_key}`:** no plan ({reason}). "
             "The step runs as one job, as it would without sharding."
         )
+    if result.get("fallbackPlan"):
+        return _fallback_summary(step_key, result)
     setup = result.get("setupSeconds", 0)
     if result["shards"] == 1 and not result["overBudget"]:
         return (
@@ -729,6 +839,7 @@ def plan_step(
     working_dir: Optional[str],
     root: str,
     queue: AgentQueue,
+    timeout_in_minutes: Optional[int] = None,
 ) -> Tuple[Optional[Dict], str]:
     """Plan an enrolled step from the checkout at `root`.
 
@@ -738,12 +849,15 @@ def plan_step(
         working_dir: The step's working_dir in the image.
         root: The vLLM checkout the generator runs in.
         queue: The queue the step runs on, to pick its timings.
+        timeout_in_minutes: The step's own timeout, which sizes a fallback
+            plan when main has no timings for it; None for no fallback.
 
     Returns:
         (the plan for runtime_shard_plugin.py, or None to run the step as one
         job; a summary of either for the log and annotations).
 
     """
+    global _timings_error
     reason = ""
     result = None
     try:
@@ -765,10 +879,25 @@ def plan_step(
         ]
         if not any(entry["files"] for entry in discovered):
             raise ValueError("no test files found")
-        result = plan(discovered, fetch_timings(step_key, queue))
+        _timings_error = ""  # a stubbed fetch_timings leaves it alone
+        timings = fetch_timings(step_key, queue)
+        result = plan(discovered, timings)
         if result is None:
-            reason = "main has no timing for the step's files"
-        else:
+            reason = (
+                _timings_error
+                if timings is None and _timings_error
+                else "main has no timing for the step's files"
+            )
+            if timeout_in_minutes:
+                result = fallback_plan(
+                    discovered,
+                    timeout_in_minutes,
+                    reason,
+                    lambda file: os.path.getsize(os.path.join(root, file)),
+                )
+            else:
+                reason += "; no timeout_in_minutes to size a fallback plan"
+        if result is not None:
             prefix = os.path.relpath(cwd, root).replace(os.sep, "/")
             prefix = "" if prefix == "." else prefix + "/"
             for index, (entry, planned) in enumerate(
