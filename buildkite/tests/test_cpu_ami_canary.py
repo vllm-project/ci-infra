@@ -64,6 +64,19 @@ def assert_selection(env, expected):
     assert result.stdout.strip().splitlines()[-1] == expected
 
 
+def test_commands_have_no_bare_dollar():
+    """Buildkite interpolates commands on upload, and a "$" that starts no
+    variable fails the whole upload (canary build 458). Shell syntax such as a
+    regex end anchor must be written "$$"; bash alone would accept it."""
+    bare_dollar_lines = []
+    for step in PIPELINE["steps"]:
+        for command in step.get("command", []):
+            for line in command.splitlines():
+                if re.search(r"(?<!\$)\$(?![${A-Za-z_$])", line):
+                    bare_dollar_lines.append(line.strip())
+    assert bare_dollar_lines == []
+
+
 def test_canary_selection_defaults_match_daily_v6():
     assert_selection({"STACK_VERSION": "6.21.0"}, f"6.21.0|{V6_AMI_PREFIX}")
 
