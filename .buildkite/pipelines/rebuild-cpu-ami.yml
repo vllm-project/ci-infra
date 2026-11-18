@@ -39,7 +39,7 @@ steps:
         AMI_NAME_PREFIX="vllm-buildkite-stack-linux-cpu-build"
         if [[ -n "$${CANARY_STACK_VERSION:-}" ]]; then
           echo "--- :warning: Canary build against Elastic CI Stack v$${CANARY_STACK_VERSION} (publish steps are skipped)"
-          if [[ ! "$$CANARY_STACK_VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$ ]]; then
+          if [[ ! "$$CANARY_STACK_VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$$ ]]; then
             echo "Error: CANARY_STACK_VERSION must be a stack version like 7.2.0, got: '$$CANARY_STACK_VERSION'"
             exit 1
           fi
