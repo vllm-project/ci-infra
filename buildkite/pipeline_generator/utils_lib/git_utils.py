@@ -25,28 +25,35 @@ def get_merge_base_commit() -> Optional[str]:
         return None
 
 
-def get_diff_base_ref(branch: str, merge_base_commit: Optional[str]) -> Optional[str]:
-    """The commit a build's changes are diffed against: the parent commit on
-    main, the merge base with main elsewhere."""
-    if branch == "main":
-        return "HEAD~1"
-    return merge_base_commit.strip() if merge_base_commit else None
-
-
 def get_list_file_diff(branch: str, merge_base_commit: Optional[str]) -> List[str]:
     """Get list of file paths that get changed between current branch and origin/main."""
-    base_ref = get_diff_base_ref(branch, merge_base_commit)
-    if not base_ref:
-        raise RuntimeError("Failed to determine merge base commit for git diff.")
     try:
         subprocess.run(["git", "add", "."], check=True)
-        output = subprocess.check_output(
-            ["git", "diff", "--name-only", "--diff-filter=ACMDR", base_ref],
-            universal_newlines=True,
-        )
+        if branch == "main":
+            output = subprocess.check_output(
+                ["git", "diff", "--name-only", "--diff-filter=ACMDR", "HEAD~1"],
+                universal_newlines=True,
+            )
+        else:
+            merge_base = merge_base_commit
+            if not merge_base:
+                pass
+            output = subprocess.check_output(
+                [
+                    "git",
+                    "diff",
+                    "--name-only",
+                    "--diff-filter=ACMDR",
+                    merge_base.strip(),
+                ],
+                universal_newlines=True,
+            )
         return [line for line in output.split("\n") if line.strip()]
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to get git diff: {e}")
+    except AttributeError:
+        # Case where merge_base_commit is None
+        raise RuntimeError("Failed to determine merge base commit for git diff.")
 
 
 def _record_infra_retry(attempts: int, outcome: str) -> None:

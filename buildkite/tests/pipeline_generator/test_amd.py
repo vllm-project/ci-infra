@@ -1,5 +1,6 @@
 import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -8,6 +9,7 @@ import buildkite_step
 from amd import is_amd_device
 from constants import AgentQueue
 from step import Step, read_steps_from_job_dir
+from utils_lib import git_utils
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
@@ -1150,8 +1152,12 @@ def test_a_step_that_lists_its_own_yaml_counts_every_edit(tmp_path, monkeypatch)
     assert all(buildkite_step._step_should_run(s, [STEP_YAML]) for s in steps.values())
 
 
-def test_diff_base_ref_follows_the_diff(fake_global_config):
-    fake_global_config["merge_base_commit"] = "abc"
-    assert buildkite_step._diff_base_ref() == "abc"
-    fake_global_config["branch"] = "main"
-    assert buildkite_step._diff_base_ref() == "HEAD~1"
+def test_diff_base_ref_follows_the_diff(fake_global_config, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", MagicMock())
+    git_diff = MagicMock(return_value="")
+    monkeypatch.setattr(subprocess, "check_output", git_diff)
+    fake_global_config["merge_base_commit"] = "abc\n"
+    for branch, base in (("test-branch", "abc"), ("main", "HEAD~1")):
+        fake_global_config["branch"] = branch
+        git_utils.get_list_file_diff(branch, "abc\n")
+        assert git_diff.call_args.args[0][-1] == buildkite_step._diff_base_ref() == base

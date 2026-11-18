@@ -34,7 +34,6 @@ from utils_lib.docker_utils import (
     get_ecr_cache_registry,
     get_torch_nightly_image,
 )
-from utils_lib.git_utils import get_diff_base_ref
 from global_config import get_global_config
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
@@ -1663,11 +1662,12 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
 
 
 def _diff_base_ref() -> Optional[str]:
-    """The commit list_file_diff is taken against."""
+    """The commit get_list_file_diff diffs against."""
     global_config = get_global_config()
-    return get_diff_base_ref(
-        global_config["branch"], global_config.get("merge_base_commit")
-    )
+    if global_config["branch"] == "main":
+        return "HEAD~1"
+    merge_base = global_config.get("merge_base_commit")
+    return merge_base.strip() if merge_base else None
 
 
 def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
