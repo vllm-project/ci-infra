@@ -1,5 +1,6 @@
 import pytest
 
+import amd
 import buildkite_step
 import selector_gate
 import step as step_module
@@ -38,6 +39,7 @@ def fake_global_config(monkeypatch):
     }
     monkeypatch.setattr(step_module, "get_global_config", lambda: config)
     monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
+    monkeypatch.setattr(amd, "get_global_config", lambda: config)
     monkeypatch.setattr(
         buildkite_step,
         "get_ecr_cache_registry",

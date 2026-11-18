@@ -1634,9 +1634,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if step.optional:
         # As the selector gate does: an edited optional step runs on its PR.
-        return is_amd_device(step.device) and amd_step_redefined(
-            step, list_file_diff, _diff_base_ref()
-        )
+        return is_amd_device(step.device) and amd_step_redefined(step, list_file_diff)
     if (
         is_amd_gpu_device(step.device)
         and not step.dind
@@ -1653,21 +1651,11 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if is_amd_device(step.device):
         return _source_file_dependencies_match(
-            amd_dependencies(step, list_file_diff, _diff_base_ref()),
-            list_file_diff,
+            amd_dependencies(step, list_file_diff), list_file_diff
         )
     return _source_file_dependencies_match(
         step.source_file_dependencies, list_file_diff
     )
-
-
-def _diff_base_ref() -> Optional[str]:
-    """The commit get_list_file_diff diffs against."""
-    global_config = get_global_config()
-    if global_config["branch"] == "main":
-        return "HEAD~1"
-    merge_base = global_config.get("merge_base_commit")
-    return merge_base.strip() if merge_base else None
 
 
 def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:

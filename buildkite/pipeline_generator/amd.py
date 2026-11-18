@@ -18,6 +18,7 @@ from typing import (
 import yaml
 
 from constants import AgentQueue, DeviceType, Platform
+from global_config import get_global_config
 
 if TYPE_CHECKING:
     from step import Step
@@ -620,37 +621,42 @@ def build_amd_step_options(
     }
 
 
-def amd_dependencies(
-    step: "Step", list_file_diff: List[str], base_ref: Optional[str]
-) -> List[str]:
+def amd_dependencies(step: "Step", list_file_diff: List[str]) -> List[str]:
     """The step's source_file_dependencies, without its own yaml when the diff
     edits that yaml but not the step's entry."""
     dependencies = step.source_file_dependencies or []
     if step.source_file_declared:
         return dependencies
-    redefined = _redefined_keys(step, list_file_diff, base_ref)
+    redefined = _redefined_keys(step, list_file_diff)
     if redefined is None or step.key in redefined:
         return dependencies
     return [d for d in dependencies if d != step.source_file]
 
 
-def amd_step_redefined(
-    step: "Step", list_file_diff: List[str], base_ref: Optional[str]
-) -> bool:
+def amd_step_redefined(step: "Step", list_file_diff: List[str]) -> bool:
     """Whether the diff changes or adds the step's own yaml entry."""
-    redefined = _redefined_keys(step, list_file_diff, base_ref)
+    redefined = _redefined_keys(step, list_file_diff)
     return redefined is not None and step.key in redefined
 
 
 def _redefined_keys(
-    step: "Step", list_file_diff: List[str], base_ref: Optional[str]
+    step: "Step", list_file_diff: List[str]
 ) -> Optional[FrozenSet[str]]:
     """Keys the diff's edit to the step's yaml redefines. None when the yaml
     is not edited or the edit can't be pinned to steps: either way the step's
     dependencies apply as written."""
     if step.source_file not in list_file_diff:
         return None
-    return changed_step_keys_in_file(step.source_file, base_ref)
+    return changed_step_keys_in_file(step.source_file, _diff_base_ref())
+
+
+def _diff_base_ref() -> Optional[str]:
+    """The commit get_list_file_diff diffs against."""
+    global_config = get_global_config()
+    if global_config["branch"] == "main":
+        return "HEAD~1"
+    merge_base = global_config.get("merge_base_commit")
+    return merge_base.strip() if merge_base else None
 
 
 @lru_cache(maxsize=None)

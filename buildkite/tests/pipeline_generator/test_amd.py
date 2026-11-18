@@ -1057,8 +1057,8 @@ def test_a_step_without_a_source_file_keeps_its_dependencies(monkeypatch):
     monkeypatch.setattr(
         amd, "changed_step_keys_in_file", lambda *a: pytest.fail("called")
     )
-    assert amd.amd_dependencies(step, ["a/b.py"], "HEAD") == ["a/"]
-    assert not amd.amd_step_redefined(step, ["a/b.py"], "HEAD")
+    assert amd.amd_dependencies(step, ["a/b.py"]) == ["a/"]
+    assert not amd.amd_step_redefined(step, ["a/b.py"])
 
 
 def _load(tmp_path, monkeypatch, text=STEPS):
@@ -1160,4 +1160,4 @@ def test_diff_base_ref_follows_the_diff(fake_global_config, monkeypatch):
     for branch, base in (("test-branch", "abc"), ("main", "HEAD~1")):
         fake_global_config["branch"] = branch
         git_utils.get_list_file_diff(branch, "abc\n")
-        assert git_diff.call_args.args[0][-1] == buildkite_step._diff_base_ref() == base
+        assert git_diff.call_args.args[0][-1] == amd._diff_base_ref() == base
