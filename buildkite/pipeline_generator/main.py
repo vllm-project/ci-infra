@@ -4,67 +4,39 @@ import click
 from pipeline_generator import PipelineGenerator
 
 
-NOTIFY_TEST_PIPELINE = """# Throwaway test: does a step-level github_commit_status notify give one status
-# per step (parallel jobs folded), only for hard-failed steps?
-# Every step runs on the small CPU queue, no docker, writes no files.
+NOTIFY_TEST_PIPELINE = """# Throwaway test 2: step-level github_commit_status inside a group (as in
+# production), timing of the red status, and a retried shard.
 steps:
-  # A: 3 shards, shard 2 fails. Expect ONE red status "ci/step: A sharded, one shard fails".
-  - label: "A sharded, one shard fails %n"
-    key: notify-test-a
-    parallelism: 3
-    agents: {queue: small_cpu_queue_premerge}
-    command: '[ "$$BUILDKITE_PARALLEL_JOB" != "1" ]'
-    notify:
-      - github_commit_status: {context: "ci/step: A sharded, one shard fails"}
-        if: step.outcome == "hard_failed"
-
-  # B: fails on the first attempt, passes on its automatic retry. Expect NO status.
-  - label: "B fails then passes on retry"
-    key: notify-test-b
-    agents: {queue: small_cpu_queue_premerge}
-    command: '[ "$${BUILDKITE_RETRY_COUNT:-0}" -ge 1 ]'
-    retry: {automatic: [{exit_status: 1, limit: 1}]}
-    notify:
-      - github_commit_status: {context: "ci/step: B retried"}
-        if: step.outcome == "hard_failed"
-
-  # C: soft-fail. Expect NO status.
-  - label: "C soft fail"
-    key: notify-test-c
-    agents: {queue: small_cpu_queue_premerge}
-    command: "exit 1"
-    soft_fail: true
-    notify:
-      - github_commit_status: {context: "ci/step: C soft fail"}
-        if: step.outcome == "hard_failed"
-
-  # D: passes. Expect NO status.
-  - label: "D passes"
-    key: notify-test-d
-    agents: {queue: small_cpu_queue_premerge}
-    command: "true"
-    notify:
-      - github_commit_status: {context: "ci/step: D passes"}
-        if: step.outcome == "hard_failed"
-
-  # E: control, one job that fails. Expect ONE red status (proves notify works at all).
-  - label: "E plain failure"
-    key: notify-test-e
-    agents: {queue: small_cpu_queue_premerge}
-    command: "exit 1"
-    notify:
-      - github_commit_status: {context: "ci/step: E plain failure"}
-        if: step.outcome == "hard_failed"
-
-  # F: 3 shards, all pass, NO filter. Counting the writes to its context shows
-  # whether Buildkite posts per step or per job.
-  - label: "F sharded, unfiltered %n"
-    key: notify-test-f
-    parallelism: 3
-    agents: {queue: small_cpu_queue_premerge}
-    command: "true"
-    notify:
-      - github_commit_status: {context: "ci/step: F sharded unfiltered"}
+  - group: "notify test group"
+    key: notify-test-group
+    steps:
+      # G: shard 1 fails at once, the others sleep 90 s. Red at ~0 s or ~90 s?
+      - label: "G sharded, early failure %n"
+        key: notify-test-g
+        parallelism: 3
+        agents: {queue: small_cpu_queue_premerge}
+        command: 'if [ "$$BUILDKITE_PARALLEL_JOB" = "1" ]; then exit 1; fi; sleep 90'
+        notify:
+          - github_commit_status: {context: "ci/step: G sharded, early failure"}
+            if: step.outcome == "hard_failed"
+      # H: one failing job inside the group. Expect one red status.
+      - label: "H failure in group"
+        key: notify-test-h
+        agents: {queue: small_cpu_queue_premerge}
+        command: "exit 1"
+        notify:
+          - github_commit_status: {context: "ci/step: H failure in group"}
+            if: step.outcome == "hard_failed"
+      # I: 3 shards; shard 1 fails once then passes on its automatic retry. Expect no status.
+      - label: "I sharded, retried shard %n"
+        key: notify-test-i
+        parallelism: 3
+        agents: {queue: small_cpu_queue_premerge}
+        command: '[ "$$BUILDKITE_PARALLEL_JOB" != "1" ] || [ "$${BUILDKITE_RETRY_COUNT:-0}" -ge 1 ]'
+        retry: {automatic: [{exit_status: 1, limit: 1}]}
+        notify:
+          - github_commit_status: {context: "ci/step: I sharded, retried shard"}
+            if: step.outcome == "hard_failed"
 """
 
 
