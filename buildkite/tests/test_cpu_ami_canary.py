@@ -219,6 +219,15 @@ def test_unparsable_version_output_falls_back_to_install(tmp_path):
     assert result.returncode != 0  # stops at the stubbed download
 
 
+def test_prerelease_of_pin_is_replaced(tmp_path):
+    # sort -V ranks 3.138.2-beta.1 above 3.138.2; a prerelease is never kept.
+    result, install_reached = run_install_agent(
+        tmp_path, version_agent(f"{PINNED_AGENT_VERSION}-beta.1")
+    )
+    assert install_reached
+    assert result.returncode != 0  # stops at the stubbed download
+
+
 def test_older_base_agent_is_replaced(tmp_path):
     result, install_reached = run_install_agent(tmp_path, version_agent("3.73.1"))
     assert install_reached
