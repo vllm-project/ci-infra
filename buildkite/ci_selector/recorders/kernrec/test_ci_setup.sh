@@ -40,6 +40,7 @@ for mode in $modes; do
   cp "$WORK/fixtures/sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   cp "$WORK/fixtures/tool.so" "$case_dir/cache/libkernrec.so"
   cp "$HERE/kernrec_torch.py" "$case_dir/cache/kernrec_torch.py"
+  cp "$HERE/kernrec_rocm_kineto.py" "$case_dir/cache/kernrec_rocm_kineto.py"
   mkdir -p "$case_dir/site"
   [[ "$mode" != wrong-version ]] || cp "$WORK/fixtures/wrong-sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
   [[ "$mode" != rocm10 ]] || cp "$WORK/fixtures/rocm10-sdk.so" "$case_dir/rocm/lib/librocprofiler-sdk.so"
@@ -127,6 +128,8 @@ if mode in {"rocm", "rocm10", "rocm-spawn"}:
     assert final["provenance"]["expected_rocprofiler_sdk"] == final["provenance"]["versions"]["rocprofiler-sdk"]
     assert initial["worker_method"] == "spawn"
     assert initial["worker_shutdown"] == ("17" if mode == "rocm-spawn" else "30")
+    assert (root / "site/kernrec_rocm_kineto.pth").read_text() == "import kernrec_rocm_kineto\n"
+    assert not (root / "site/kernrec_torch.pth").exists()
     assert final["provenance"]["environment"]["VLLM_WORKER_MULTIPROC_METHOD"] == "spawn"
     assert final["provenance"]["environment"]["VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS"] == initial["worker_shutdown"]
 elif mode == "cuda":
@@ -138,6 +141,7 @@ elif mode == "cuda":
     assert (root / "site/kernrec_torch.py").read_text() == (root / "cache/kernrec_torch.py").read_text()
 else:
     assert not (root / "site/kernrec_torch.pth").exists()
+    assert not (root / "site/kernrec_rocm_kineto.pth").exists()
     assert final["collection_error"]
     assert initial["preload"] == previous_preload
     assert initial["tool"] == ("existing-profiler" if mode == "conflict" else "")

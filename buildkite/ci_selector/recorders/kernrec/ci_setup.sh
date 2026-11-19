@@ -84,16 +84,18 @@ kernrec_finish() {
   fi
 }
 
-# CUPTI has one activity client per process. kernrec_torch.py makes the
-# recorder step aside when a CUDA torch.profiler starts; without it that
-# profiler records nothing. Best effort: on failure the step still records.
+# Installs a startup hook module ($3) next to a .pth in site-packages.
+# CUDA: kernrec_torch.py makes CUPTI's single activity client step aside when a
+# torch.profiler starts. ROCm: kernrec_rocm_kineto.py puts libtorch_cpu.so in the
+# global scope before torch import, so Kineto registers with the SDK alongside
+# the recorder. Best effort: on failure the step still records.
 kernrec_install_torch_hook() {
-  local dir="$1" base="$2"
-  if [ ! -s "$dir/kernrec_torch.py" ]; then
-    curl -sSfL --retry 3 --max-time 60 -o "$dir/kernrec_torch.py.tmp" "$base/kernrec_torch.py" \
-      && mv "$dir/kernrec_torch.py.tmp" "$dir/kernrec_torch.py" || return 1
+  local dir="$1" base="$2" module="$3"
+  if [ ! -s "$dir/$module.py" ]; then
+    curl -sSfL --retry 3 --max-time 60 -o "$dir/$module.py.tmp" "$base/$module.py" \
+      && mv "$dir/$module.py.tmp" "$dir/$module.py" || return 1
   fi
-  KERNREC_TORCH_HOOK="$dir/kernrec_torch.py" "${KERNREC_PYTHON:-python3}" - <<'PY'
+  KERNREC_TORCH_HOOK="$dir/$module.py" KERNREC_TORCH_MODULE="$module" "${KERNREC_PYTHON:-python3}" - <<'PY'
 import os
 import shutil
 import site
@@ -104,9 +106,10 @@ target = os.environ.get("KERNREC_SITE_DIR") or next(
 )
 if not target:
     sys.exit(1)
-shutil.copyfile(os.environ["KERNREC_TORCH_HOOK"], os.path.join(target, "kernrec_torch.py"))
-with open(os.path.join(target, "kernrec_torch.pth"), "w") as pth:
-    pth.write("import kernrec_torch\n")
+module = os.environ["KERNREC_TORCH_MODULE"]
+shutil.copyfile(os.environ["KERNREC_TORCH_HOOK"], os.path.join(target, module + ".py"))
+with open(os.path.join(target, module + ".pth"), "w") as pth:
+    pth.write(f"import {module}\n")
 PY
 }
 
@@ -160,7 +163,7 @@ PY
       fi
       export CUDA_INJECTION64_PATH="$dir/libkernrec.so"
       export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS="${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}"
-      kernrec_install_torch_hook "$dir" "$base" \
+      kernrec_install_torch_hook "$dir" "$base" kernrec_torch \
         || echo "kernrec: torch.profiler hand-off not installed; a CUDA profiler in this step will see no GPU activity" >&2
       ;;
     rocm)
@@ -213,6 +216,8 @@ PY
         *":$sdk_lib/librocprofiler-sdk.so:"*) ;;
         *) export LD_PRELOAD="$sdk_lib/librocprofiler-sdk.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
       esac
+      kernrec_install_torch_hook "$dir" "$base" kernrec_rocm_kineto \
+        || echo "kernrec: Kineto hook not installed; torch.profiler in this step may see no GPU activity" >&2
       ;;
     *) KERNREC_COLLECTION_ERROR="unsupported recorder backend: $KERNREC_BACKEND"; return 1 ;;
   esac

@@ -48,8 +48,19 @@ Use a fresh output directory for each run. Preserve any required existing
 operation; forking after that point cannot record child kernels. A forked child
 that loads GPU code writes `# error=gpu_use_after_fork`, which keeps the trace
 incomplete; children that exec or never load GPU code leave no file. Allow workers to
-finish shutdown: force-killed processes leave incomplete traces. Avoid
-simultaneous GPU profilers; profiler-specific tests are excluded from recording.
+finish shutdown: force-killed processes leave incomplete traces. Setup leaves
+collection unavailable when another tool is already named in
+`ROCP_TOOL_LIBRARIES`.
+
+`torch.profiler` keeps working in a recorded process. The SDK collects its
+clients once, at initialization, which the configured recorder triggers as
+soon as torch import loads the HIP runtime. Kineto's `rocprofiler_configure`
+in `libtorch_cpu.so` is only found then if that library is already in the
+global symbol scope. `vllm/env_override.py` does that when vllm is imported
+first; setup also installs `kernrec_rocm_kineto.py` (a `.pth` hook) which loads
+`libtorch_cpu.so` with `RTLD_GLOBAL` just before torch import, whatever the
+import order. A process that imports torch without that hook (`python -S`,
+another interpreter) still records completely, but its profiler is blind.
 
 ## Recording contract
 
