@@ -3186,11 +3186,11 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step, mirror])
     job = buildkite_step.shard_coverage_step([group])
     assert job.key == "runtime-shard-coverage"
-    # Poll the shards rather than depend on them: a cancelled soft-fail shard
-    # must not make the whole coverage check disappear. Image builds still run first.
-    assert job.depends_on == ["image-build", "image-build-amd"]
-    assert job.env["CI_SELECTOR_COLLECT_WAIT_FOR"] == "model-executor amd-model-executor"
-    assert "CI_SELECTOR_COLLECT_DEADLINE" not in job.env
+    # Depends on the sharded steps: no agent waits while they queue and run.
+    assert job.depends_on == ["model-executor", "amd-model-executor"]
+    assert job.timeout_in_minutes == buildkite_step.COVERAGE_TIMEOUT_MINUTES == 30
+    assert "CI_SELECTOR_COLLECT_WAIT_FOR" not in job.env
+    assert len(job.commands) == 1  # the checker, no wait loop
     assert job.allow_dependency_failure is True and job.soft_fail is False
     steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
     assert sorted(steps) == ["amd-model-executor", "model-executor"]
@@ -3206,21 +3206,18 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.json"
     assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
     assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
-    assert job.label == ":mag: Check every test ran" and job.timeout_in_minutes == 360
+    assert job.label == ":mag: Check every test ran"
     assert job.retry["automatic"] == [
         {"exit_status": -1, "limit": 1},
         {"exit_status": 255, "limit": 1},
         {"exit_status": 94, "limit": 1},
         {"exit_status": buildkite_step.HOOK_FAILURE_EXIT_STATUSES, "limit": 1},
     ]
-    assert 'deadline="$$RUNTIME_SHARD_COVERAGE_DEADLINE"' in job.commands[0]
-    assert "finished|ignored|canceled|waiting_failed" in job.commands[0]
-    assert "sleep 30" in job.commands[0]
-    assert job.commands[1] == (
+    assert job.commands == [
         'python3 -I -c \'import base64,json,os,zlib;'
         'exec(json.loads(zlib.decompress(base64.b64decode('
         'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\''
-    )
+    ]
     # And their records land where each job can reach the checkout.
     coverage_setup = rs.shard_job_setup("/workdir")[-1]
     assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in coverage_setup
@@ -3244,7 +3241,7 @@ def test_coverage_job_propagates_a_steps_soft_fail(fake_global_config, checkout)
     assert [c["soft_fail"] for c in steps["model-executor"]] == [True, True]
 
 
-def test_coverage_job_skips_unsharded_builds_and_waits_on_images(
+def test_coverage_job_skips_unsharded_builds_and_waits_on_the_sharded_steps(
     fake_global_config, checkout
 ):
     fake_global_config["run_all"] = True
@@ -3255,7 +3252,7 @@ def test_coverage_job_skips_unsharded_builds_and_waits_on_images(
     assert buildkite_step.shard_coverage_step([group]) is None
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded, plain])
     job = buildkite_step.shard_coverage_step([group])
-    assert job.depends_on == ["image-build"]
+    assert job.depends_on == ["model-executor"]  # not the unsharded step
     assert json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).keys() == {
         "model-executor"
     }
@@ -3268,7 +3265,7 @@ def test_coverage_job_skips_unsharded_builds_and_waits_on_images(
         ],
     )
     job = buildkite_step.shard_coverage_step([image, group])
-    assert job.depends_on == ["image-build"]  # not the shard jobs themselves
+    assert job.depends_on == ["model-executor"]  # the shards bring the image
 
 
 def test_coverage_job_embeds_and_decodes_the_generator_script(
@@ -3298,162 +3295,3 @@ def test_coverage_job_embeds_and_decodes_the_generator_script(
     namespace = {"__name__": "embedded_coverage"}
     exec(command[-1], namespace)
     assert callable(namespace["main"])
-
-
-def test_coverage_wait_stops_when_shards_cannot_run(
-    fake_global_config, checkout, tmp_path
-):
-    fake_global_config["run_all"] = True
-    [step] = _render(_step(automatic_shard=True))
-    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    job = buildkite_step.shard_coverage_step([group])
-    wait = job.commands[0].replace("$$", "$")
-    agent = tmp_path / "buildkite-agent"
-    agent.write_text('#!/bin/sh\nprintf "%s\\n" "$STEP_STATE"\n')
-    agent.chmod(0o755)
-    marker = tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
-    for state in ("finished", "ignored", "canceled", "waiting_failed"):
-        marker.touch()
-        run = subprocess.run(
-            ["bash", "-c", wait],
-            env=dict(
-                os.environ,
-                PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-                CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
-                RUNTIME_SHARD_COVERAGE_DEADLINE=job.env[
-                    "RUNTIME_SHARD_COVERAGE_DEADLINE"
-                ],
-                STEP_STATE=state,
-                TMPDIR=str(tmp_path),
-                BUILDKITE_JOB_ID="coverage-job",
-            ),
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
-        assert run.returncode == 0
-        assert run.stdout == "every sharded step has stopped\n"
-        assert not marker.exists()
-
-
-def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
-    fake_global_config, checkout, tmp_path
-):
-    fake_global_config["run_all"] = True
-    [step] = _render(_step(automatic_shard=True))
-    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    before = int(time.time())
-    job = buildkite_step.shard_coverage_step([group])
-    after = int(time.time())
-    deadline = int(job.env["RUNTIME_SHARD_COVERAGE_DEADLINE"])
-    assert before + 345 * 60 <= deadline <= after + 345 * 60
-    assert job.timeout_in_minutes == 360
-    wait = job.commands[0].replace("$$", "$")
-    agent = tmp_path / "buildkite-agent"
-    agent.write_text('#!/bin/sh\nprintf "%s\\n" running\n')
-    agent.chmod(0o755)
-    date = tmp_path / "date"
-    date.write_text(f'#!/bin/sh\n[ "$1" = "+%s" ] && {{ echo {deadline}; }} || exec /bin/date "$@"\n')
-    date.chmod(0o755)
-    run = subprocess.run(
-        ["bash", "-c", wait],
-        env=dict(
-            os.environ,
-            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
-            RUNTIME_SHARD_COVERAGE_DEADLINE=str(deadline),
-            TMPDIR=str(tmp_path),
-            BUILDKITE_JOB_ID="coverage-job",
-        ),
-        capture_output=True,
-        text=True,
-        timeout=2,
-    )
-    assert run.returncode == 0
-    assert "deadline" in run.stdout and "model-executor" in run.stdout
-    assert (
-        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
-    ).is_file()
-    assert len(job.commands) == 2  # the checker runs next, even after the wait
-
-
-def test_coverage_wait_survives_an_unreadable_state_under_bash_e(
-    fake_global_config, checkout, tmp_path
-):
-    """The agent runs commands under `bash -e`: a failed state read (an older
-    agent, a failed API call) reads as unfinished, not as the job's exit."""
-    fake_global_config["run_all"] = True
-    [step] = _render(_step(automatic_shard=True))
-    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    job = buildkite_step.shard_coverage_step([group])
-    deadline = job.env["RUNTIME_SHARD_COVERAGE_DEADLINE"]
-    agent = tmp_path / "buildkite-agent"
-    agent.write_text('#!/bin/sh\necho "fatal: no such step" >&2\nexit 1\n')
-    agent.chmod(0o755)
-    date = tmp_path / "date"
-    date.write_text(f'#!/bin/sh\n[ "$1" = "+%s" ] && {{ echo {deadline}; }} || exec /bin/date "$@"\n')
-    date.chmod(0o755)
-    run = subprocess.run(
-        ["bash", "-e", "-c", job.commands[0].replace("$$", "$")],
-        env=dict(
-            os.environ,
-            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
-            RUNTIME_SHARD_COVERAGE_DEADLINE=deadline,
-            TMPDIR=str(tmp_path),
-            BUILDKITE_JOB_ID="coverage-job",
-        ),
-        capture_output=True,
-        text=True,
-        timeout=2,
-    )
-    assert run.returncode == 0, run.stderr
-    assert "wait deadline reached with model-executor (state unknown)" in run.stdout
-    assert (
-        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
-    ).is_file()
-
-
-def test_coverage_wait_reports_pending_without_shell_errors(
-    fake_global_config, checkout, tmp_path
-):
-    fake_global_config["run_all"] = True
-    [step] = _render(_step(automatic_shard=True))
-    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    job = buildkite_step.shard_coverage_step([group])
-    wait = job.commands[0].replace("$$", "$")
-    agent = tmp_path / "buildkite-agent"
-    agent.write_text(
-        '#!/bin/sh\n'
-        'if [ -f "$WAIT_STATE_FILE" ]; then\n'
-        '  printf "finished\\n";\n'
-        'else\n'
-        '  : > "$WAIT_STATE_FILE"; printf "running\\n";\n'
-        'fi\n'
-    )
-    agent.chmod(0o755)
-    sleep = tmp_path / "sleep"
-    sleep.write_text("#!/bin/sh\nexit 0\n")
-    sleep.chmod(0o755)
-    date = tmp_path / "date"
-    date.write_text('#!/bin/sh\n[ "$1" = "-u" ] && { echo 00:00Z; } || exec /bin/date "$@"\n')
-    date.chmod(0o755)
-    run = subprocess.run(
-        ["bash", "-c", wait],
-        env=dict(
-            os.environ,
-            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
-            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
-            RUNTIME_SHARD_COVERAGE_DEADLINE=job.env[
-                "RUNTIME_SHARD_COVERAGE_DEADLINE"
-            ],
-            WAIT_STATE_FILE=str(tmp_path / "finished"),
-        ),
-        capture_output=True,
-        text=True,
-        timeout=2,
-    )
-    assert run.returncode == 0
-    assert run.stderr == ""
-    assert "waiting on model-executor (running)" in run.stdout
-    assert run.stdout.endswith("every sharded step has stopped\n")
