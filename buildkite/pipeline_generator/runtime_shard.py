@@ -916,8 +916,12 @@ def plan_step(
                 # A test the plan doesn't name runs in the least-loaded shard
                 # that runs the command at all; that shard also collects the
                 # command's full inventory, a cost shard 0 shouldn't always pay.
+                # A fallback plan has no estimates: its first owner.
                 runs = owners(planned)
-                planned["fallback"] = min(runs, key=result["estimates"].__getitem__)
+                estimates = result["estimates"]
+                planned["fallback"] = (
+                    min(runs, key=estimates.__getitem__) if estimates else runs[0]
+                )
     except Exception as error:  # never block the step on its sharding
         result, reason = None, str(error)
     return result, summary(step_key, result, reason)

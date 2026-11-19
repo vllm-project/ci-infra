@@ -2342,6 +2342,30 @@ def test_generator_shards_a_step_main_never_timed_by_its_timeout(
     )
 
 
+def test_a_fallback_plan_gets_a_coverage_check_with_owners_it_runs(
+    fake_global_config, checkout, monkeypatch
+):
+    """A fallback plan has no estimates to pick the least-loaded owner by;
+    the plan must survive and the coverage job must check its commands."""
+    fake_global_config["run_all"] = True
+    monkeypatch.setattr(rs, "fetch_timings", _FETCH_TIMINGS)
+    missing = urllib.error.HTTPError("u", 404, "not found", {}, None)
+    urlopen, _ = _urlopen_answering(missing)
+    monkeypatch.setattr(rs, "_timings_failures", 0)
+    monkeypatch.setattr(rs.urllib.request, "urlopen", urlopen)
+    [step] = _render(_step(automatic_shard=True, timeout_in_minutes=30))
+    assert step.parallelism == 3
+    plan = rs.unpack(step.env["RUNTIME_SHARD_PLAN"])
+    for planned in plan["commands"]:
+        assert planned["fallback"] == min(rs.owners(planned))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    [checked] = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).values()
+    assert [c["fallback"] for c in checked] == [
+        c["fallback"] for c in plan["commands"]
+    ]
+
+
 def test_generator_shards_a_step_whose_files_main_never_timed(
     fake_global_config, checkout, monkeypatch
 ):
@@ -3351,6 +3375,43 @@ def test_coverage_wait_reaches_its_deadline_and_still_runs_the_checker(
         tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
     ).is_file()
     assert len(job.commands) == 2  # the checker runs next, even after the wait
+
+
+def test_coverage_wait_survives_an_unreadable_state_under_bash_e(
+    fake_global_config, checkout, tmp_path
+):
+    """The agent runs commands under `bash -e`: a failed state read (an older
+    agent, a failed API call) reads as unfinished, not as the job's exit."""
+    fake_global_config["run_all"] = True
+    [step] = _render(_step(automatic_shard=True))
+    group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
+    job = buildkite_step.shard_coverage_step([group])
+    deadline = job.env["RUNTIME_SHARD_COVERAGE_DEADLINE"]
+    agent = tmp_path / "buildkite-agent"
+    agent.write_text('#!/bin/sh\necho "fatal: no such step" >&2\nexit 1\n')
+    agent.chmod(0o755)
+    date = tmp_path / "date"
+    date.write_text(f'#!/bin/sh\n[ "$1" = "+%s" ] && {{ echo {deadline}; }} || exec /bin/date "$@"\n')
+    date.chmod(0o755)
+    run = subprocess.run(
+        ["bash", "-e", "-c", job.commands[0].replace("$$", "$")],
+        env=dict(
+            os.environ,
+            PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            CI_SELECTOR_COLLECT_WAIT_FOR="model-executor",
+            RUNTIME_SHARD_COVERAGE_DEADLINE=deadline,
+            TMPDIR=str(tmp_path),
+            BUILDKITE_JOB_ID="coverage-job",
+        ),
+        capture_output=True,
+        text=True,
+        timeout=2,
+    )
+    assert run.returncode == 0, run.stderr
+    assert "wait deadline reached with model-executor (state unknown)" in run.stdout
+    assert (
+        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
+    ).is_file()
 
 
 def test_coverage_wait_reports_pending_without_shell_errors(
