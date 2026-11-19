@@ -148,7 +148,7 @@ A daily Buildkite pipeline (`.buildkite/pipelines/rebuild-cpu-ami.yml`, schedule
 
 1. **Build AMI**: Packer creates an AMI from the Buildkite Elastic Stack base, installs BuildKit as a standalone systemd service (not docker-container driver), and pre-pulls the latest postmerge Docker image layers using the bake config artifact from the most recent CI build.
 2. **Update SSM**: Stores the new AMI ID in AWS SSM Parameter Store.
-3. **Update Launch Templates**: Creates new EC2 Launch Template versions for premerge, postmerge, and release CPU queues, then updates Auto Scaling Groups. Existing instances cycle out naturally (`TerminateInstanceAfterJob=true`).
+3. **Update Launch Templates**: Creates new EC2 Launch Template versions for the postmerge and release CPU queues, then updates Auto Scaling Groups. `cpu_queue_premerge_us_east_1` is skipped: it runs Elastic CI Stack v7, which must not run this v6-based AMI. Existing instances cycle out naturally (`TerminateInstanceAfterJob=true`).
 4. **Cleanup**: Retains the 3 most recent old AMIs for rollback, deletes older ones and their snapshots.
 
 The warm-cache AMI is used by the `cpu_queue_*_us_east_1` queues and release queues.
