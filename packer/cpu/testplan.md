@@ -161,9 +161,11 @@ version guard inspects), and its hosted `aws-stack.yml` maps `linuxamd64` to
    image's agent binary is present and was not replaced by an older pinned one.
 6. Actual agent registration, checkout and a real job can only be validated
    during the private Terraform stack update, when the stack's user-data boots
-   instances from the canary AMI. In the private repository, point a separate
-   SSM parameter at the canary AMI, rebuild the queue's stack at
-   `<new-stack-version>` and switch the launch template in the same update.
-   Preserve the previous launch template version for rollback and let running
-   jobs finish naturally.
-7. Deregister the canary AMI manually once the rollout is confirmed.
+   instances from the canary AMI. In the private repository, point the queue's
+   stack at the canary AMI (by `ImageId`, or a separate SSM parameter) and move
+   it to `<new-stack-version>` in the same update. The update replaces the
+   Auto Scaling group (`AutoScalingReplacingUpdate: WillReplace`), which
+   terminates the remaining workers, so pause the queue's dispatch and wait for
+   its running jobs to finish before applying.
+7. Deregister the canary AMI manually only after all references have been
+   removed and it is no longer needed for rollback.

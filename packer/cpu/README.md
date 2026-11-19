@@ -93,7 +93,9 @@ build step then:
 Canary cleanup is deliberately manual: an age-based rule could deregister an
 AMI that an SSM parameter or launch template still references, deleting a live
 image. Automatic canary cleanup waits for a reference-aware retention
-workflow; until then deregister canary AMIs by hand when done.
+workflow; until then deregister a canary AMI by hand, only after no stack,
+launch template or SSM parameter references it and it is no longer needed
+for rollback.
 
 The publish steps (update SSM, update launch templates, cleanup) are skipped
 for any non-empty `CANARY_STACK_VERSION`, even on `main`, so a canary build
