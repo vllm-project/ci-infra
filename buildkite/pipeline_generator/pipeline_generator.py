@@ -28,6 +28,7 @@ from buildkite_step import (
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
     one_job_annotation,
+    shard_coverage_step,
     kernrec_collect_group,
     kernrec_amd_enabled,
     kernrec_enabled,
@@ -250,6 +251,9 @@ class PipelineGenerator:
         one_job = one_job_annotation(buildkite_group_steps)
         if one_job:
             runtime_shard.annotate("one-job", one_job, "warning")
+        coverage = shard_coverage_step(buildkite_group_steps)
+        if coverage:
+            collect.append(coverage)
         if collect:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
