@@ -12,10 +12,11 @@ version=3.138.2
 # the default is the real path.
 stable_agent=${BUILDKITE_AGENT_STABLE_PATH:-/usr/bin/buildkite-agent-stable}
 if [[ -x "$stable_agent" ]] && version_output=$("$stable_agent" --version 2>/dev/null); then
-  # Keep a prerelease suffix so exact mode rejects e.g. 3.138.2-beta.1.
+  # Keep a prerelease suffix in the token, then never keep a prerelease:
+  # sort -V would rank 3.138.2-beta.1 above the stable 3.138.2 pin.
   installed=$(grep -oE '[0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?' <<<"$version_output" | head -n 1 || true)
   keep=false
-  if [[ -n "$installed" ]]; then
+  if [[ -n "$installed" && "$installed" != *-* ]]; then
     if [[ "${REQUIRE_EXACT_AGENT_VERSION:-false}" == "true" ]]; then
       if [[ "$installed" == "$version" ]]; then keep=true; fi
     elif [[ "$(printf '%s\n%s\n' "$version" "$installed" | sort -V | head -n 1)" == "$version" ]]; then
