@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
@@ -263,6 +263,14 @@ def _get_timeout_in_minutes(
     return timeout_in_minutes
 
 
+# A failed step gets its own GitHub commit status next to the build's. Buildkite
+# posts a step-level status once per step, its parallel jobs folded, and the
+# condition keeps it to hard failures: a passing, soft-failed or retry-recovered
+# step posts nothing, so a green build makes no extra GitHub requests.
+STEP_STATUS_PREFIX = "ci/step: "
+_LEADING_EMOJI = re.compile(r"^(:[\w+-]+:\s*)+")
+
+
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -284,6 +292,18 @@ class BuildkiteCommandStep(BaseModel):
     # Not selected to run: left out of the pipeline and offered in the
     # "Run more jobs" input step instead (see split_deferred_steps).
     deferred: bool = Field(default=False, exclude=True)
+
+    @computed_field
+    def notify(self) -> List[Dict[str, Any]]:
+        """The step's failure status, named by its label as written, so after
+        " Shard %N/%t" is added; GitHub doesn't render Buildkite's emoji."""
+        name = _LEADING_EMOJI.sub("", self.label).removesuffix(" Shard %N/%t")
+        return [
+            {
+                "github_commit_status": {"context": STEP_STATUS_PREFIX + name},
+                "if": 'step.outcome == "hard_failed"',
+            }
+        ]
 
     def to_yaml(self):
         return {
