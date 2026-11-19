@@ -73,9 +73,10 @@ _ZN9deep_gemm...
   it must agree with the file when present.
 
 `kernel_table.py` reads a `sync=1` file with no error lines and a whole last
-line as complete. Other files, and every ROCm file, need the footer or must
-be idle. The table's stats print `callback_missed` and
-`rows_usable_footer_rule` (the footer rule alone).
+line as complete, for both backends (ROCm names kernels from the SDK's enqueue
+callback; see ROCM.md). Other files need the footer or must be idle. The
+table's stats print `callback_missed` and `rows_usable_footer_rule` (the
+footer rule alone).
 
 ## What it sees
 

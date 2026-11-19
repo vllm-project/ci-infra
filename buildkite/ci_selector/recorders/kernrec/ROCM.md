@@ -46,11 +46,11 @@ Use a fresh output directory for each run. Preserve any required existing
 `LD_PRELOAD` entries. Preload the SDK, and name the recorder in
 `ROCP_TOOL_LIBRARIES`. Torch import initializes the SDK before the first GPU
 operation; forking after that point cannot record child kernels. A forked child
-that loads GPU code writes `# error=gpu_use_after_fork`, which keeps the trace
-incomplete; children that exec or never load GPU code leave no file. Allow workers to
-finish shutdown: force-killed processes leave incomplete traces. Setup leaves
-collection unavailable when another tool is already named in
-`ROCP_TOOL_LIBRARIES`.
+that loads GPU code or enqueues a kernel writes `# error=gpu_use_after_fork`,
+which keeps the trace incomplete; children that exec or never touch the GPU
+leave no file. With `KERNREC_SYNC=0`, allow workers to finish shutdown:
+force-killed processes then leave incomplete traces. Setup leaves collection
+unavailable when another tool is already named in `ROCP_TOOL_LIBRARIES`.
 
 `torch.profiler` keeps working in a recorded process. The SDK collects its
 clients once, at initialization, which the configured recorder triggers as
@@ -67,14 +67,29 @@ another interpreter) still records completely, but its profiler is blind.
 Each process that initializes the SDK writes a durable header before kernel work:
 
 ```text
-# kernrec v1 backend=rocm recorder=rocprofiler-sdk activity=1 pid=4242 ppid=4200 exe=...
+# kernrec v1 backend=rocm recorder=rocprofiler-sdk activity=1 sync=1 pid=4242 ppid=4200 exe=...
 # gpu_active
 _Z...native_kernel...
 triton_kernel_name
 # end records=42 unique=2 dropped=0 errors=0 unresolved=0
 ```
 
-Only dispatched kernels are written. Code-object registration supplies names;
+Each name is written with one `write(2)` the first time it is enqueued, from the
+SDK's kernel-dispatch callback (`ENQUEUE`, enter phase), which runs on the
+submitting thread before the packet is written to the hardware queue, graph
+replays included. The header says `sync=1`, and the file is complete even if the
+process is SIGKILLed or leaves through `os._exit`. `KERNREC_SYNC=0` turns the
+callback off and restores the footer rule. The buffered dispatch records run
+alongside as the cross-check: a name they deliver that no callback wrote is
+logged as `# error=callback-missed <name>`, and an enqueue whose kernel ID has
+no registered symbol as `# error=callback-unresolved`.
+
+The callback costs throughput, almost all of it inside the SDK (a callback that
+returns at once costs the same). On MI355X with SDK 1.3.5, Qwen3-0.6B decode
+lost about 12% against buffer tracing alone with HIP graphs, and about 1%
+eager.
+
+Only enqueued kernels are written. Code-object registration supplies names;
 loading a code object alone is not execution evidence. Normalization removes only
 a terminal `.kd` descriptor suffix. Names remain mangled so the build map can join
 them without losing template specializations.
@@ -82,7 +97,8 @@ them without losing template specializations.
 The SDK recorder uses lossless buffers, reports callback loss counts, and flushes
 periodically (`KERNREC_FLUSH_MS`, default 1000). It retains names flushed before an
 abrupt exit. An unresolved dispatch ID, recorder error, dropped record, missing
-footer, or GPU use after fork prevents the trace from justifying a skipped test.
+footer without `sync=1`, or GPU use after fork prevents the trace from justifying
+a skipped test.
 The exception is a process that never loaded GPU code (no `# gpu_active` line):
 it cannot have dispatched kernels, so it may exit without a footer, e.g. a
 daemon killed at shutdown. A clean footer describes the **observed processes**;

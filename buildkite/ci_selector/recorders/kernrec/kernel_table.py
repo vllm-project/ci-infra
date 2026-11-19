@@ -70,8 +70,9 @@ def read_recording(path: Path, footer_rule: bool = False) -> tuple[set[str], int
     - a validated native footer;
     - an idle process whose header reports activity and that never went
       active (ROCm: loaded GPU code; CUDA: created a context);
-    - a CUDA launch-time recording (header sync=1) with no error lines and a
-      whole last line; a footer, if present, must validate.
+    - a launch-time recording (header sync=1; CUDA: driver-API launch
+      callbacks, ROCm: kernel-dispatch enqueue callbacks) with no error lines
+      and a whole last line; a footer, if present, must validate.
 
     footer_rule=True ignores sync=1.
 
@@ -123,7 +124,7 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
                     # launch (ROCm: GPU code loaded; CUDA: first context).
                     # Only headers that say so promise the marker.
                     reports_activity = fields.get("activity") == "1"
-                    sync = fields.get("sync") == "1" and fields.get("backend") == "cuda"
+                    sync = fields.get("sync") == "1"
                 elif line == "# gpu_active":
                     active = True
                 elif line.startswith("# dropped="):
