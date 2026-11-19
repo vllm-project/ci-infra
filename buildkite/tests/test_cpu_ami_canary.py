@@ -196,6 +196,18 @@ def test_failing_version_output_falls_back_to_install(tmp_path):
     assert result.returncode != 0  # stops at the stubbed download
 
 
+def test_failing_version_with_output_falls_back_to_install(tmp_path):
+    # A version probe that fails is not trusted even if it printed a version.
+    agent = (
+        "#!/bin/bash\n"
+        'if [[ "$1" == "--version" ]]; then echo "buildkite-agent version 4.1.0"; exit 1; fi\n'
+        "exit 0\n"
+    )
+    result, install_reached = run_install_agent(tmp_path, agent)
+    assert install_reached
+    assert result.returncode != 0  # stops at the stubbed download
+
+
 def test_unparsable_version_output_falls_back_to_install(tmp_path):
     agent = (
         "#!/bin/bash\n"
@@ -223,6 +235,15 @@ def test_exact_mode_replaces_newer_base_agent(tmp_path):
     # AGENT_ONLY release bakes pin exactly: a newer base agent is not kept.
     result, install_reached = run_install_agent(
         tmp_path, version_agent("4.1.0"), require_exact=True
+    )
+    assert install_reached
+    assert result.returncode != 0  # stops at the stubbed download
+
+
+def test_exact_mode_replaces_prerelease_of_pin(tmp_path):
+    # Release workers carry the stable pin, not a prerelease of the same number.
+    result, install_reached = run_install_agent(
+        tmp_path, version_agent(f"{PINNED_AGENT_VERSION}-beta.1"), require_exact=True
     )
     assert install_reached
     assert result.returncode != 0  # stops at the stubbed download

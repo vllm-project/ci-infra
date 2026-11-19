@@ -11,8 +11,9 @@ version=3.138.2
 # the pinned install. BUILDKITE_AGENT_STABLE_PATH only exists as a test seam;
 # the default is the real path.
 stable_agent=${BUILDKITE_AGENT_STABLE_PATH:-/usr/bin/buildkite-agent-stable}
-if [[ -x "$stable_agent" ]]; then
-  installed=$("$stable_agent" --version 2>/dev/null | grep -oE '[0-9]+(\.[0-9]+)+' | head -n 1 || true)
+if [[ -x "$stable_agent" ]] && version_output=$("$stable_agent" --version 2>/dev/null); then
+  # Keep a prerelease suffix so exact mode rejects e.g. 3.138.2-beta.1.
+  installed=$(grep -oE '[0-9]+(\.[0-9]+)+(-[0-9A-Za-z.]+)?' <<<"$version_output" | head -n 1 || true)
   keep=false
   if [[ -n "$installed" ]]; then
     if [[ "${REQUIRE_EXACT_AGENT_VERSION:-false}" == "true" ]]; then

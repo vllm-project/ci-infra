@@ -100,7 +100,9 @@ for rollback.
 The publish steps (update SSM, update launch templates, cleanup) are skipped
 for any non-empty `CANARY_STACK_VERSION`, even on `main`, so a canary build
 never rolls anything out. `CANARY_STACK_VERSION` is never set in the
-pipeline's env, so scheduled daily v6 builds are unaffected.
+pipeline's env, so scheduled daily v6 builds are unaffected. Don't combine it
+with `AGENT_ONLY=1`: the agent-only bake runs first and ignores the canary
+version.
 
 After the canary AMI exists, point a separate SSM parameter / launch template
 at it (managed in the private Terraform repository) and validate a job on it
