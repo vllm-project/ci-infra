@@ -263,10 +263,10 @@ def _get_timeout_in_minutes(
     return timeout_in_minutes
 
 
-# A failed step gets its own GitHub commit status next to the build's. Buildkite
-# posts a step-level status once per step, its parallel jobs folded, and the
-# condition keeps it to hard failures: a passing, soft-failed or retry-recovered
-# step posts nothing, so a green build makes no extra GitHub requests.
+# Each step gets its own GitHub commit status next to the build's. Buildkite
+# posts a step-level status per step, its parallel jobs folded, and the condition
+# keeps it to the final result: no pending or running updates, so one request per
+# step, and a retry that passes turns a red status green. Soft fails post nothing.
 STEP_STATUS_PREFIX = "ci/step: "
 _LEADING_EMOJI = re.compile(r"^(:[\w+-]+:\s*)+")
 
@@ -295,13 +295,13 @@ class BuildkiteCommandStep(BaseModel):
 
     @computed_field
     def notify(self) -> List[Dict[str, Any]]:
-        """The step's failure status, named by its label as written, so after
+        """The step's result status, named by its label as written, so after
         " Shard %N/%t" is added; GitHub doesn't render Buildkite's emoji."""
         name = _LEADING_EMOJI.sub("", self.label).removesuffix(" Shard %N/%t")
         return [
             {
                 "github_commit_status": {"context": STEP_STATUS_PREFIX + name},
-                "if": 'step.outcome == "hard_failed"',
+                "if": 'step.outcome == "passed" || step.outcome == "hard_failed"',
             }
         ]
 

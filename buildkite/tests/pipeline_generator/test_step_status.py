@@ -1,6 +1,6 @@
 from buildkite_step import BuildkiteCommandStep, BuildkiteGroupStep
 
-FAILED_ONLY = 'step.outcome == "hard_failed"'
+FINAL_RESULT = 'step.outcome == "passed" || step.outcome == "hard_failed"'
 
 
 def _step(label, **fields):
@@ -15,7 +15,7 @@ def test_a_sharded_step_reports_one_status_named_without_its_shard_suffix():
             "github_commit_status": {
                 "context": "ci/step: (L4) PyTorch Compilation Passes"
             },
-            "if": FAILED_ONLY,
+            "if": FINAL_RESULT,
         }
     ]
 
@@ -34,4 +34,4 @@ def test_steps_inside_a_group_carry_their_status_when_the_group_is_written():
     written = group.dict(exclude_none=True)["steps"][0]
 
     assert written["notify"][0]["github_commit_status"]["context"] == "ci/step: Kernels"
-    assert written["notify"][0]["if"] == FAILED_ONLY
+    assert written["notify"][0]["if"] == FINAL_RESULT
