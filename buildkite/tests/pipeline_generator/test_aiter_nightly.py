@@ -85,6 +85,8 @@ NIGHTLY_JOBS = {
     "native-on-image-build",
     buildkite_step._generate_step_key("Unkeyed MI300"),
     "amd-cpu-tool",
+    # direct-mi355 is sharded, so its coverage check runs too.
+    "runtime-shard-coverage",
 }
 
 
@@ -252,7 +254,9 @@ def test_ignores_noauto_docs_only_and_the_recorders(build, monkeypatch):
 
     assert set(jobs) == NIGHTLY_JOBS  # no block steps, not skipped
     pipeline = build.pipeline_file.read_text()
-    for marker in ("kernrec", "fnrec", "VLLM_KERNEL_SYMBOL_MAP"):
+    # Not bare "fnrec": a shard job's coverage dir defaults under
+    # /tmp/fnrec-no-checkout, the shared checkout fallback, with fnrec off.
+    for marker in ("kernrec", "recorders/fnrec", ".fnrec/", "VLLM_KERNEL_SYMBOL_MAP"):
         assert marker not in pipeline
 
 
@@ -265,7 +269,10 @@ def test_shards_and_records_only_its_own_jobs(build, monkeypatch):
     assert jobs["direct-mi355"]["parallelism"] == 3
     record = build.selector_record
     assert record["skipped"].startswith("AITER nightly")
-    assert set(record["legacy_keys"]) == set(record["scheduled_keys"]) == set(jobs)
+    # The coverage check is the generator's own job, not a selected step.
+    assert set(record["legacy_keys"]) == set(record["scheduled_keys"]) == (
+        set(jobs) - {"runtime-shard-coverage"}
+    )
 
 
 @pytest.mark.parametrize("value", ["0", "true"])
