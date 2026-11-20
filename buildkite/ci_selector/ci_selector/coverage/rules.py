@@ -18,9 +18,12 @@ from __future__ import annotations
 import os
 import subprocess
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
+from ..codemap.state import PipelineData
 from ..handwritten import TESTS_SCOPE
 from .changed_funcs import Query
 from .phase import DEFAULT_MODE, PhaseMode, ran_changed_lines, row_shows_use
@@ -93,24 +96,48 @@ class RowKeys:
         # Filled by `restrict_to`; read into the reason histogram so a lost
         # add candidate is visible rather than merely absent.
         self.restricted_away: list[str] = []
+        # Also from `restrict_to`: steps that are there but match more than
+        # one way, so no row is trusted. Counted apart from absent ones.
+        self.restricted_ambiguous: list[str] = []
+        # step_id at `restrict_to`'s ref -> the table-commit step_id it was
+        # recorded under, for steps re-keyed after a rename. `key_for` reads
+        # the row through the old id: the table filed it under that spelling.
+        self.recorded_as: dict[str, str] = {}
 
     @classmethod
     def resolve(cls, table: Table, repo: Path, ref: str) -> RowKeys:
-        from ci_selector.codemap.worktree import state_for
+        """Resolve the table's rows against the pipeline yaml at `ref`, the
+        commit the rows were recorded at.
 
-        return cls.resolve_from_state(set(table._rows), state_for(repo, ref))
+        Reads the yaml and nothing else: matching rows to steps needs only the
+        steps, not the import graph a whole `RepoState` there would build.
+        """
+        from ci_selector.codemap.pipeline.buildkite import (
+            load_pipeline_configs,
+            load_steps,
+        )
+        from ci_selector.codemap.worktree import worktree_at
+
+        tree = worktree_at(repo, ref)
+        pipelines = [
+            PipelineData(config, load_steps(tree, config), {})
+            for config in load_pipeline_configs(tree)
+        ]
+        return cls.resolve_from_pipelines(set(table._rows), pipelines)
 
     @classmethod
-    def resolve_from_state(cls, rows: set[str], state) -> RowKeys:
-        """`resolve` against a state the caller already holds.
+    def resolve_from_pipelines(
+        cls, rows: set[str], pipelines: list[PipelineData]
+    ) -> RowKeys:
+        """`resolve` against pipelines the caller already holds.
 
-        The kernel record resolves at the PR's base, whose state `decide`
-        was handed, so this costs nothing where `resolve` builds a worktree.
+        The kernel and library records resolve at the PR's base, whose state
+        `decide` was handed, so they pass its pipelines and build nothing.
         `rows` is the table's row keys, whichever table.
         """
         spellings: dict[str, str] = {}
         match_rate: dict[str, float] = {}
-        for pipeline in state.pipelines:
+        for pipeline in pipelines:
             idents = set()
             for step in pipeline.steps:
                 ident = step.buildkite_key or step.label
@@ -122,7 +149,7 @@ class RowKeys:
         resolved = cls.from_match_rates(match_rate, spellings)
         resolved.steps = {
             step.step_id: step
-            for pipeline in state.pipelines
+            for pipeline in pipelines
             if pipeline.config.name in resolved.owners
             for step in pipeline.steps
         }
@@ -168,35 +195,63 @@ class RowKeys:
     def restrict_to(
         self,
         step_ids: frozenset[str],
-        identities: frozenset[tuple] = frozenset(),
+        identities: Mapping[tuple, tuple] = MappingProxyType({}),
     ) -> None:
-        """Drop addable steps that do not exist at the PR's base.
+        """Keep only addable steps that exist at `step_ids`' ref, under the id
+        they have there.
 
         Two clocks: these ids come from the TABLE's commit while the emitter
-        names steps from the base. Naming a step that is not there makes the
-        emitter omit the variable, and that runs everything.
+        names steps from the ref (the PR's base). Naming a step that is not
+        there makes the emitter omit the variable, and that runs everything.
 
         A step survives if its `step_id` OR its rename-tolerant `Step.identity`
-        is at base. Id alone was the defect, since it falls back to the label
-        and a reword gives one step two ids.
+        is there. Id alone was the defect, since it falls back to the label
+        and a reword gives one step two ids. `identities` maps each identity
+        to the steps holding it there.
+
+        A step kept by identity is re-keyed to the id it has there, with that
+        step object, since the emitter names steps from there. Its row stays
+        the table's, read through the old id (`recorded_as`). Dropped and
+        counted in `restricted_ambiguous` instead, rather than guessed at:
+        - an identity two or more steps hold there (twins),
+        - a target id a step already holds by id (the id match is stronger),
+        - a target id two table steps both claim by identity.
 
         An empty id set means we could not read the base pipeline, which is not
         the same as "no step is there", so it changes nothing.
         """
         if not step_ids:
             return
-        kept = {
-            k: v
-            for k, v in self.steps.items()
-            if k in step_ids or getattr(v, "identity", None) in identities
-        }
+        kept = {k: v for k, v in self.steps.items() if k in step_ids}
+        claims: dict[str, list[tuple[str, object]]] = defaultdict(list)
+        ambiguous: set[str] = set()
+        for old_id, step in self.steps.items():
+            if old_id in kept:
+                continue
+            there = identities.get(getattr(step, "identity", None), ())
+            if len(there) == 1:
+                claims[there[0].step_id].append((old_id, there[0]))
+            elif there:
+                ambiguous.add(old_id)
+        recorded_as: dict[str, str] = {}
+        for new_id, claimants in claims.items():
+            if new_id in kept or len(claimants) > 1:
+                ambiguous.update(old_id for old_id, _ in claimants)
+                continue
+            ((old_id, step),) = claimants
+            kept[new_id] = step
+            recorded_as[new_id] = old_id
         # Counted, not just dropped. This stage used to lose candidates with no
         # trace in the reason histogram, which is how 118 went unnoticed.
-        self.restricted_away = sorted(set(self.steps) - set(kept))
+        survived = set(kept) - set(recorded_as) | set(recorded_as.values())
+        self.restricted_away = sorted(set(self.steps) - survived - ambiguous)
+        self.restricted_ambiguous = sorted(ambiguous)
         self.steps = kept
+        self.recorded_as = recorded_as
 
     def key_for(self, step_id: str) -> str | None:
         """The row this step may consult, or None when it may consult none."""
+        step_id = self.recorded_as.get(step_id, step_id)
         pipeline, sep, rest = step_id.partition(":")
         if not sep or not rest or pipeline not in self.owners:
             return None
@@ -682,6 +737,7 @@ def _add_from_rows(
     # never enter `candidates()`, so without this they are invisible: not a
     # zero in the histogram, an absence from it.
     reading.reasons["candidate-absent-at-base"] += len(keys.restricted_away)
+    reading.reasons["candidate-ambiguous-at-base"] += len(keys.restricted_ambiguous)
 
     missed = failed_missed or {}
     if not (missed and reading.added):

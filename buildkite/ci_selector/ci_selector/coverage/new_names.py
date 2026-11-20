@@ -17,7 +17,18 @@ module level or in a class body, even a new one (a registry, a decorator, a
 default argument), a string equal to the name, a mention in a changed
 non-Python file, or one owned by a function the diff did not change (a
 different symbol with the same name). A name that existed at base but no row
-ever recorded is out of scope; that is missing data, not new code.
+ever recorded is out of scope; that is missing data, not new code. So is a
+name the file bound by import or assignment at base.
+
+Three things run a def without naming it, so its references prove nothing:
+- a decorator, which is handed the function and may register or wrap it;
+- the interpreter, which runs any dunder through syntax or the import system;
+- attribute lookup, from a base class or a library, by a name that may be
+  built at run time and spelled nowhere in the repo.
+Each keeps the name unknown, unless what can run it is itself narrow: a def
+inside a function exists only once that function runs, and an instance of a
+new class nothing outside this file can build exists only where the class is
+named. So a new method of any other class never resolves.
 
 vllm#58684 added four private helpers, all called only from the changed
 `plan` and `build`; vllm#58664 added a wrapper only its new test calls. Both
@@ -29,6 +40,7 @@ from __future__ import annotations
 import ast
 import builtins
 import subprocess
+import symtable
 
 import regex as re
 
@@ -59,19 +71,68 @@ def _leaf(qualname: str) -> str:
     return qualname.rsplit(".", 1)[-1]
 
 
-def _dunder_class(name: str, import_time: frozenset[str]) -> str | None:
-    """The class `name` is a dunder of, or None.
+def _is_dunder(leaf: str) -> bool:
+    return len(leaf) > 4 and leaf[:2] == leaf[-2:] == "__"
 
-    A dunder runs on the class or an instance through syntax (`==`, `with`,
-    a call), so its own references say nothing. Matched by leaf, vllm#58975's
-    RetryableRequestError.__init__ met every super().__init__ in the diff and
-    kept 53 unrelated steps while the class itself resolved. So it follows
-    its class instead.
-    """
-    owner, _, leaf = name.rpartition(".")
-    if len(leaf) > 4 and leaf[:2] == leaf[-2:] == "__" and owner in import_time:
-        return owner
-    return None
+
+def _bound(source: str, path: str) -> frozenset[str]:
+    """Qualnames the module or a class body binds by import or assignment:
+    names that exist though no code object carries them, so unchanged code
+    may already use them."""
+    out: set[str] = set()
+
+    def visit(table: symtable.SymbolTable, prefix: str) -> None:
+        for symbol in table.get_symbols():
+            if symbol.is_imported() or symbol.is_assigned():
+                out.add(prefix + symbol.get_name())
+        for child in table.get_children():
+            if child.get_type() == "class":
+                visit(child, f"{prefix}{child.get_name()}.")
+
+    visit(symtable.symtable(source, path, "exec"), "")
+    return frozenset(out)
+
+
+def _method_class(name: str, import_time: frozenset[str]) -> str | None:
+    """The class `name` is a method or dunder of, or None for a function."""
+    owner = name.rpartition(".")[0]
+    return owner if owner and owner in import_time else None
+
+
+def _transparent(node: ast.expr, bound: dict[str, int] | None) -> bool:
+    """A decorator that hands the function back keeping nothing: a builtin
+    type (staticmethod, classmethod, property) the file does not rebind."""
+    return (
+        isinstance(node, ast.Name)
+        and bound is not None
+        and node.id not in bound
+        and type(getattr(builtins, node.id, None)) is type
+    )
+
+
+def _handed_off(tree: ast.Module) -> frozenset[str]:
+    """Qualnames, as CPython spells them, of the module- and class-level
+    functions a decorator other than a transparent one receives. Classes are
+    skipped: a decorator cannot rerun a class body, and the class's methods
+    are judged on their own."""
+    bound = _bindings(tree)
+    out: set[str] = set()
+
+    def visit(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(
+                child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                visit(child, prefix)
+                continue
+            qualname = prefix + child.name
+            if isinstance(child, ast.ClassDef):
+                visit(child, qualname + ".")
+            elif not all(_transparent(d, bound) for d in child.decorator_list):
+                out.add(qualname)
+
+    visit(tree, "")
+    return frozenset(out)
 
 
 def _bindings(tree: ast.Module) -> dict[str, int] | None:
@@ -149,27 +210,35 @@ def _ancestors(tree: ast.Module, cls: str) -> set[str] | None:
     return seen - {cls}
 
 
-def _scanned(repo, head: str | None, names: set[str]) -> bool:
-    """Whether a file calling __subclasses__() names one of `names`: the
-    benchmark datasets and CLI subcommands find their classes that way.
-    True when git cannot say."""
+def _grep(repo, head: str, files: list[str], *flags: str) -> list[str] | None:
+    """Files at `head` matching, or None when git cannot say."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "grep", "-l", *flags, head, "--", *files],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode not in (0, 1):
+        return None
+    return [ln.removeprefix(f"{head}:") for ln in proc.stdout.splitlines() if ln]
+
+
+def _scanners(repo, head: str | None) -> list[str] | None:
+    """Files calling __subclasses__(): the benchmark datasets and CLI
+    subcommands find their classes that way. None when git cannot say."""
     if head is None:
+        return None
+    return _grep(repo, head, [], "-F", "__subclasses__")
+
+
+def _scanned(repo, head: str | None, names: set[str], scans: list[str] | None) -> bool:
+    """Whether one of `scans` names one of `names`. True when git cannot say."""
+    if scans is None or head is None:
         return True
-
-    def grep(files: list[str], *flags: str) -> list[str] | None:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "grep", "-l", *flags, head, "--", *files],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode not in (0, 1):
-            return None
-        return [ln.removeprefix(f"{head}:") for ln in proc.stdout.splitlines() if ln]
-
-    scans = grep([], "-F", "__subclasses__")
     if not scans:
-        return scans is None
-    named = grep(scans, "-w", "-E", "|".join(sorted(re.escape(n) for n in names)))
+        return False
+    named = _grep(
+        repo, head, scans, "-w", "-E", "|".join(sorted(re.escape(n) for n in names))
+    )
     return named is None or bool(named)
 
 
@@ -189,6 +258,7 @@ class _Refs:
         self.tree = ast.parse(source)
         # Module and class bodies, which every importer runs.
         self.import_time = import_time_names(source, path)
+        self.handed_off = _handed_off(self.tree)
         header: dict[int, frozenset[str]] = {}
         for node in ast.walk(self.tree):
             if isinstance(
@@ -258,7 +328,11 @@ def resolve(
             continue
         before = _read(repo, base, path)
         try:
-            existed = names_of(before, path) if before is not None else frozenset()
+            existed = (
+                names_of(before, path) | _bound(before, path)
+                if before is not None
+                else frozenset()
+            )
         except Exception:
             continue
         # A new file's module body is new too; it is reached only by import,
@@ -288,33 +362,43 @@ def resolve(
     # Where each candidate is referenced, as (path, owners). None means a
     # reference we cannot place, which blocks.
     uses: dict[tuple[str, str], list[tuple[str, frozenset[str]]] | None] = {}
-    # A lambda or comprehension runs only when the function holding it does,
-    # and nothing can name it, so it follows its enclosing function. A dunder
-    # follows its class, and only a new class built nowhere but where it is
-    # named can vouch for it; any other class's instances may be anywhere.
+    # Anything defined inside a function follows that function, whatever a
+    # decorator does with it. A decorated def anywhere else stays unknown. A
+    # method or dunder follows its class when the class is new and sealed,
+    # and stays unknown otherwise.
     nested: dict[tuple[str, str], str] = {}
     sealed: dict[tuple[str, str], bool] = {}
+    scans: list[list[str] | None] = []
+
+    def is_sealed(path: str, cls: str, new: frozenset[str]) -> bool:
+        if cls not in new:
+            return False
+        if (path, cls) not in sealed:
+            up = _ancestors(changed_py[path].tree, cls)
+            if up and not scans:
+                scans.append(_scanners(repo, head))
+            sealed[(path, cls)] = up is not None and not (
+                up and _scanned(repo, head, up, scans[0])
+            )
+        return sealed[(path, cls)]
+
     for path, names in candidates.items():
         refs = changed_py[path]
         new = frozenset(names)
         for name in new:
-            if "<" in _leaf(name) and name != "<module>":
+            leaf = _leaf(name)
+            if ".<locals>." in name:
                 nested[(path, name)] = name.rsplit(".<locals>.", 1)[0]
                 names.discard(name)
                 continue
-            cls = _dunder_class(name, refs.import_time)
-            if cls is None:
+            if name in refs.handed_off:
+                names.discard(name)
                 continue
-            names.discard(name)
-            if cls not in new:
-                continue
-            if (path, cls) not in sealed:
-                up = _ancestors(refs.tree, cls)
-                sealed[(path, cls)] = up is not None and not (
-                    up and _scanned(repo, head, up)
-                )
-            if sealed[(path, cls)]:
-                nested[(path, name)] = cls
+            cls = _method_class(name, refs.import_time)
+            if cls is not None or _is_dunder(leaf):
+                names.discard(name)
+                if cls is not None and is_sealed(path, cls, new):
+                    nested[(path, name)] = cls
     for path, names in candidates.items():
         for name in names:
             leaf = _leaf(name)

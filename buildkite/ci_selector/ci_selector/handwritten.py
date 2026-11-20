@@ -44,12 +44,14 @@ FAMILY_DEVICE_PREFIXES: dict[str, tuple[str, ...]] = {
     "cuda": ("h100", "h200", "a100", "b200", "gh200", "dgx"),
     "amd": ("mi",),
     "tpu": ("tpu",),
+    # A prefix, so intel_gpu_k8s (the same Arc B70 cards, scheduled through
+    # Kubernetes) and any later intel_gpu_* queue land in the family.
+    "xpu": ("intel_gpu",),
 }
 FAMILY_DEVICE_EXACT: dict[str, frozenset[str]] = {
     # Exact, not a prefix: "l4" would also match filename tokens.
     "cuda": frozenset({"l4"}),
     "cpu": frozenset({"intel_cpu", "arm_cpu", "amd_cpu"}),
-    "xpu": frozenset({"intel_gpu"}),
     "hpu": frozenset({"intel_hpu"}),
     "npu": frozenset({"ascend_npu"}),
 }
@@ -443,6 +445,7 @@ MIRROR_DEFAULT_DEPENDS_ON = (AMD_ARTIFACT_STEP,)
 # keep importing every one of these facts from the same place.
 AMD_ALWAYS_RUN_STEP_KEYS = _amd.AMD_ALWAYS_RUN_STEP_KEYS
 AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = _amd.AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES
+AMD_ROCM_STACK_FILES = _amd.AMD_ROCM_STACK_FILES
 
 # Step fields we model. Anything else lands in Step.extra, fails a drift test,
 # and is force-selected at run time, so a new generator feature cannot pass
@@ -529,6 +532,9 @@ MIRROR_OVERRIDABLE = {
     # Listed, never honored: the generator passes the parent's parallelism, so
     # a mirror asking for its own is silently ignored upstream.
     "parallelism",
+    # Only splits a mirror job into shards. Whether the job runs, and which
+    # tests it runs, never read it, so selection needs nothing from it.
+    "automatic_shard",
 }
 
 # The env var the generator reads. Absent means "your rules"; present means

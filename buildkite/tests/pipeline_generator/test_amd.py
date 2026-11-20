@@ -6,6 +6,7 @@ import pytest
 
 import amd
 import buildkite_step
+import pipeline_generator
 from amd import is_amd_device
 from constants import AgentQueue
 from step import Step, read_steps_from_job_dir
@@ -192,6 +193,8 @@ def test_amd_cpu_step_gets_only_the_repo_wide_retries():
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, False, "1"),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, True, "1"),
     ],
 )
 def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
@@ -214,7 +217,12 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert group_step.group == "Hardware-AMD Tests"
     # Optional, so it waits in the "Run more jobs" input step.
     assert command_step.deferred
-    tag = {"mi300_4": "MI300", "mi325_1": "MI325", "mi355_dpx": "MI355 DPX"}[device]
+    tag = {
+        "mi300_4": "MI300",
+        "mi325_1": "MI325",
+        "mi355_dpx": "MI355 DPX",
+        "mi300_dpx": "MI300 DPX",
+    }[device]
     assert command_step.label == f":amd: ({tag}) AMD direct test"
     assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
@@ -233,7 +241,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
         assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
-        if device == "mi355_dpx":
+        if device.endswith("_dpx"):
             assert "resources" not in container
         else:
             assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
@@ -288,7 +296,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
-@pytest.mark.parametrize("device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1)])
+@pytest.mark.parametrize(
+    "device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1), ("mi300_dpx", 1)]
+)
 def test_amd_device_rejects_conflicting_gpu_count(device, gpu_count):
     step = Step(
         label="AMD GPU count mismatch",
@@ -361,6 +371,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX),
     ],
 )
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
@@ -416,9 +427,12 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
 @pytest.mark.parametrize("optional", [False, True])
-def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+def test_rocm_stack_change_runs_only_amd_mirror(
+    fake_global_config, optional, stack_file
+):
+    fake_global_config["list_file_diff"] = [stack_file]
     step = Step(
         label="ROCm base mirrored test",
         group="Mirrors",
@@ -442,11 +456,77 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
 
 
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
+@pytest.mark.parametrize("optional", [False, True])
+@pytest.mark.parametrize("dind", [False, True])
+def test_rocm_stack_change_runs_standalone_amd_steps(
+    fake_global_config, optional, dind, stack_file
+):
+    fake_global_config["list_file_diff"] = [stack_file]
+    amd_step = Step(
+        label="AMD test",
+        group="Direct AMD",
+        key="amd-test",
+        device="mi300_1",
+        dind=dind,
+        optional=optional,
+        commands=["pytest tests/foo.py"],
+        source_file_dependencies=["vllm/"],
+    )
+    cuda_step = Step(
+        label="CUDA test",
+        group="Direct AMD",
+        key="cuda-test",
+        optional=optional,
+        commands=["pytest tests/foo.py"],
+        source_file_dependencies=["vllm/"],
+    )
+
+    assert buildkite_step._step_should_run(amd_step, [stack_file])
+    assert not buildkite_step._step_should_run(cuda_step, [stack_file])
+    assert not buildkite_step._step_should_run(amd_step, ["docker/Dockerfile.rocm"])
+
+
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
+def test_rocm_stack_change_respects_noauto_and_only_step_keys(
+    fake_global_config, monkeypatch, stack_file
+):
+    diff = [stack_file]
+    steps = [
+        Step(
+            label="AMD test",
+            key="amd-test",
+            device="mi300_1",
+            optional=True,
+            commands=["pytest tests/foo.py"],
+        ),
+        Step(
+            label="Mirrored test",
+            key="mirrored-test",
+            optional=True,
+            commands=["pytest tests/foo.py"],
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+    ]
+    assert pipeline_generator._legacy_keys(steps, diff) == [
+        "amd-test",
+        "amd-mirrored-test",
+    ]
+
+    fake_global_config["only_step_keys"] = frozenset({"amd-test"})
+    assert pipeline_generator._legacy_keys(steps, diff) == ["amd-test"]
+
+    fake_global_config["only_step_keys"] = None
+    monkeypatch.setenv("NOAUTO", "1")
+    assert pipeline_generator._legacy_keys(steps, diff) == []
+
+
 @pytest.mark.parametrize(
     "device,queue",
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX),
     ],
 )
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device, queue):
@@ -483,7 +563,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
     assert amd_command_step.plugins is not None
     pod_patch = amd_command_step.plugins[0]["kubernetes"]["podSpecPatch"]
     container = pod_patch["containers"][0]
-    if device == "mi355_dpx":
+    if device.endswith("_dpx"):
         assert "resources" not in container
     else:
         assert container["resources"] == {
@@ -492,7 +572,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
         }
 
 
-@pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx"])
+@pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx", "mi300_dpx"])
 def test_native_amd_no_gpu_preserves_allocation_contract(device):
     step = Step(
         label="Native AMD CPU test",
@@ -513,7 +593,7 @@ def test_native_amd_no_gpu_preserves_allocation_contract(device):
     container = command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
     container_env = {entry["name"]: entry for entry in container["env"]}
     assert container_env["VLLM_CI_EXPECTED_GPU_COUNT"]["value"] == "0"
-    if device == "mi355_dpx":
+    if device.endswith("_dpx"):
         assert "resources" not in container
     else:
         assert container["resources"] == {
@@ -767,6 +847,7 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
             ":amd: (MI325) Docker Build Metadata",
         ),
         ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
+        ("LM Eval Small Models", "mi300_dpx", ":amd: (MI300 DPX) LM Eval Small Models"),
         (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
         (":docker: Refresh ROCm base", "amd_cpu", ":docker: Refresh ROCm base"),
     ],

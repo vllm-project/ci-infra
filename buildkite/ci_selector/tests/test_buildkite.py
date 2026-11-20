@@ -385,6 +385,21 @@ def test_a_stray_mirror_key_is_recorded_against_the_mirror_not_the_parent():
     assert parent.step_id not in report.unknown_fields["gpu_kind"]
 
 
+@pytest.mark.parametrize("enrolled", [True, False])
+def test_a_mirror_automatic_shard_is_modelled_while_a_stray_key_still_flags(enrolled):
+    """A mirror's `automatic_shard` only splits an AMD job that already runs
+    into shards, so it must not force the mirror. Left unmodelled, it forced
+    every enrolled AMD mirror on every PR. A stray key beside it still does."""
+    report = LoadReport()
+    variant = _expand_mirror(
+        _parent_step(),
+        "amd",
+        {"device": "mi300_1", "automatic_shard": enrolled, "gpu_kind": "wat"},
+        report,
+    )
+    assert report.unknown_fields == {"gpu_kind": [variant.step_id]}
+
+
 def test_a_declared_mirror_label_is_modelled_rather_than_flagged():
     """Every mirror carries its own label, so leaving that field unmodelled
     force-selected all of them, and a forced step is not droppable. Kept beside

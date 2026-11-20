@@ -9,9 +9,10 @@ On by default. `VLLM_CI_SELECTOR` overrides it for one build:
   off     the selector does not run; today's rules, and no record
 
 PR, branch and main builds are selected; a main build diffs against its
-parent commit, as today's rules do there. Release-branch, nightly, run-all
-(the scheduled full CI runs), docs-only and AMD-only (`VLLM_CI_PLATFORM=amd`)
-builds, and builds that already name their steps (`VLLM_CI_ONLY_STEP_KEYS`),
+parent commit, as today's rules do there. Release-branch, nightly, AITER
+nightly, run-all (the scheduled full CI runs), docs-only and AMD-only
+(`VLLM_CI_PLATFORM=amd`) builds, and builds that already name their steps
+(`VLLM_CI_ONLY_STEP_KEYS`),
 keep today's rules. Any failure keeps them too: the selector cannot be fetched or run, it
 times out, it declines to name steps for another reason, or it names a step
 this generator does not know. When it declines because it cannot narrow the
@@ -36,7 +37,7 @@ import subprocess
 import tempfile
 import time
 import urllib.request
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional
 
 SELECTOR_ENV_VAR = "VLLM_CI_SELECTOR"
 DECISION_FILE = "ci_selector_decision.json"
@@ -45,6 +46,9 @@ CI_INFRA_REPO = "https://github.com/vllm-project/ci-infra.git"
 RECORD_URL = (
     "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/{recorder}/latest.json"
 )
+# Tells ci-select which function table to download instead of following
+# latest.json itself (ci_selector/scripts/fetch_functions.py reads it).
+FNREC_COMMIT_ENV = "CI_SELECTOR_FUNCTION_RECORD_COMMIT"
 # The whole selector run, fetches included. Past it the build keeps today's
 # rules rather than wait.
 SELECTOR_TIMEOUT_SECONDS = 20 * 60
@@ -74,6 +78,8 @@ def skip_reason(
         return "release branch build"
     if global_config.get("nightly") == "1":
         return "nightly build (runs every step)"
+    if global_config.get("aiter_nightly") == "1":
+        return "AITER nightly build (runs every AMD step)"
     if global_config.get("run_all"):
         return "run-all build (label or run_all_patterns)"
     if global_config.get("only_step_keys") is not None:
@@ -266,21 +272,26 @@ def _uv(workdir: str) -> str:
     return os.path.join(install_dir, "uv")
 
 
-def _latest(recorder: str) -> Optional[Dict[str, Any]]:
-    try:
-        with urllib.request.urlopen(
-            RECORD_URL.format(recorder=recorder), timeout=30
-        ) as r:
-            return json.loads(r.read())
-    except Exception as error:  # noqa: BLE001 - informational only
-        return {"error": str(error)}
+def _latest(recorder: str) -> Dict[str, Any]:
+    """The recorder's `latest.json`: which recording to use, and the metadata
+    the decision records for it. Raises if it cannot be read."""
+    with urllib.request.urlopen(RECORD_URL.format(recorder=recorder), timeout=30) as r:
+        pointer = json.loads(r.read())
+    if not isinstance(pointer, dict) or not pointer.get("commit"):
+        raise ValueError(f"{recorder} latest.json names no commit: {pointer!r}")
+    return pointer
 
 
 def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, Any]:
     """Run `ci-select --emit-keys` on base...head with the latest published
-    recordings; returns the emission, the recordings' metadata and the log."""
+    recordings; returns the emission, the recordings' metadata and the log.
+
+    Each recording's pointer is read once, first, and every download is pinned
+    to it, so the record names what was loaded even if a publish lands mid-run.
+    """
     deadline = time.time() + SELECTOR_TIMEOUT_SECONDS
     left = lambda: max(30.0, deadline - time.time())  # noqa: E731
+    records = {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")}
     workdir = tempfile.mkdtemp(prefix="ci-selector-")
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     checkout = os.path.join(workdir, "ci-infra")
@@ -304,8 +315,20 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
     data = os.path.join(workdir, "data")
     explain_path = os.path.join(workdir, "explain.json")
-    _run(run + ["ci-fetch-function-record", "--out", data], timeout=left())
-    _run(run + ["ci-fetch-kernel-record", "--out", data], timeout=left())
+    _run(
+        run
+        + [
+            "ci-fetch-kernel-record",
+            "--commit",
+            records["kernrec"]["commit"],
+            "--out",
+            data,
+        ],
+        timeout=left(),
+    )
+    # No function table is passed: ci-select downloads the pinned one itself
+    # and parses it once (about 1 GB of JSON), instead of a separate fetch
+    # step that parsed it a first time only to check it.
     out = subprocess.run(
         run
         + [
@@ -317,8 +340,6 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             "--emit-keys",
             "--pipeline",
             pipeline,
-            "--table",
-            os.path.join(data, "table.json.gz"),
             "--kernel-table",
             os.path.join(data, "kernel_table.json.gz"),
             "--kernel-symbol-map",
@@ -326,6 +347,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
             "--explain",
             explain_path,
         ],
+        env={**os.environ, FNREC_COMMIT_ENV: records["fnrec"]["commit"]},
         capture_output=True,
         text=True,
         timeout=left(),
@@ -342,21 +364,29 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     return {
         "emission": json.loads(out.stdout),
         "explain": explain,
-        "records": {"fnrec": _latest("fnrec"), "kernrec": _latest("kernrec")},
+        "records": records,
         "log": out.stderr[-4000:],
         "ci_infra_commit": ci_infra_commit,
     }
 
 
+def _keyed_steps(steps: Iterable[Any]) -> Iterator[Any]:
+    """Each keyed step, then its AMD mirror as the generator decides whether
+    to run it, so a mirror's own fields (its optional) are the ones read."""
+    from buildkite_step import amd_mirror_step
+
+    for step in steps:
+        if not step.key:
+            continue
+        yield step
+        mirror = amd_mirror_step(step)
+        if mirror is not None:
+            yield mirror
+
+
 def known_keys(steps: Iterable[Any]) -> FrozenSet[str]:
     """Every key the generator can schedule: step keys and AMD mirror keys."""
-    keys = set()
-    for step in steps:
-        if step.key:
-            keys.add(step.key)
-            if (step.mirror or {}).get("amd"):
-                keys.add(f"amd-{step.key}")
-    return frozenset(keys)
+    return frozenset(step.key for step in _keyed_steps(steps))
 
 
 def amd_keys(steps: Iterable[Any]) -> FrozenSet[str]:
@@ -364,23 +394,13 @@ def amd_keys(steps: Iterable[Any]) -> FrozenSet[str]:
     source_file_dependencies rules; the selector decides the rest."""
     from amd import is_amd_device
 
-    keys = set()
-    for step in steps:
-        if not step.key:
-            continue
-        if is_amd_device(step.device):
-            keys.add(step.key)
-        if (step.mirror or {}).get("amd"):
-            keys.add(f"amd-{step.key}")
-    return frozenset(keys)
+    return frozenset(
+        step.key for step in _keyed_steps(steps) if is_amd_device(step.device)
+    )
 
 
 def optional_keys(steps: Iterable[Any]) -> FrozenSet[str]:
-    """Keys of optional steps and their AMD mirrors: a PR build leaves these
-    to a manual unblock or the nightly, whatever the selector says."""
-    keys = set()
-    for step in steps:
-        if step.key and step.optional:
-            keys.add(step.key)
-            keys.add(f"amd-{step.key}")
-    return frozenset(keys)
+    """Keys of optional steps and mirrors: a PR build leaves these to a
+    manual unblock or the nightly, whatever the selector says. A mirror's
+    optional may differ from its step's."""
+    return frozenset(step.key for step in _keyed_steps(steps) if step.optional)

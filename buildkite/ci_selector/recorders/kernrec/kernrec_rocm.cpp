@@ -1,6 +1,10 @@
 // Record dispatched ROCm kernels, including graph replay, through ROCProfiler SDK.
 // Load the SDK with LD_PRELOAD and select this library with ROCP_TOOL_LIBRARIES.
 // Output follows kernrec.c; errors/unresolved names make a recording incomplete.
+// Launch-time names (header sync=1): the KERNEL_DISPATCH enqueue callback names
+// each kernel on the submitting thread before its packet reaches the queue, so
+// a killed process still leaves a complete file. Buffered dispatch records
+// cross-check it: a name no callback wrote is "# error=callback-missed <name>".
 #include <rocprofiler-sdk/rocprofiler.h>
 #include <rocprofiler-sdk/registration.h>
 #include <rocprofiler-sdk/version.h>
@@ -35,6 +39,7 @@ struct State {
   int fd = -1;
   char dir[4096]{};
   bool stopping = false, timer_started = false, started = false, active = false;
+  bool sync = false, unresolved_reported = false;
   long flush_ms = 1000;
   uint64_t records = 0, dropped = 0, errors = 0;
   rocprofiler_context_id_t context{};
@@ -42,6 +47,10 @@ struct State {
   std::unordered_map<uint64_t, std::string> symbols;
   std::unordered_map<uint64_t, uint64_t> pending;
   std::unordered_set<std::string> names;
+  // Kernel IDs the enqueue callback has handled. Its own lock keeps the
+  // per-dispatch lookup off `lock`, which buffer callbacks hold for a batch.
+  pthread_rwlock_t ids_lock = PTHREAD_RWLOCK_INITIALIZER;
+  std::unordered_set<uint64_t> named_ids;
 };
 
 // Deliberately retained until process teardown, after SDK-owned threads stop.
@@ -127,7 +136,8 @@ bool open_output() {
   char header[1400];
   int length = snprintf(header, sizeof(header),
                         "# kernrec v1 backend=rocm recorder=rocprofiler-sdk "
-                        "activity=1 pid=%ld ppid=%ld exe=%s\n",
+                        "activity=1%s pid=%ld ppid=%ld exe=%s\n",
+                        state->sync ? " sync=1" : "",
                         static_cast<long>(state->pid), static_cast<long>(getppid()),
                         count > 0 ? exe : "?");
   output(header, static_cast<size_t>(length));
@@ -185,11 +195,28 @@ bool forked_child() {
   return true;
 }
 
+// One write(2) per line, so a kill never leaves a torn name.
+void output_line(const char* prefix, const std::string& text) {
+  std::string line(prefix);
+  line += text;
+  line += '\n';
+  output(line.data(), line.size());
+}
+
 void emit_name(const std::string& name) {
-  if (state->names.insert(name).second) {
-    output(name.data(), name.size());
-    output("\n", 1);
+  if (!state->names.insert(name).second) return;
+  // Under sync=1 the enqueue callback already wrote every dispatched name. The
+  // error goes first, so a kill between the lines still flags it.
+  if (state->sync) {
+    ++state->errors;
+    output_line("# error=callback-missed ", name);
   }
+  output_line("", name);
+}
+
+bool sync_disabled() {
+  const char* value = getenv("KERNREC_SYNC");
+  return value && strcmp(value, "0") == 0;
 }
 
 void symbols_callback(rocprofiler_callback_tracing_record_t record,
@@ -229,6 +256,59 @@ void symbols_callback(rocprofiler_callback_tracing_record_t record,
     error_locked("symbol_callback_exception");
   }
   pthread_mutex_unlock(&state->lock);
+}
+
+bool enqueued_before(uint64_t id) {
+  pthread_rwlock_rdlock(&state->ids_lock);
+  bool seen = state->named_ids.count(id) != 0;
+  pthread_rwlock_unlock(&state->ids_lock);
+  return seen;
+}
+
+// Runs on the thread that writes the packet, inside the SDK's queue write
+// interceptor and before the packet reaches the queue, for every dispatch the
+// buffer service records (same context, same packets).
+void enqueue_callback(rocprofiler_callback_tracing_record_t record,
+                      rocprofiler_user_data_t*, void*) {
+  if (record.kind != ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH ||
+      record.operation != ROCPROFILER_KERNEL_DISPATCH_ENQUEUE ||
+      record.phase != ROCPROFILER_CALLBACK_PHASE_ENTER || forked_child() || !owned())
+    return;
+  using Enqueue = rocprofiler_callback_tracing_kernel_dispatch_data_t;
+  const auto* data = static_cast<const Enqueue*>(record.payload);
+  bool valid = data && data->size >= sizeof(Enqueue);
+  uint64_t id = valid ? data->dispatch_info.kernel_id : 0;
+  if (valid && enqueued_before(id)) return;
+  bool handled = false;
+  pthread_mutex_lock(&state->lock);
+  try {
+    if (!valid) {
+      error_locked("short_enqueue_record");
+    } else {
+      auto symbol = state->symbols.find(id);
+      if (symbol == state->symbols.end()) {
+        // Without a name the file cannot vouch for this launch; once is enough.
+        if (!state->unresolved_reported) {
+          state->unresolved_reported = true;
+          error_locked("callback-unresolved");
+        }
+      } else if (state->names.insert(symbol->second).second) {
+        output_line("", symbol->second);
+      }
+      handled = true;
+    }
+  } catch (...) {
+    error_locked("enqueue_callback_exception");
+  }
+  pthread_mutex_unlock(&state->lock);
+  if (!handled) return;
+  pthread_rwlock_wrlock(&state->ids_lock);
+  try {
+    state->named_ids.insert(id);
+  } catch (...) {
+    // Only the fast path is lost; the next enqueue takes the slow one.
+  }
+  pthread_rwlock_unlock(&state->ids_lock);
 }
 
 void dispatch_callback(rocprofiler_context_id_t, rocprofiler_buffer_id_t,
@@ -307,6 +387,7 @@ int tool_init(rocprofiler_client_finalize_t, void*) {
   if (!owned()) return -1;
   rocprofiler_tracing_operation_t symbol_op =
       ROCPROFILER_CODE_OBJECT_DEVICE_KERNEL_SYMBOL_REGISTER;
+  rocprofiler_tracing_operation_t enqueue_op = ROCPROFILER_KERNEL_DISPATCH_ENQUEUE;
   constexpr size_t buffer_size = 8 * 1024 * 1024;
   // SDK 1.3.2 rotates two buffers on flush; DISCARD allocates only one and can
   // silently lose dispatches in the other. LOSSLESS also avoids pressure loss.
@@ -314,6 +395,11 @@ int tool_init(rocprofiler_client_finalize_t, void*) {
       !check(rocprofiler_configure_callback_tracing_service(
                  state->context, ROCPROFILER_CALLBACK_TRACING_CODE_OBJECT,
                  &symbol_op, 1, symbols_callback, nullptr), "symbol_tracing_failed") ||
+      // The header already promised sync=1: failing here leaves an error line.
+      (state->sync &&
+       !check(rocprofiler_configure_callback_tracing_service(
+                  state->context, ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH,
+                  &enqueue_op, 1, enqueue_callback, nullptr), "enqueue_tracing_failed")) ||
       !check(rocprofiler_create_buffer(state->context, buffer_size, buffer_size / 2,
                  ROCPROFILER_BUFFER_POLICY_LOSSLESS, dispatch_callback, nullptr,
                  &state->buffer), "create_buffer_failed") ||
@@ -389,6 +475,7 @@ extern "C" rocprofiler_tool_configure_result_t* rocprofiler_configure(
     fprintf(stderr, "kernrec-rocm: cannot allocate recorder state\n");
     return nullptr;
   }
+  state->sync = !sync_disabled();
   if (!open_output()) {
     fprintf(stderr, "kernrec-rocm: cannot create recording: %s\n", strerror(errno));
     return nullptr;

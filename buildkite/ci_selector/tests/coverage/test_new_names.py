@@ -421,3 +421,206 @@ def test_a_decorator_or_default_runs_where_the_def_does(repo: Repo):
     )
     head = repo.commit("default")
     assert _resolve(repo, base, head, RECORDED) == {}
+
+
+# What runs a def without a caller in sight: a decorator handed the function,
+# the interpreter through a dunder, or a lookup by name on an instance. None
+# of those is a reference, so "no reference outside known code" says nothing.
+
+VALIDATORS = """\
+def model_validator(mode):
+    def wrap(fn):
+        return fn
+
+    return wrap
+"""
+REQUEST = """\
+from vllm.fw import model_validator
+
+
+class Request:
+    @model_validator(mode="before")
+    @classmethod
+    def check_prompt(cls, data):
+        return data
+"""
+REQUEST_RECORDED = {"vllm/proto.py": {"<module>", "Request", "Request.check_prompt"}}
+HOOKS = """\
+HOOKS = []
+
+
+def hook(fn):
+    HOOKS.append(fn)
+    return fn
+
+
+def fire():
+    return [h() for h in HOOKS]
+"""
+
+
+def test_a_validator_nothing_calls_stays_unknown(repo: Repo):
+    """Pydantic runs a @model_validator on every construction of its class,
+    and nothing in the diff names it."""
+    repo.write("vllm/fw.py", VALIDATORS)
+    repo.write("vllm/proto.py", REQUEST)
+    base = repo.commit("request")
+    new = '\n    @model_validator(mode="before")\n    @classmethod\n'
+    new += "    def check_messages(cls, data):\n"
+    new += '        if not data.get("messages"):\n            raise ValueError\n'
+    new += "        return data\n"
+    repo.write("vllm/proto.py", REQUEST + new)
+    head = repo.commit("validator")
+    assert _resolve(repo, base, head, REQUEST_RECORDED) == {}
+
+
+def test_a_registered_function_nothing_names_stays_unknown(repo: Repo):
+    """An existing registry decorator keeps the function,
+    and the unchanged fire() calls it on every use."""
+    repo.write("vllm/hooks.py", HOOKS)
+    base = repo.commit("hooks")
+    repo.write("vllm/hooks.py", HOOKS + "\n\n@hook\ndef on_start():\n    return 1\n")
+    head = repo.commit("on_start")
+    recorded = {
+        "vllm/hooks.py": {"<module>", "hook", "fire", "fire.<locals>.<listcomp>"}
+    }
+    assert _resolve(repo, base, head, recorded) == {}
+
+
+def test_a_rebound_builtin_name_is_not_transparent(repo: Repo):
+    """A file that binds `staticmethod` itself can register through it."""
+    hooks = HOOKS.replace("def hook(fn):", "def staticmethod(fn):")
+    repo.write("vllm/hooks.py", hooks)
+    base = repo.commit("hooks")
+    repo.write(
+        "vllm/hooks.py", hooks + "\n\n@staticmethod\ndef on_start():\n    return 1\n"
+    )
+    head = repo.commit("on_start")
+    recorded = {
+        "vllm/hooks.py": {
+            "<module>",
+            "staticmethod",
+            "fire",
+            "fire.<locals>.<listcomp>",
+        }
+    }
+    assert _resolve(repo, base, head, recorded) == {}
+
+
+def test_a_module_dunder_stays_unknown(repo: Repo):
+    """PEP 562: the interpreter calls a module's __getattr__ on any missing
+    attribute, from any importer."""
+    base = repo.head()
+    repo.write(
+        "vllm/mod.py",
+        BASE_MOD + "\n\ndef __getattr__(name):\n    raise AttributeError(name)\n",
+    )
+    head = repo.commit("module getattr")
+    assert _resolve(repo, base, head, RECORDED) == {}
+
+
+def test_a_hook_a_library_base_calls_by_a_name_no_file_spells_stays_unknown(
+    repo: Repo,
+):
+    """ast.NodeVisitor.visit builds "visit_" + the node's type name and calls
+    it on every walk. No file in the repo has to spell visit_Assign for the
+    new method to run, so a fresh name proves nothing."""
+    walker = "import ast\n\n\nclass Walker(ast.NodeVisitor):\n"
+    walker += "    def visit_Call(self, node):\n        self.generic_visit(node)\n"
+    repo.write("vllm/walker.py", walker)
+    base = repo.commit("walker")
+    repo.write(
+        "vllm/walker.py",
+        walker + "\n    def visit_Assign(self, node):\n        raise RuntimeError\n",
+    )
+    head = repo.commit("visit_Assign")
+    recorded = {"vllm/walker.py": {"<module>", "Walker", "Walker.visit_Call"}}
+    assert _resolve(repo, base, head, recorded) == {}
+
+
+def test_a_builtin_decorator_hides_no_caller(repo: Repo):
+    """staticmethod hands the function back to the class, so on a new sealed
+    class references still find every caller."""
+    base = repo.head()
+    repo.write(
+        "vllm/mod.py",
+        BASE_MOD.replace("return x + 1", "return Job.flag() + x")
+        + "\n\nclass Job:\n    @staticmethod\n    def flag():\n        return 1\n",
+    )
+    head = repo.commit("staticmethod")
+    got = _resolve(repo, base, head, RECORDED)
+    assert {"Job", "Job.flag"} <= got.get("vllm/mod.py", set()), got
+
+
+def test_a_method_of_a_new_sealed_class_follows_the_class(repo: Repo):
+    """Its instances exist only where the class is named, so an unrelated
+    `.run` in an unchanged function of a changed file does not hold it back."""
+    other = "def go(task):\n    return task.run()\n\n\ndef count():\n    return 0\n"
+    repo.write("vllm/other.py", other)
+    base = repo.commit("other")
+    repo.write(
+        "vllm/mod.py",
+        BASE_MOD.replace("return x + 1", "return Job().run() + x")
+        + "\n\nclass Job:\n    def run(self):\n        return 1\n",
+    )
+    repo.write("vllm/other.py", other.replace("return 0", "return 1"))
+    head = repo.commit("job")
+    recorded = {**RECORDED, "vllm/other.py": {"<module>", "go", "count"}}
+    got = _resolve(repo, base, head, recorded)
+    assert {"Job", "Job.run"} <= got.get("vllm/mod.py", set()), got
+
+
+def test_a_decorated_inner_function_follows_its_parent(repo: Repo):
+    """Whatever the decorator does with it happens when plan() runs, so the
+    steps that ran plan() cover it."""
+    base = repo.head()
+    repo.write(
+        "vllm/mod.py",
+        "import functools\n\n\n"
+        + BASE_MOD.replace(
+            "    return x + 1",
+            "    @functools.cache\n    def inner():\n        return x\n\n"
+            "    return inner() + 1",
+        ),
+    )
+    head = repo.commit("inner")
+    assert _resolve(repo, base, head, RECORDED) == {
+        "vllm/mod.py": {"plan.<locals>.inner"}
+    }
+
+
+def test_a_function_moved_into_a_module_that_re_exported_it_stays_unknown(
+    repo: Repo,
+):
+    """runner.py imported `step_all` from mod.py at base, and the unchanged
+    child.py imports it from runner.py. Moving the body into runner.py adds
+    no code object anyone had, yet the name was there all along."""
+    repo.write("vllm/mod.py", BASE_MOD + "\n\ndef step_all():\n    return 1\n")
+    repo.write("vllm/runner.py", "from vllm.mod import step_all\n")
+    repo.write(
+        "vllm/child.py",
+        "from vllm.runner import step_all\n\n\ndef go():\n    return step_all()\n",
+    )
+    base = repo.commit("re-export")
+    repo.write("vllm/mod.py", BASE_MOD)
+    repo.write("vllm/runner.py", "def step_all():\n    return 1\n")
+    head = repo.commit("move")
+    recorded = {**RECORDED, "vllm/runner.py": {"<module>"}}
+    assert _resolve(repo, base, head, recorded) == {}
+
+
+def test_a_dunder_of_a_class_inside_a_function_follows_the_function(repo: Repo):
+    """The class exists only once plan() runs, so whatever runs its
+    __init__ ran plan() first."""
+    base = repo.head()
+    repo.write(
+        "vllm/mod.py",
+        BASE_MOD.replace(
+            "    return x + 1",
+            "    class Box:\n        def __init__(self, v):\n            self.v = v\n\n"
+            "    return Box(x).v + 1",
+        ),
+    )
+    head = repo.commit("local class")
+    got = _resolve(repo, base, head, RECORDED)
+    assert "plan.<locals>.Box.__init__" in got.get("vllm/mod.py", set()), got

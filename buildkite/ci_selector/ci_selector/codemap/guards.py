@@ -236,8 +236,8 @@ def run_preflight(repo: Path, pipelines, full, load_report) -> PreflightReport:
         pf.unmapped_devices = frozenset(unmapped)
         pf.warnings.append(
             "preflight: devices outside the curated taxonomy "
-            f"({', '.join(sorted(unmapped))}); family routing is incomplete "
-            "and the no-hardware rule is disabled"
+            f"({', '.join(sorted(unmapped))}); their steps are kept by every "
+            "family narrowing and the no-hardware rule is disabled"
         )
 
     unresolved = [m for m in ENGINE_ENTRY_MODULES if not full.index.resolve(m)]

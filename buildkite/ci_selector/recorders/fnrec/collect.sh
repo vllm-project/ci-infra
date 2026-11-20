@@ -8,6 +8,8 @@
 # Every way out leaves fnrec_collect_summary.json (an artifact) and an
 # annotation, and a build the generator armed (FNREC_EXPECTED_JOBS > 0) that
 # delivered nothing fails the step instead of passing as "nothing to fold".
+# One that delivered fewer than CI_SELECTOR_MIN_DELIVERED_SHARE of them fails
+# it too, unfolded and unpublished.
 set -uo pipefail
 
 BRANCH="${VLLM_CI_BRANCH:-main}"
@@ -87,6 +89,19 @@ if [[ "${DELIVERED}" == "0" ]]; then
   VERDICT="nothing to fold"
   echo "nothing to fold; done"
   exit 0
+fi
+# Refuses before the fold when fewer than CI_SELECTOR_MIN_DELIVERED_SHARE of
+# the armed jobs delivered, so the previous table stays current. Skipped when
+# the generator passed no share.
+SHARE="${CI_SELECTOR_MIN_DELIVERED_SHARE:-}"
+if [[ -n "${EXPECTED_JOBS}" && -z "${SHARE}" ]]; then
+  echo "no delivery share from the generator; delivered/expected is not checked"
+elif [[ -n "${EXPECTED_JOBS}" ]] \
+    && ! python3 -c 'import sys; d, e, s = map(float, sys.argv[1:]); sys.exit(0 if d >= s * e else 1)' \
+      "${DELIVERED}" "${EXPECTED_JOBS}" "${SHARE}"; then
+  VERDICT="short: ${DELIVERED} of ${EXPECTED_JOBS} jobs delivered"
+  echo "only ${DELIVERED} of ${EXPECTED_JOBS} armed jobs delivered (< ${SHARE}); not publishing" >&2
+  exit 1
 fi
 
 if [[ -n "${CI_INFRA}" ]]; then

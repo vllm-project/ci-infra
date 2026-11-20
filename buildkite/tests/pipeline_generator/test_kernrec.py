@@ -267,6 +267,67 @@ def test_amd_multinode_mirrors_stay_unarmed_without_affecting_cuda(
     assert ("amd-kernels" in waits_for) is armed
 
 
+def test_amd_skip_prefix_unarms_only_the_amd_mirror(monkeypatch, fake_global_config):
+    """rocprofiler-sdk dispatch tracing segfaults the TurboQuant eval server, so
+    its AMD mirror runs unrecorded and the CUDA step still records."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    (prefix,) = buildkite_step.KERNREC_AMD_SKIP_STEP_PREFIXES
+    key = f"{prefix}k8v4"
+    groups = _rendered_groups(
+        _gpu_step(key=key, mirror={"amd": {"device": "mi355_dpx"}}),
+        _gpu_step(key="kernels", mirror={"amd": {"device": "mi355_dpx"}}),
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    assert buildkite_step._carries(steps[key], "kernrec")
+    skipped = steps[f"amd-{key}"]
+    assert not buildkite_step._carries(skipped, "kernrec")
+    assert buildkite_step.KERNREC_ARTIFACT_PATH not in (skipped.artifact_paths or [])
+    assert buildkite_step._carries(steps["amd-kernels"], "kernrec")
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    waits_for = collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split()
+    assert f"amd-{key}" not in waits_for
+    assert "amd-kernels" in waits_for
+
+
+def test_amd_skip_steps_unarm_only_their_exact_amd_mirror(
+    monkeypatch, fake_global_config
+):
+    """Steps that can never give a usable ROCm row (no GPU work, or a fork
+    after GPU use) run unrecorded on AMD; their CUDA steps, and AMD mirrors
+    whose keys extend or share a prefix with theirs, still record."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    skipped = set(buildkite_step.KERNREC_AMD_SKIP_STEPS)
+    assert skipped == {
+        "torch-stable-abi-audit",
+        "pytorch-nightly-dependency-override-check",
+        "engine-preprocess-error-handling",
+    }
+    armed = {"engine", "engine-1-gpu", "engine-preprocess-error-handling-2"}
+    groups = _rendered_groups(
+        *(
+            _gpu_step(key=key, mirror={"amd": {"device": "mi355_dpx"}})
+            for key in sorted(skipped | armed)
+        )
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    for key in skipped | armed:
+        assert buildkite_step._carries(steps[key], "kernrec")
+        amd = steps[f"amd-{key}"]
+        assert buildkite_step._carries(amd, "kernrec") is (key in armed)
+        assert (buildkite_step.KERNREC_ARTIFACT_PATH in (amd.artifact_paths or [])) is (
+            key in armed
+        )
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    waits_for = set(collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split())
+    assert waits_for == skipped | armed | {f"amd-{key}" for key in armed}
+
+
 @pytest.mark.parametrize("cuda,amd", [(1, 0), (0, 1)])
 def test_cuda_and_amd_switches_arm_their_backend_alone(
     monkeypatch, fake_global_config, cuda, amd
@@ -470,19 +531,17 @@ def test_recording_gives_steps_a_timeout_margin(monkeypatch):
     )
 
 
-def test_collect_waits_for_recording_steps_in_its_command_up_to_a_deadline(
+def test_collect_waits_for_recording_steps_in_its_command_up_to_a_cap(
     monkeypatch, fake_global_config
 ):
-    """A cancelled or timed-out dependency ends a step waiting_failed,
-    allow_dependency_failure or not, and it cannot be retried (full runs
-    95480, 95553, 95634). So the collect step depends only on the image build
-    and waits for the recording steps itself, up to COLLECT_AFTER_MINUTES."""
+    """The collect waits for the recording steps in its command, not through
+    depends_on, and fixes no deadline in its env (test_collect_step.py runs
+    the wait)."""
     monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
     fake_global_config["nightly"] = "1"
-    monkeypatch.setattr(buildkite_step.time, "time", lambda: 1_000_000)
     (step,) = buildkite_step.kernrec_collect_group(_rendered_groups(_gpu_step())).steps
-    assert step.env["CI_SELECTOR_COLLECT_DEADLINE"] == str(
-        1_000_000 + buildkite_step.COLLECT_AFTER_MINUTES * 60
+    assert not any("DEADLINE" in name for name in step.env), (
+        "nothing time-dependent is fixed when the pipeline is generated"
     )
     assert step.commands[0] == buildkite_step.COLLECT_WAIT
     assert step.timeout_in_minutes > buildkite_step.COLLECT_AFTER_MINUTES

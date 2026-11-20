@@ -204,3 +204,45 @@ class TestFetch:
         assert fetch_functions.main(["--url", base, "--out", str(out)]) == 1
         assert "refusing it" in capsys.readouterr().err
         assert not (out / TABLE_NAME).exists()
+
+    def test_fetch_hands_back_the_table_it_parsed(
+        self, table, tmp_path, monkeypatch, tmp_repo
+    ):
+        """`ci-select` run without a table uses the table `fetch` returns, so
+        it must be the one written to disk."""
+        base, commit = "https://b/ci/fnrec", tmp_repo.head()
+        self.serve(
+            monkeypatch,
+            {
+                f"{base}/latest.json": json.dumps(
+                    {"commit": commit, "build": "42"}
+                ).encode(),
+                f"{base}/{commit}/{TABLE_NAME}": table.read_bytes(),
+            },
+        )
+        out = tmp_path / "out"
+        got, got_commit, build = fetch_functions.fetch(base, out=out)
+        assert (got_commit, build) == (commit, "42")
+        assert got.commit == commit and len(got) == len(load(out / TABLE_NAME))
+
+    @pytest.mark.parametrize(
+        "pin", ["commit", None, ""], ids=["pinned", "unset", "empty"]
+    )
+    def test_ci_select_downloads_the_commit_the_gate_pinned(
+        self, table, tmp_path, monkeypatch, tmp_repo, pin
+    ):
+        """Pinned, the pointer is never read, so a publish mid-run cannot
+        change the table. Unset or empty, it is followed as before."""
+        base, commit = "https://b/ci/fnrec", tmp_repo.head()
+        files = {f"{base}/{commit}/{TABLE_NAME}": table.read_bytes()}
+        if pin is None:
+            monkeypatch.delenv(fetch_functions.COMMIT_ENV, raising=False)
+        else:
+            monkeypatch.setenv(fetch_functions.COMMIT_ENV, commit if pin else "")
+        if not pin:
+            files[f"{base}/latest.json"] = json.dumps({"commit": commit}).encode()
+        self.serve(monkeypatch, files)
+        monkeypatch.setenv(fetch_functions.URL_ENV, base)
+        monkeypatch.setattr(fetch_functions, "COVERAGE_DIR", tmp_path / "out")
+        assert fetch_functions.fetch_latest().commit == commit
+        assert load(tmp_path / "out" / TABLE_NAME).commit == commit

@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
 import os
-import time
 import re
 import shlex
 
@@ -11,7 +10,7 @@ from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
-    _amd_mirror_should_run,
+    AMD_ROCM_STACK_FILES,
     amd_dependencies,
     amd_step_redefined,
     build_amd_step_options,
@@ -122,10 +121,13 @@ def _otel_setup_command() -> str:
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
         # Native AMD pods run from /vllm-workspace, which has no .git; their
-        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The CPU test image has no
+        # .git either and the docker plugin passes no checkout path in, so the
+        # last resort is the image's own copy. The fallback keeps the
         # assignment successful under `sh -e`; a missing helper stays fail-open.
         "$$(git rev-parse --show-toplevel 2>/dev/null || "
-        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-'
+        f'{runtime_shard.CONTAINER_WORKSPACE}}}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
@@ -362,6 +364,8 @@ def _get_step_plugin(step: Step):
     use_arm64 = step.device in (DeviceType.DGX_SPARK, DeviceType.GH200)
     if _uses_k8s_plugin(step):
         return get_k8s_plugin(step, get_image(use_cpu))
+    elif step.device == DeviceType.ARM_CPU:
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(True, True))}
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
 
@@ -510,11 +514,45 @@ KERNREC_SKIP_STEPS = {
     "quantization": "int4 per-token KV cache test fails under CUPTI",
 }
 
+# Key prefixes of steps the ROCm recorder stays off, and why. Applies to the
+# AMD mirror and leaves the CUDA step recording. Matched with startswith, so
+# an entry also covers every key it prefixes.
+KERNREC_AMD_SKIP_STEP_PREFIXES = {
+    # Dispatch tracing swaps each completion signal for a pooled one, and
+    # rocprofiler-sdk 1.3.5 can release it while HIP still uses it:
+    # SIGSEGV in pool<signal_t>::release <- AsyncSignalHandler after the
+    # first mid-serving Triton JIT (vllm/ci #101909, #102057). 2 in ~58
+    # recorded runs, 0 in ~900 unrecorded. Back on once the image's SDK
+    # carries ROCm/rocm-systems#14385.
+    "lm-eval-turboquant-": "rocprofiler-sdk dispatch-signal SIGSEGV",
+}
+
+# Keys of steps the ROCm recorder stays off, matched exactly against the
+# step's own key (the CUDA key for a mirror), so no other step shares an
+# entry. An armed step needs a complete recording from every GPU-active
+# process to give a usable row; these never can, so arming them only pads
+# the ROCm table's denominator with rows that stay unusable. With no row the
+# selector keeps them, as it does any unrecorded step.
+KERNREC_AMD_SKIP_STEPS = {
+    # Launch no kernels, so they upload no recordings (nightly 103780).
+    "torch-stable-abi-audit": "static ELF audit, no GPU work",
+    "pytorch-nightly-dependency-override-check": "dependency pin check, no GPU work",
+    # test_preprocess_error_handling.py patches EngineCore in the parent, so
+    # it needs VLLM_WORKER_MULTIPROC_METHOD=fork and its forked EngineCore
+    # records "# error=gpu_use_after_fork" (nightly 103780, engine-1-gpu).
+    "engine-preprocess-error-handling": "forks after GPU use",
+}
+
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
     if setup_profile == "amd":
-        enabled = kernrec_amd_enabled() and not (step.num_nodes and step.num_nodes > 1)
+        enabled = (
+            kernrec_amd_enabled()
+            and not (step.num_nodes and step.num_nodes > 1)
+            and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
+            and step.key not in KERNREC_AMD_SKIP_STEPS
+        )
     else:
         enabled = kernrec_enabled()
     return (
@@ -771,23 +809,30 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
 
 
 # A collect step folds what has been uploaded once every recording step has
-# finished, or this long after the pipeline was generated, whichever is first.
+# finished, or this long after the collect job started, whichever is first.
 # A job still running then is left out of the table, which reads its shard as
-# missing. The full runs finish their recording jobs well inside it; the long
-# tails are blocked or hung jobs.
+# missing. Counted from the job's start, like the step timeout, so the fold
+# keeps about the timeout's last 90 minutes (less up to one 300 s poll), and a
+# retried job gets a fresh cap.
 COLLECT_AFTER_MINUTES = 180
 
+# The share of its armed jobs a recorder (a backend, for kernels) must hear
+# from before it publishes; below it the previous table stays current. Passed
+# to both collect scripts beside the expected counts.
+COLLECT_MIN_DELIVERED_SHARE = 0.8
+
 # Polls each recording step's state through the agent until all have finished
-# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
+# or the cap passes. `$$`: Buildkite would interpolate a bare `$` at
 # upload time, in the bootstrap's environment. An unreadable state (an older
-# agent, a step that is not there) reads as unfinished, so the step waits to
-# the deadline rather than collecting early.
+# agent, a missing step, a failed API call) reads as unfinished, so the step
+# waits to the cap rather than collecting early. `|| true` keeps a failed read
+# from ending the step under the agent's `bash -e`.
 COLLECT_WAIT = (
-    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
+    f"deadline=$$(( $$(date +%s) + {COLLECT_AFTER_MINUTES * 60} )); "
     'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
     'pending=""; '
     "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null || true)"; '
     'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
     "done; "
     '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
@@ -820,17 +865,12 @@ def _collect_step(
     # uploads the kernel symbol map), not on the recording steps themselves:
     # one of those cancelled or timed out ended the step waiting_failed, and
     # the full runs of 2026-10-16 to 18 published nothing because of it. The
-    # command waits for them instead (COLLECT_WAIT), up to a deadline.
+    # command waits for them instead (COLLECT_WAIT), up to a cap.
     depends_on = []
     for dep in (d for s in armed for d in (s.depends_on or [])):
         if dep in runnable_keys and dep not in depends_on:
             depends_on.append(dep)
-    env = {
-        "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed),
-        "CI_SELECTOR_COLLECT_DEADLINE": str(
-            int(time.time()) + COLLECT_AFTER_MINUTES * 60
-        ),
-    }
+    env = {"CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed)}
     if count_armed:
         # The fold needs a denominator: its job list holds only what uploaded,
         # so without one a build that lost its recordings looks complete.
@@ -847,6 +887,7 @@ def _collect_step(
                 env[f"KERNREC_EXPECTED_JOBS_{backend.upper()}"] = str(
                     sum(s.parallelism or 1 for s in armed if _kernrec_backend(s) == backend)
                 )
+        env["CI_SELECTOR_MIN_DELIVERED_SHARE"] = str(COLLECT_MIN_DELIVERED_SHARE)
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -1162,13 +1203,7 @@ def _runtime_shard_mode(
     on = _automatic_shard_on(step, amd)
     if not by_default and not on:
         return None
-    if amd:
-        should_run = _amd_mirror_should_run(
-            _step_should_run(step, list_file_diff), list_file_diff
-        )
-    else:
-        should_run = _step_should_run(step, list_file_diff)
-    if not should_run:
+    if not _step_should_run(step, list_file_diff):
         return None
     if by_default and step.parallelism:
         # A fixed split, the step's own or the one its mirror inherits, runs
@@ -1218,6 +1253,7 @@ def _shard_at_generation(
     commands: List[str],
     env: Optional[Dict[str, str]],
     mode: str,
+    timeout_in_minutes: Optional[int] = None,
 ) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
     and, in "on" mode, turn its job's prepared commands and env into one
@@ -1226,20 +1262,29 @@ def _shard_at_generation(
     leave the job as it is: short of a plan of two or more shards, so
     sharding never blocks the step's tests. "shadow" only annotates the plan.
     The NVIDIA job and a native AMD mirror's both go through here.
+    `timeout_in_minutes`, the job's own as its YAML sets it, sizes a
+    fallback plan when main has no timings for the step.
     """
     result, text = runtime_shard.plan_step(
-        step_key, step.commands or [], step.working_dir, os.getcwd(), queue
+        step_key,
+        step.commands or [],
+        step.working_dir,
+        os.getcwd(),
+        queue,
+        timeout_in_minutes,
     )
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
-    if result is None and _shard_by_default():
+    fallback = bool(result and result.get("fallbackPlan"))
+    if (result is None or (fallback and result["shards"] < 2)) and _shard_by_default():
         # One row in the one-job list, not an annotation per step.
         ONE_JOB_REASONS[step_key] = text
         return None
     if (
         result is None
+        or fallback
         or result["overBudget"]
         or runtime_shard.setup_too_long(result)
     ):
@@ -1328,6 +1373,7 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         amd_env,
                         amd_shard_mode,
+                        step.timeout_in_minutes,
                     )
                     if amd_shard_mode
                     else None
@@ -1464,6 +1510,7 @@ def convert_group_step_to_buildkite_step(
                     buildkite_step.commands,
                     buildkite_step.env,
                     shard_mode,
+                    step.timeout_in_minutes,
                 )
                 if shard_mode
                 else None
@@ -1549,6 +1596,8 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         extra_env,
                         amd_shard_mode,
+                        # The mirror's own; AMD's 3-hour default sizes nothing.
+                        amd.get("timeout_in_minutes"),
                     )
                     if amd_shard_mode
                     else None
@@ -1589,11 +1638,8 @@ def convert_group_step_to_buildkite_step(
                     ),
                     recorded_step=amd_command_step,
                 )
-                amd_step.deferred = not _amd_mirror_should_run(
-                    _step_should_run(
-                        _get_amd_mirror_effective_step(step, amd),
-                        list_file_diff,
-                    ),
+                amd_step.deferred = not _step_should_run(
+                    _get_amd_mirror_effective_step(step, amd),
                     list_file_diff,
                 )
                 amd_hardware_steps.append(amd_step)
@@ -1613,9 +1659,12 @@ def convert_group_step_to_buildkite_step(
 
 
 def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+    global_config = get_global_config()
+    if global_config["aiter_nightly"] == "1":
+        # Scheduled: nobody would unblock its steps, so NOAUTO does not apply.
+        return step.key in global_config["only_step_keys"]
     if os.getenv("NOAUTO") == "1":
         return False
-    global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
     # The test selector's choice (selector_gate.py), prerequisites included.
@@ -1631,6 +1680,12 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     ):
         return True
     if global_config["nightly"] == "1":
+        return True
+    # Every AMD step runs in the ROCm stack image, so a change to what it is
+    # built from runs them all, optional ones included.
+    if is_amd_device(step.device) and any(
+        path in list_file_diff for path in AMD_ROCM_STACK_FILES
+    ):
         return True
     if step.optional:
         # As the selector gate does: an edited optional step runs on its PR.
@@ -1678,6 +1733,15 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
             or step.source_file in mirror_dependencies,
         }
     )
+
+
+def amd_mirror_step(step: Step) -> Optional[Step]:
+    """The step's AMD mirror as the generator decides whether to run it, or
+    None without one. For run decisions and key classification only: it
+    keeps the step's depends_on, not the mirror's, and its dind ignores
+    rocm_build_layout()."""
+    amd = (step.mirror or {}).get("amd")
+    return _get_amd_mirror_effective_step(step, amd) if amd else None
 
 
 def _source_file_dependencies_match(

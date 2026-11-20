@@ -30,11 +30,13 @@
 #
 # Fails the step (soft, so the build stays green) when a backend the generator
 # armed (KERNREC_EXPECTED_JOBS_CUDA / _ROCM) did not come out whole: fewer than
-# KERNREC_MIN_DELIVERED_SHARE of its jobs uploaded a recording, or its
+# CI_SELECTOR_MIN_DELIVERED_SHARE of its jobs uploaded a recording, or its
 # table/map pair did not validate. Such a backend is not published, so the
 # previous pair stays current. Without the counts (an older generator, a
-# manual fold) only what arrived is judged, as before. Either way the step
-# leaves kernrec_collect_summary.json as an artifact and an annotation.
+# manual fold) only what arrived is judged, as before; without the share, an
+# armed backend is judged on its pair but not on how many of its jobs
+# delivered. Either way the step leaves kernrec_collect_summary.json as an
+# artifact and an annotation.
 set -uo pipefail
 
 BRANCH="${VLLM_CI_BRANCH:-main}"
@@ -55,7 +57,7 @@ fi
 
 declare -A expected=([cuda]="${KERNREC_EXPECTED_JOBS_CUDA:-}" [rocm]="${KERNREC_EXPECTED_JOBS_ROCM:-}")
 declare -A delivered=([cuda]=0 [rocm]=0) rows=([cuda]=0 [rocm]=0) verdict=()
-MIN_SHARE="${KERNREC_MIN_DELIVERED_SHARE:-0.8}"
+MIN_SHARE="${CI_SELECTOR_MIN_DELIVERED_SHARE:-}"
 
 # The summary and annotation, on every way out; and the step fails if an armed
 # backend did not come out whole, whatever the publishing below did.
@@ -114,32 +116,6 @@ done
 n_files=$(find .kernrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
 n_jobs=$(find .kernrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
 echo "${n_files} recording files from ${n_jobs} jobs"
-# Jobs that delivered at least one recording, per backend: the sidecar names
-# it, else the recording's header, else cuda (sidecars before the field).
-read -r delivered[cuda] delivered[rocm] <<<"$("${KERNREC_PYTHON:-python3}" - <<'PY'
-import json, re
-from pathlib import Path
-count = {"cuda": 0, "rocm": 0}
-for job in Path(".kernrec").glob("*/"):
-    files = sorted(job.glob("kern.*.txt"))
-    if not files:
-        continue
-    backend = None
-    try:
-        backend = json.loads((job / "kernrec.json").read_text()).get("backend")
-    except (OSError, ValueError):
-        pass
-    if not backend:
-        match = re.search(r"backend=(\w+)", files[0].read_text(errors="replace")[:400])
-        backend = match.group(1) if match else "cuda"
-    if backend in count:
-        count[backend] += 1
-print(count["cuda"], count["rocm"])
-PY
-)"
-for backend in cuda rocm; do
-  echo "${backend}: ${delivered[$backend]} jobs delivered, ${expected[$backend]:-unknown} armed"
-done
 if [[ "${n_jobs}" == "0" ]]; then
   for backend in cuda rocm; do verdict[$backend]="nothing delivered"; done
   echo "nothing to fold; done"
@@ -150,6 +126,36 @@ echo "--- :table_tennis_paddle_and_ball: Building the kernel table"
 # From here on a failure is a failure: soft_fail keeps the build green, but
 # a half-built result must never be published as if it were complete.
 curl -sSfL --retry 3 -o kernel_table.py "${RAW}/kernel_table.py" || { echo "cannot fetch kernel_table.py" >&2; exit 1; }
+# Jobs that delivered at least one recording, or an empty-job probe the
+# table accepts, per backend: the sidecar names it, else the recording's
+# header, else cuda (sidecars before the field).
+read -r delivered[cuda] delivered[rocm] <<<"$("${KERNREC_PYTHON:-python3}" - <<'PY'
+import json, re
+from pathlib import Path
+from kernel_table import _empty_probe_ok
+count = {"cuda": 0, "rocm": 0}
+for job in Path(".kernrec").glob("*/"):
+    files = sorted(job.glob("kern.*.txt"))
+    meta = {}
+    try:
+        meta = json.loads((job / "kernrec.json").read_text())
+        meta = meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError):
+        pass
+    if not files and not _empty_probe_ok(meta, meta.get("backend")):
+        continue
+    backend = meta.get("backend")
+    if not backend and files:
+        match = re.search(r"backend=(\w+)", files[0].read_text(errors="replace")[:400])
+        backend = match.group(1) if match else "cuda"
+    if backend in count:
+        count[backend] += 1
+print(count["cuda"], count["rocm"])
+PY
+)"
+for backend in cuda rocm; do
+  echo "${backend}: ${delivered[$backend]} jobs delivered, ${expected[$backend]:-unknown} armed"
+done
 mkdir -p out
 publish=()
 for backend in cuda rocm; do
@@ -196,8 +202,12 @@ from kernel_table import usable
 print(sum(1 for row in json.load(gzip.open(sys.argv[1], "rt"))["rows"].values() if usable(row)))
 PY
   )
+  # Checked whatever the pair's validity, so a backend with too few
+  # deliveries reads short rather than as an invalid pair.
   want="${expected[$backend]:-}"
-  if [[ "$usable" == yes && -n "$want" && "$want" -gt 0 ]] \
+  if [[ -n "$want" && "$want" -gt 0 && -z "$MIN_SHARE" ]]; then
+    echo "$backend: no delivery share from the generator; delivered/expected is not checked" >&2
+  elif [[ -n "$want" && "$want" -gt 0 ]] \
       && ! "${KERNREC_PYTHON:-python3}" -c 'import sys; d, e, s = map(float, sys.argv[1:]); sys.exit(0 if d >= s * e else 1)' \
         "${delivered[$backend]}" "$want" "$MIN_SHARE"; then
     echo "$backend: only ${delivered[$backend]} of $want armed jobs delivered (< ${MIN_SHARE}); not publishing it" >&2
@@ -210,8 +220,13 @@ PY
     cp "out/$table" "out/$map" "publish/$backend/"
     publish+=("$backend")
   else
-    [[ -n "${verdict[$backend]:-}" ]] || verdict[$backend]="no valid table/map pair"
-    echo "$backend has no valid table/map pair; retaining artifacts without publishing" >&2
+    if [[ -n "${verdict[$backend]:-}" ]]; then
+      echo "$backend not published (${verdict[$backend]}); retaining artifacts" >&2
+    else
+      # vllm-dashboard's log parser matches this wording.
+      verdict[$backend]="no valid table/map pair"
+      echo "$backend has no valid table/map pair; retaining artifacts without publishing" >&2
+    fi
   fi
 done
 

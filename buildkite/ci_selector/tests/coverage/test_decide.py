@@ -517,3 +517,66 @@ def test_a_lazy_import_routed_by_key_still_reaches_the_new_module(
     assert got == {"vllm/n.py": frozenset({"vllm/mod.py", "vllm/other.py"})}
     del recorded["vllm/other.py"]
     assert _reached_via(tmp_repo.root, base, head, unresolved, recorded) == {}
+
+
+FRAMEWORK = "def model_validator(mode):\n    return lambda fn: fn\n"
+REQUEST = """\
+from vllm.fw import model_validator
+
+
+class Request:
+    @model_validator(mode="before")
+    @classmethod
+    def check_prompt(cls, data):
+        return data
+"""
+VALIDATOR = """
+    @model_validator(mode="before")
+    @classmethod
+    def check_messages(cls, data):
+        if not data.get("messages"):
+            raise ValueError("messages must be a non-empty list")
+        return data
+"""
+REQUEST_JOBS = {
+    "builds-request": [
+        ("proto.py", "<module>"),
+        ("proto.py", "Request"),
+        ("proto.py", "Request.check_prompt"),
+    ],
+    "elsewhere": [("other.py", "<module>"), ("other.py", "elsewhere")],
+}
+
+
+def test_a_new_validator_keeps_the_steps_that_used_its_class(
+    tmp_path, tmp_repo, monkeypatch
+):
+    """Pydantic runs the new validator on every construction, and no line of
+    the diff calls it. A step whose row ran the file keeps; one that never
+    touched it still drops."""
+    tmp_repo.write("vllm/fw.py", FRAMEWORK)
+    tmp_repo.write("vllm/proto.py", REQUEST)
+    base = tmp_repo.commit("base")
+    table = make_table(tmp_path, tmp_repo, REQUEST_JOBS)
+    tmp_repo.write("vllm/proto.py", REQUEST + VALIDATOR)
+    head = tmp_repo.commit("validator")
+
+    steps = [f"vllm_ci:{k}" for k in REQUEST_JOBS]
+    keys = RowKeys({"vllm_ci"}, {"vllm_ci": 1.0}, steps={s: FakeStep() for s in steps})
+
+    class Stub:
+        resolve = staticmethod(lambda *a, **k: keys)
+
+    monkeypatch.setattr("ci_selector.decide.RowKeys", Stub)
+    d = decide(
+        None,
+        _selection(*steps, path="vllm/proto.py"),
+        tmp_repo.root,
+        base,
+        head,
+        table=table,
+    )
+    assert not d.coverage_note
+    assert "vllm_ci:builds-request" in d.steps
+    assert "vllm_ci:elsewhere" in d.dropped_by_coverage
+    assert "new-names-reached-only-through-changed-code" not in d.reasons

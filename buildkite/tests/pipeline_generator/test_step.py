@@ -375,7 +375,7 @@ def test_otel_trace_wraps_every_command_on_trusted_main(fake_global_config):
 
     assert ".buildkite/scripts/ci-otel" in commands[0]
     assert "base64 --decode" not in commands[0]
-    assert len(commands[0]) < 500
+    assert len(commands[0]) < 520
     assert '. "$$CI_INFRA_OTEL_DIR/ci_otel.sh"' in commands[0]
     assert "ci_otel_start 1 " in commands[2]
     assert "export VALUE=ready" in commands[2]
@@ -707,6 +707,39 @@ def test_otel_setup_finds_helpers_in_checkout_outside_git(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "helper-loaded" in result.stderr
+
+
+def test_otel_setup_finds_helpers_in_image_workspace(tmp_path):
+    # The CPU test image has no .git, and the docker plugin doesn't pass the
+    # checkout path in: the helpers are only in the image's own workspace.
+    workspace = tmp_path / "vllm-workspace"
+    helper_dir = workspace / ".buildkite" / "scripts" / "ci-otel"
+    helper_dir.mkdir(parents=True)
+    (helper_dir / "ci_otel.sh").write_text("echo helper-loaded >&2\n")
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir()
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("CI_INFRA_OTEL_DIR", "BUILDKITE_BUILD_CHECKOUT_PATH")
+    }
+    env["GIT_CEILING_DIRECTORIES"] = str(tmp_path)
+    script = buildkite_step._otel_setup_command().replace("$$", "$")
+    assert script.count("/vllm-workspace") == 1
+    script = script.replace("/vllm-workspace", str(workspace))
+
+    result = subprocess.run(
+        ["/bin/sh", "-e", "-c", script],
+        cwd=tests_dir,
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "helper-loaded" in result.stderr
+    assert "tracing setup skipped" not in result.stderr
 
 
 @pytest.mark.parametrize("dind, traced", [(False, True), (True, False)])

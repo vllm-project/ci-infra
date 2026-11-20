@@ -48,7 +48,7 @@ done
 
 gcc -std=gnu11 -O2 -Wall -Wextra -shared -fPIC \
   -DKERNREC_KERNEL_T="$KT" -I"$CUPTI_INC" -I"$CUDA_INC" \
-  kernrec.c -o libkernrec.so "$LIBFILE" -Wl,-rpath,"$CUPTI_LIB" -lpthread
+  kernrec.c -o libkernrec.so "$LIBFILE" -Wl,-rpath,"$CUPTI_LIB" -lpthread -ldl
 
 echo "built $(pwd)/libkernrec.so"
 echo "  record struct: $KT"

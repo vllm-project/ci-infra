@@ -46,7 +46,7 @@ to skip dropping entirely.
 from __future__ import annotations
 
 import os
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -249,13 +249,15 @@ def _unreadable_rows(state, table: Table) -> int:
     return len(set(table._rows) - readable)
 
 
-def _steps_at(repo: Path, ref: str) -> tuple[frozenset[str], frozenset[tuple]]:
-    """Every step the pipeline yaml declares at `ref`, spelled both ways.
+def _steps_at(repo: Path, ref: str) -> tuple[frozenset[str], dict[tuple, tuple]]:
+    """Every step the pipeline yaml declares at `ref`, spelled both ways: its
+    ids, and each identity mapped to the steps holding it.
 
     Both, because neither alone answers "is this step here". `step_id` falls
     back to the label, so a reword makes one step look like two; `identity` is
     rename-tolerant but says nothing about a step that was genuinely renamed
-    AND moved. `restrict_to` keeps a candidate matching either.
+    AND moved. `restrict_to` keeps a candidate matching either, and files an
+    identity match under the step `ref` has, so the emitter can name it.
 
     Deliberately not `state_for`: that builds an import graph and costs ~17s,
     and the state cache holds two entries, both already spoken for here. This
@@ -271,9 +273,15 @@ def _steps_at(repo: Path, ref: str) -> tuple[frozenset[str], frozenset[tuple]]:
         # No pipeline at that ref is not an answer about which steps exist,
         # only that we could not look. Empty means "do not restrict", so the
         # add side keeps working instead of silently switching itself off.
-        return frozenset(), frozenset()
+        return frozenset(), {}
     steps = [step for config in configs for step in load_steps(tree, config)]
-    return frozenset(s.step_id for s in steps), frozenset(s.identity for s in steps)
+    holders: dict[tuple, list] = defaultdict(list)
+    for step in steps:
+        holders[step.identity].append(step)
+    return (
+        frozenset(s.step_id for s in steps),
+        {identity: tuple(held) for identity, held in holders.items()},
+    )
 
 
 def _apply_record(
@@ -301,8 +309,8 @@ def _apply_record(
 
     stale: frozenset[str] = frozenset()
     if os.environ.get(FRESHNESS_ENV):
-        # `RowKeys.resolve` already built and cached this state, so this is
-        # cheap.
+        # The one full state at the table's commit, built only when the gate
+        # is on: `RowKeys.resolve` reads that commit's yaml alone.
         surfaces = freshness.build(state_for(repo, recorded_at), recorded_at)
         moved = freshness.changed_between(repo, recorded_at, base)
         stale = frozenset(surfaces.stale_steps(selection.selected, moved))
@@ -511,7 +519,7 @@ def _apply_kernel_record(
     reasons = Counter()
     files: dict[str, list[str]] = {}
     for pair in kernels:
-        keys = RowKeys.resolve_from_state(set(pair.table._rows), state)
+        keys = RowKeys.resolve_from_pipelines(set(pair.table._rows), state.pipelines)
         stale: frozenset[str] = frozenset()
         if os.environ.get(FRESHNESS_ENV):
             stale = _csrc_moved_since(repo, pair.symbol_map.commit, base, changed)
@@ -613,7 +621,7 @@ def _apply_library_record(
         return
     if not getattr(state, "pipelines", None):
         raise RuntimeError("no pipeline state to resolve step keys against")
-    keys = RowKeys.resolve_from_state(set(table._rows), state)
+    keys = RowKeys.resolve_from_pipelines(set(table._rows), state.pipelines)
     dropped, reasons = libraries.read_pr(
         table,
         selection,

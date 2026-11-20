@@ -47,13 +47,24 @@ run_all_patterns:
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "setup.py"
-  - "csrc/"
 
 # List of regex patterns to exclude from run_all_patterns checks.
 # If a file matches run_all_patterns but ALSO matches one of these,
 # it will NOT trigger a "run all".
 run_all_exclude_patterns:
   - "docker/Dockerfile."
+  - "csrc/cpu/"
+
+# Optional. List of regex patterns to trigger all AMD tests, on top of
+# run_all_patterns (which already triggers AMD too). For files that matter to
+# AMD but are excluded or left out above, e.g. docker/Dockerfile.rocm_base.
+amd_run_all_patterns:
+  - "csrc/"
+  - "docker/Dockerfile.rocm_base"
+
+# Optional. List of regex patterns to exclude from amd_run_all_patterns checks.
+# run_all_exclude_patterns does not apply here.
+amd_run_all_exclude_patterns:
   - "csrc/cpu/"
 
 # Container registry to store images
@@ -68,10 +79,12 @@ repositories:
 ## Jobs that are not selected
 
 A step runs when its `source_file_dependencies` match the change (or on
-nightly / `RUN_ALL` builds); optional steps never run on their own. An AMD
-step counts an edit to its own yaml only if the edit changes the step's entry,
-or can't be tied to single steps. An optional AMD step whose entry changes runs
-too, as ci-selector does for the steps it picks. Every
+nightly / `RUN_ALL` builds); optional steps never run on their own, except
+that a change to the ROCm stack image (`docker/Dockerfile.rocm_base` or
+`tools/vllm-rocm/therock_wheels.py`) runs every AMD step. An AMD step counts
+an edit to its own yaml only if the edit changes the step's entry, or can't be
+tied to single steps. An optional AMD step whose entry changes runs too, as
+ci-selector does for the steps it picks. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
 jobs**, near the top of the build lists them all as checkboxes under their
 group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite
@@ -154,6 +167,12 @@ The generator relies on several environment variables, typically provided by Bui
 * `NIGHTLY`: Set to "1" to auto-run the curated torch-nightly steps (those tagged `mirror.torch_nightly`).
 * `TORCH_NIGHTLY`: Set to "1" to build and run the *entire* test suite against torch nightly (full run, not just the tagged subset). Also forces a full run on the pinned torch. Intended to be set on the scheduled build. Implies `VLLM_CI_PLATFORM=cuda`, so AMD build/test steps and AMD mirrors are dropped: ROCm uses its own pinned torch and gains no signal from validating against a CUDA torch-nightly build.
 * `VLLM_CI_PLATFORM`: Set to `amd` or `cuda` to generate only that platform's jobs; every other step is dropped from the pipeline (not deferred into "Run more jobs"). `amd` keeps the AMD jobs: `amd_cpu` (the AMD build steps), the AMD GPUs and `amd-` mirrors. `cuda` keeps every other job (so for now it also keeps the few Intel, Arm and Ascend jobs). Steps are still chosen by the usual rules within the platform, so add `RUN_ALL=1` or `NIGHTLY=1` to run all of them. With `amd`, the test selector does not run, since it never picks AMD steps. `VLLM_CI_ONLY_STEP_KEYS` naming a step outside the platform fails generation.
+* `AITER_NIGHTLY`: Set to "1" to test vLLM against the latest [AITER](https://github.com/ROCm/aiter) nightly wheel (or the one `AITER_SPEC` pins). Meant for a scheduled build of `main`.
+    * Runs only the AMD build steps and the MI300, MI325 and MI355 jobs (gfx942, gfx950). Everything else, CUDA and MI250 included, is dropped; PR builds still run pre-commit.
+    * Ignores `NOAUTO` and the docs-only skip.
+    * Pushes the image to `rocm/vllm-dev`, never `rocm/vllm-ci`.
+    * Turns off the selector recorders (`VLLM_CI_KERNREC`, `VLLM_CI_KERNREC_AMD`, `VLLM_CI_FNREC`).
+    * Generation fails with `TORCH_NIGHTLY` or `VLLM_CI_PLATFORM=cuda`, on a vLLM checkout without `.buildkite/scripts/rocm/build.sh`, or if a kept step depends on a dropped one.
 * `RUN_ALL`: Set to "1" to force run all steps.
 * `VLLM_CI_IMAGES_STEP`: The key of the step that runs `pipeline-generator --images_only` beside bootstrap. Set on bootstrap, so it leaves the early images to that step (see "Image builds start before the test selector").
 * `VLLM_CI_EARLY_IMAGE_UPLOAD`: Set to "0" to upload the whole pipeline at once, early images included.
@@ -167,7 +186,9 @@ The generator relies on several environment variables, typically provided by Bui
     set, the generator emits those steps and their transitive dependencies,
     ignoring normal source-file selection. Generated AMD mirror keys such as
     `amd-multi-modal-processor` are accepted and select only the mirror plus
-    its AMD dependencies. Unknown keys fail generation.
+    its AMD dependencies. Unknown keys fail generation. With
+    `AITER_NIGHTLY=1`, so does a key for a step the AITER nightly does not
+    run, such as a CUDA or MI250 job.
 
 Kubernetes-backed test jobs read `BUILDKITE_ANALYTICS_TOKEN` from the
 `buildkite-analytics-token-secret` Secret's `token` key when it is available.

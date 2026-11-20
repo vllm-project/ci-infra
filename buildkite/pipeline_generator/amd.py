@@ -52,9 +52,16 @@ AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
 )
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
-AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
+# What vLLM's .buildkite/scripts/rocm/build.sh keys the ROCm stack image on,
+# the image every AMD step runs in: a change to either file rebuilds it.
+AMD_ROCM_STACK_FILES = (
+    "docker/Dockerfile.rocm_base",
+    "tools/vllm-rocm/therock_wheels.py",
+)
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
+# vLLM builds AITER only for these (AITER_ROCM_ARCH in docker/Dockerfile.rocm_base).
+AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
         "ensure-ci-base-amd",
@@ -156,12 +163,6 @@ def get_rocm_base_refresh_timeout() -> int:
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
 
-def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
-    return default_should_run or (
-        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
-    )
-
-
 def get_rocm_base_refresh_env() -> Dict[str, str]:
     """Bind the refresh script controls to the timeout decision."""
     if rocm_build_layout():
@@ -176,6 +177,7 @@ def get_rocm_base_refresh_env() -> Dict[str, str]:
 class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
+    arch: str
     uses_dra: bool = False
     # One queue serves every GPU count; the agent stacks behind it are told
     # apart by their gpu_size tag, so the step must target it explicitly.
@@ -184,32 +186,35 @@ class AmdDeviceConfig:
 
 AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI250_1.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 1, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 1, "gfx90a", gpu_size_tag=True
     ),
     DeviceType.AMD_MI250_2.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 2, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 2, "gfx90a", gpu_size_tag=True
     ),
     DeviceType.AMD_MI250_4.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 4, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 4, "gfx90a", gpu_size_tag=True
     ),
     DeviceType.AMD_MI250_8.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 8, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 8, "gfx90a", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1),
-    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2),
-    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4),
-    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8),
-    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1),
-    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2),
-    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4),
-    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8),
+    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1, "gfx942"),
+    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2, "gfx942"),
+    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4, "gfx942"),
+    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8, "gfx942"),
+    DeviceType.AMD_MI300_DPX.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI300_DPX, 1, "gfx942", uses_dra=True
+    ),
+    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1, "gfx942"),
+    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2, "gfx942"),
+    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4, "gfx942"),
+    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8, "gfx942"),
     DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
+        AgentQueue.AMD_MI355_DPX, 1, "gfx950", uses_dra=True
     ),
-    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
-    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
-    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
-    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8),
+    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1, "gfx950"),
+    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2, "gfx950"),
+    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4, "gfx950"),
+    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8, "gfx950"),
 }
 
 
@@ -256,6 +261,14 @@ def valid_amd_gpu_devices() -> List[str]:
     return list(AMD_DEVICE_CONFIGS)
 
 
+def runs_in_aiter_nightly(device: Optional[str]) -> bool:
+    """AMD build steps, and GPU jobs on an AITER arch."""
+    if _device_value(device) == DeviceType.AMD_CPU.value:
+        return True
+    config = get_amd_device_config(device)
+    return config is not None and config.arch in AITER_GPU_ARCHS
+
+
 def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
     config = get_amd_device_config(device)
     return config.queue if config else None
@@ -265,13 +278,14 @@ _LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
 
 
 def get_amd_label_tag(device: Optional[str]) -> str:
-    """The hardware tag of an AMD GPU label: "MI355 DPX" for mi355_dpx, else
-    the pool's family ("mi300_1" -> "MI300"); empty for non-GPU devices."""
+    """The hardware tag of an AMD GPU label: "<FAMILY> DPX" for a *_dpx device
+    ("mi300_dpx" -> "MI300 DPX"), else the pool's family ("mi300_1" -> "MI300");
+    empty for non-GPU devices."""
     value = _device_value(device) or ""
-    if value == DeviceType.AMD_MI355_DPX.value:
-        return "MI355 DPX"
     if not value.startswith("mi"):
         return ""
+    if value.endswith("_dpx"):
+        return f"{value.removesuffix('_dpx').upper()} DPX"
     return value.split("_", 1)[0].upper()
 
 
