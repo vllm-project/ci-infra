@@ -159,7 +159,6 @@ def compare(
                     if len(shards) > 1
                 },
                 "unverified": None,
-                "unverified_detail": None,
             }
             # Reasons name the problem only, so commands with the same problem
             # group together; which shards are involved goes in the detail.

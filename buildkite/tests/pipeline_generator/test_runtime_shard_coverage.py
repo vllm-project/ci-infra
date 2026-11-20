@@ -785,6 +785,14 @@ def test_compare_carries_the_command_text_and_names_it():
     assert "**k** · `pytest -v -s t` (command 1 of 1)" in coverage.report([result])[1]
 
 
+def test_both_shard_details_share_the_command_line():
+    # Shard 1 finished without a test list; shard 2 left no record at all.
+    [result] = coverage.compare(STEPS, [_record(0, ["a"])])
+    assert result["unverified"] == "no full test list to compare against; no record of which tests ran"
+    assert result["unverified_detail"] == "shard 1 saved no test list · no record from shard 2"
+    assert "  - command 1 of 1 · shard 1 saved no test list · no record from shard 2" in coverage.report([result])[1]
+
+
 def test_a_command_of_exactly_the_limit_is_not_cut():
     text = "pytest " + "x" * (coverage.MAX_COMMAND_CHARS - 7)
     result = {"label": "Command (1/1)", "command": text}
