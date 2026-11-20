@@ -130,8 +130,8 @@ def test_a_test_no_finished_shard_ran_is_a_miss():
     style, text = coverage.report([result])
     assert style == "error"
     assert text == (
-        "### :x: 1 tests ran in no shard, though every shard finished\n"
-        "**k**, Command (1/1):\n- `c`"
+        "### :x: 1 tests ran in no shard, though every shard finished\n\n"
+        "**k** · Command (1/1)\n- `c`"
     )
 
 
@@ -169,8 +169,8 @@ def test_an_unfinished_shard_is_apart_from_misses_but_fails_closed():
     # Not a miss (the shard may have run them), but unproven: it fails.
     assert style == "error"
     assert text == (
-        "### Shards that didn't finish, so these tests may not have run\n"
-        "**k**, Command (1/1): shard 2\n- `b`"
+        "### Shards that didn't finish, so these tests may not have run\n\n"
+        "**k** · Command (1/1) · shard 2\n- `b`"
     )
 
 
@@ -230,7 +230,7 @@ def test_a_shard_with_no_record_fails_closed():
     style, text = coverage.report([result])
     assert style == "error"
     assert text == (
-        "### Couldn't check\n**k**, Command (1/1): shard 2 recorded nothing"
+        "### Couldn't check\n\n**k**\n- Command (1/1): shard 2 recorded nothing"
     )
 
 
@@ -270,7 +270,7 @@ def test_no_expected_list_cannot_be_checked_and_fails_closed():
     style, text = coverage.report([result])
     assert style == "error"
     assert text == (
-        "### Couldn't check\n**k**, Command (1/1): shard 1 recorded no test list"
+        "### Couldn't check\n\n**k**\n- Command (1/1): shard 1 recorded no test list"
     )
 
 
@@ -352,8 +352,8 @@ def test_a_duplicate_alone_is_a_warning_naming_the_test_and_its_shards():
     style, text = coverage.report(coverage.compare(STEPS, records))
     assert style == "warning"
     assert text == (
-        "### Tests that ran in more than one shard\n"
-        "**k**, Command (1/1):\n- `b`: shards 1, 2"
+        "### Tests that ran in more than one shard\n\n"
+        "**k** · Command (1/1)\n- `b`: shards 1, 2"
     )
 
 
@@ -364,12 +364,12 @@ def test_a_miss_stays_an_error_when_a_duplicate_is_also_listed():
     assert "- `c`" in text and "- `b`: shards 1, 2" in text
 
 
-def test_the_duplicate_list_is_capped_like_the_others():
-    many = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN + 2)]
+def test_a_long_duplicate_list_folds_into_files():
+    many = [f"a.py::t{i}" for i in range(coverage.MAX_IDS_INLINE + 2)]
     records = [_record(0, many, expected=many), _record(1, many)]
     _, text = coverage.report(coverage.compare(STEPS, records))
-    assert text.count(": shards 1, 2") == coverage.MAX_IDS_SHOWN
-    assert text.endswith("- and 2 more, listed in this job's log")
+    assert ": shards 1, 2" not in text  # per-ID shards are in the log
+    assert "<details><summary>7 tests in 1 file</summary>\n\n- `a.py`: 7" in text
 
 
 def test_an_unfinished_shards_reported_outcome_counts_towards_a_duplicate():
@@ -413,7 +413,7 @@ def test_same_attempt_number_takes_the_later_record():
 
 def test_contract_with_the_generator():
     assert coverage.STEPS_ENV == "RUNTIME_SHARD_COVERAGE_STEPS"
-    assert coverage.MAX_IDS_SHOWN == 30
+    assert coverage.MAX_IDS_INLINE == 5 and coverage.MAX_FILES_SHOWN == 30
 
 
 def test_a_soft_fail_step_missed_test_is_still_an_error():
@@ -463,6 +463,9 @@ def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
         ("finished\n", "soft_failed\n", 0),
         ("finished\n", "errored\n", 0),
         ("canceled\n", "canceled\n", 0),
+        # What Buildkite reports for a soft-fail step with a canceled shard
+        # (build 104463): the canceled state alone is the allowed failure.
+        ("canceled\n", "neutral\n", 0),
         ("ignored\n", "soft_failed\n", 0),
         ("waiting_failed\n", "hard_failed\n", 0),
         ("running\n", "hard_failed\n", 1),
@@ -517,7 +520,7 @@ def test_a_soft_fail_step_unverified_fails_closed():
     assert result["unverified"] == "shard 2 recorded nothing"
     style, text = coverage.report([result])
     assert style == "error"
-    assert "shard 2 recorded nothing (soft-fail step)" in text
+    assert "**k** (soft-fail step)\n- Command (1/1): shard 2 recorded nothing" in text
 
 
 def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch):
@@ -654,12 +657,13 @@ def test_a_hard_steps_gap_stays_an_error_next_to_a_soft_fail_steps_gap():
     assert coverage.report([soft, hard])[0] == "error"
 
 
-def test_a_list_of_exactly_the_cap_has_no_more_line():
-    expected = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN)]
+def test_a_list_of_exactly_the_inline_cap_stays_inline():
+    expected = [f"t{i}" for i in range(coverage.MAX_IDS_INLINE)]
     [result] = coverage.compare(
         STEPS, [_record(0, [], expected=expected), _record(1, [])]
     )
-    assert "more" not in coverage.report([result])[1]
+    text = coverage.report([result])[1]
+    assert "<details>" not in text and text.count("- `t") == coverage.MAX_IDS_INLINE
 
 
 def test_several_unfinished_shards_are_named_together():
@@ -686,14 +690,73 @@ def test_commands_are_compared_apart():
     assert first["missed"] == [] and second["missed"] == ["same"]
 
 
-def test_the_annotation_caps_its_lists_and_points_at_the_log():
-    expected = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN + 5)]
+def test_a_long_list_folds_into_counts_per_file_and_points_at_the_log():
+    # Busiest file first, then by name; past the file cap, a count of the rest.
+    # Listed in reverse: compare() sorts the IDs, so ties come out by name.
+    expected = [f"big.py::t{i}" for i in range(3)] + [
+        f"f{i:02d}.py::t" for i in reversed(range(coverage.MAX_FILES_SHOWN + 1))
+    ]
     [result] = coverage.compare(
         STEPS, [_record(0, [], expected=expected), _record(1, [])]
     )
     _, text = coverage.report([result])
-    assert text.count("- `t") == coverage.MAX_IDS_SHOWN
-    assert text.endswith("- and 5 more, listed in this job's log")
+    total = len(expected)
+    files = coverage.MAX_FILES_SHOWN + 2
+    assert f"<details><summary>{total} tests in {files} files</summary>\n\n- `big.py`: 3\n- `f00.py`: 1" in text
+    assert text.count("- `") == coverage.MAX_FILES_SHOWN
+    assert text.endswith(
+        "- and 2 more files\n\nEvery test ID is in this job's log.\n</details>"
+    )
+
+
+def test_exactly_the_file_cap_lists_every_file():
+    expected = [f"f{i:02d}.py::t{j}" for i in range(coverage.MAX_FILES_SHOWN) for j in range(2)]
+    [result] = coverage.compare(
+        STEPS, [_record(0, [], expected=expected), _record(1, [])]
+    )
+    text = coverage.report([result])[1]
+    assert text.count("- `") == coverage.MAX_FILES_SHOWN and "more files" not in text
+
+
+def test_a_soft_fail_steps_state_and_outcome_are_logged(monkeypatch, capsys):
+    results = [{"step": "s", "soft_fail": True, "unverified": "x", "unfinished": []}]
+
+    def fake_run(command, check, **kwargs):
+        value = "canceled\n" if command[3] == "state" else "neutral\n"
+        return subprocess.CompletedProcess(command, 0, stdout=value)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    coverage._relax_soft_failed_gaps(results)
+    assert capsys.readouterr().out == "soft-fail step s: state=canceled outcome=neutral\n"
+    assert results[0]["soft_failed"] is True
+
+
+def test_couldnt_check_groups_a_steps_commands_by_reason():
+    results = [
+        {"step": "s", "label": f"Command ({n}/6)", "soft_fail": True,
+         "unverified": "shard 1 recorded nothing", "unexpected": []}
+        for n in (1, 2, 4)
+    ] + [
+        {"step": "s", "label": "Command (5/6)", "soft_fail": True,
+         "unverified": "shard 2 recorded nothing", "unexpected": ["x"]},
+        {"step": "t", "label": "custom", "soft_fail": False,
+         "unverified": "shard 1 recorded nothing", "unexpected": []},
+        {"step": "t", "label": "other", "soft_fail": False,
+         "unverified": "shard 1 recorded nothing", "unexpected": []},
+    ]
+    for result in results:
+        result.update(tests=1, missed=[], unfinished=[], not_run=[], duplicated={})
+    style, text = coverage.report(results)
+    assert style == "error"
+    assert text == (
+        "### Couldn't check\n\n"
+        "**s** (soft-fail step)\n"
+        "- Commands 1, 2, 4 of 6: shard 1 recorded nothing\n"
+        "- Command (5/6): shard 2 recorded nothing\n\n"
+        "Reported but not expected, Command (5/6):\n- `x`\n\n"
+        "**t**\n"
+        "- custom, other: shard 1 recorded nothing"
+    )
 
 
 def test_records_from_another_build_are_ignored_when_the_build_is_known():
@@ -831,14 +894,7 @@ def test_artifact_download_timeout_is_reported(monkeypatch):
     assert "(TimeoutExpired)" in annotated[0]
 
 
-def test_deterministic_collection_errors_get_no_advice_even_at_the_deadline(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
-    monkeypatch.setenv("BUILDKITE_JOB_ID", "coverage-job")
-    (
-        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
-    ).touch()
+def test_deterministic_collection_errors_get_no_retry_advice(monkeypatch):
     failed = _record(1, [], finished=False)
     failed["planned"] = None
     cases = [
@@ -924,7 +980,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
 
 
 def test_main_logs_every_duplicate_and_downloads_every_attempt(monkeypatch, capsys):
-    many = [f"t{i}" for i in range(coverage.MAX_IDS_SHOWN + 1)]
+    many = [f"t{i}" for i in range(coverage.MAX_IDS_INLINE + 1)]
     records = [_record(0, many, expected=many), _record(1, many)]
     calls = []
 
@@ -954,12 +1010,6 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     monkeypatch.delenv("BUILDKITE_STEP_KEY", raising=False)
     monkeypatch.delenv("TMPDIR", raising=False)
     monkeypatch.delenv("BUILDKITE_JOB_ID", raising=False)
-    marker_paths = []
-    monkeypatch.setattr(
-        coverage.os.path,
-        "exists",
-        lambda path: marker_paths.append(path) or False,
-    )
     calls = []
     annotated = []
 
@@ -982,93 +1032,10 @@ def test_main_fails_closed_with_no_records(monkeypatch):
     assert calls[1][5] == "error"
     assert annotated[0].startswith("### Couldn't check")
     assert "After the retried shard finishes" not in annotated[0]
-    assert marker_paths == ["/tmp/runtime-shard-coverage--wait-timed-out"]
 
 
-def test_main_advises_retry_when_the_wait_deadline_left_shards_pending(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
-    monkeypatch.setenv("BUILDKITE_JOB_ID", "coverage-job")
-    (
-        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
-    ).touch()
-    annotated = []
-
-    def fake_run(command, check, **kwargs):
-        if command[:2] == ["buildkite-agent", "annotate"]:
-            annotated.append(kwargs["input"])
-        return subprocess.CompletedProcess(command, 0, stdout="")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(coverage, "_read_records", lambda _: [])
-    assert coverage.main() == 1
-    assert annotated[0].startswith("### Couldn't check")
-    assert (
-        "Shards were still pending at the wait deadline; after they finish, "
-        "retry this coverage job."
-    ) in annotated[0]
 
 
-def test_deadline_retry_advice_distinguishes_unfinished_from_misses(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setenv("TMPDIR", str(tmp_path))
-    monkeypatch.setenv("BUILDKITE_JOB_ID", "coverage-job")
-    (
-        tmp_path / "runtime-shard-coverage-coverage-job-wait-timed-out"
-    ).touch()
-    annotated = []
-
-    def fake_run(command, check, **kwargs):
-        if command[:3] == ["buildkite-agent", "step", "get"]:
-            if command[3] == "state":
-                return subprocess.CompletedProcess(command, 0, stdout="finished\n")
-            return subprocess.CompletedProcess(command, 0, stdout="soft_failed\n")
-        if command[:2] == ["buildkite-agent", "annotate"]:
-            annotated.append(kwargs["input"])
-        return subprocess.CompletedProcess(command, 0, stdout="")
-
-    cases = [
-        (
-            "unfinished",
-            STEPS,
-            [
-                _record(0, ["a"], expected=["a", "b"], planned=["a"]),
-                _record(1, [], finished=False, planned=["b"]),
-            ],
-            True,
-        ),
-        (
-            "allowed soft failure",
-            SOFT_STEPS,
-            [
-                _record(0, [], expected=["a", "b"], planned=["a"]),
-                _record(1, [], finished=False, planned=["b"]),
-            ],
-            False,
-        ),
-        (
-            "definite miss",
-            STEPS,
-            [
-                _record(0, ["a"], expected=["a", "b"], planned=["a"]),
-                _record(1, [], planned=["b"]),
-            ],
-            False,
-        ),
-    ]
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    for name, steps, records, expected_retry in cases:
-        monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(steps))
-        monkeypatch.setattr(coverage, "_read_records", lambda _: records)
-        annotated.clear()
-        assert coverage.main() == 1, name
-        assert annotated[0].startswith("###"), name
-        assert (
-            "Shards were still pending at the wait deadline" in annotated[0]
-        ) is expected_retry, name
 
 
 def test_main_checks_only_the_current_builds_records(monkeypatch):

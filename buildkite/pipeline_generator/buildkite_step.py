@@ -845,33 +845,8 @@ COLLECT_WAIT = (
 )
 
 
-# Polls each sharded step's state until all have stopped or the deadline set
-# at generation passes; at the deadline it marks the wait as timed out, and
-# coverage checks the available evidence and still fails anything unproven.
-# `|| true`: under the agent's `bash -e` a failed state read would end the
-# step; it reads as unfinished instead, as in COLLECT_WAIT.
-COVERAGE_WAIT = (
-    'marker="$${TMPDIR:-/tmp}/runtime-shard-coverage-'
-    '$$BUILDKITE_JOB_ID-wait-timed-out"; rm -f "$$marker"; '
-    'deadline="$$RUNTIME_SHARD_COVERAGE_DEADLINE"; '
-    "while :; do "
-    'pending=""; '
-    "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null || true)"; '
-    'case "$$s" in finished|ignored|canceled|waiting_failed) ;; '
-    '*) pending="$$k"; break;; esac; '
-    "done; "
-    '[ -z "$$pending" ] && { echo "every sharded step has stopped"; break; }; '
-    '[ "$$(date +%s)" -ge "$$deadline" ] && '
-    '{ touch "$$marker"; echo "wait deadline reached with $$pending '
-    '($${s:-state unknown}); continuing"; break; }; '
-    'echo "waiting on $$pending ($${s:-state unknown}); deadline '
-    '$$(date -u -d "@$$deadline" +%H:%MZ)"; '
-    "sleep 30; "
-    "done"
-)
-COVERAGE_TIMEOUT_MINUTES = 360
-COVERAGE_WAIT_MINUTES = COVERAGE_TIMEOUT_MINUTES - 15
+# The checker itself takes seconds; the rest is artifact download.
+COVERAGE_TIMEOUT_MINUTES = 30
 
 
 def _collect_step(
@@ -964,10 +939,10 @@ def shard_coverage_step(
     Fails when a test is missed or coverage cannot be proven, so a successful
     shard cannot hide a missing record. The comparison source is packed at
     generation, so the job runs the same revision as the plugin without a
-    runtime download. Polling rather than depending on the shards means a
-    canceled soft-fail shard cannot suppress the whole check. At the wait
-    deadline, the checker runs and fails any coverage still unproven, including
-    a soft-fail step whose final outcome is not yet known.
+    runtime download. It depends on the sharded steps, so no agent is held
+    while they queue and run. A canceled or timed-out shard stops it from
+    running (Buildkite's rule even with allow_dependency_failure); the build
+    is red then, and retrying the shard releases it.
     """
     steps = {}
     sharded = []
@@ -1000,29 +975,20 @@ def shard_coverage_step(
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
     retry = ensure_infra_failure_retry(None)
-    depends_on = []
-    for dep in (d for s in sharded for d in (s.depends_on or [])):
-        if dep not in depends_on:
-            depends_on.append(dep)
     return BuildkiteCommandStep(
         label=":mag: Check every test ran",
         key="runtime-shard-coverage",
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
-            "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(steps),
-            "RUNTIME_SHARD_COVERAGE_DEADLINE": str(
-                int(time.time()) + COVERAGE_WAIT_MINUTES * 60
-            ),
             "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),
         },
         agents={"queue": queue.value},
         commands=[
-            COVERAGE_WAIT,
             'python3 -I -c \'import base64,json,os,zlib;'
             'exec(json.loads(zlib.decompress(base64.b64decode('
             'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\'',
         ],
-        depends_on=depends_on,
+        depends_on=list(steps),
         allow_dependency_failure=True,
         soft_fail=False,
         timeout_in_minutes=COVERAGE_TIMEOUT_MINUTES,
