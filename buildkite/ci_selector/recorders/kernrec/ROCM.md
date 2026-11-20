@@ -110,6 +110,11 @@ Job `passed`, shard `complete`, `recording_available`, and `trace_complete` desc
 different facts. A successful job with unavailable recording still passed. Both
 native backends require healthy trace completion before using silence to drop a
 step. Positive observations can still select steps from incomplete recordings.
+A successful job with no recording at all is complete only with a successful
+exit probe (`hipInit` from the HIP runtime torch's `libtorch_hip.so`
+resolves, with the job's `ROCP_TOOL_LIBRARIES` and `LD_PRELOAD`, recording
+outside the upload; see README.md). Torch import already initializes
+the SDK, so this mostly covers jobs that never import torch.
 
 ## Native source maps
 

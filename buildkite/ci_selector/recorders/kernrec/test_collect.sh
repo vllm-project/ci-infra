@@ -25,6 +25,10 @@
 #      -> verdict short, not "no valid table/map pair", the other backend
 #      still publishes, exit 1
 #  12. counts but no share (SHARE=) -> the share gate is skipped, saying so
+#  13. a job with no recordings but a successful empty-job probe counts as
+#      delivered, and its row stays usable -> publishes
+#  14. the same probe on a job with a collection error is not delivered ->
+#      short, exit 1
 #
 # Real Python is used for kernel_table.py; only network/cloud commands are
 # faked. Set KERNREC_PYTHON to the project's virtual-environment interpreter.
@@ -47,6 +51,11 @@ run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|n
   [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
   [[ "$mode" == "unusable-rerun" ]] && echo '{"step_key":"step-x","exit_status":1}' > "$T/build/.kernrec/job-a/kernrec.json"
   [[ "$mode" == "empty" ]] && rm -rf "$T/build/.kernrec/job-a"
+  if [[ "$mode" == empty-probe* ]]; then
+    local error=null; [[ "$mode" == empty-probe-error ]] && error='"setup incomplete"'
+    mkdir -p "$T/build/.kernrec/job-b"
+    echo '{"step_key":"step-x","exit_status":0,"backend":"cuda","collection_available":true,"collection_error":'"$error"',"recordings":[],"empty_probe":{"ok":true,"recording":"# kernrec v1 backend=cuda recorder=cupti activity=1 sync=1 pid=3 ppid=1 exe=python\n# end records=0 unique=0 dropped=0 errors=0 unresolved=0\n"}}' > "$T/build/.kernrec/job-b/kernrec.json"
+  fi
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
     "$KERNREC_PYTHON" - "$T/build/kernel_symbol_map.json.gz" <<'PY'
@@ -169,6 +178,11 @@ PY
     grep -q "rocm not published (short: 0 of 3 jobs delivered)" "$T/log" \
       || { verdict=FAIL; fail=1; echo "      the log does not say rocm was short"; }
   fi
+  if [[ "$mode" == empty-probe* ]]; then
+    local want_delivered=2; [[ "$mode" == empty-probe-error ]] && want_delivered=1
+    grep -q "^cuda: ${want_delivered} jobs delivered" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      cuda did not count ${want_delivered} delivered jobs"; }
+  fi
   if [[ -z "$share" && -n "${CASE_ENV:-}" ]]; then
     grep -q "no delivery share" "$T/log" \
       || { verdict=FAIL; fail=1; echo "      skipped the share gate without saying so"; }
@@ -199,4 +213,6 @@ CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=5" run_case armed-short       1 no  no  nor
 CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-broken-cuda 1 yes yes both-bad-cuda no yes
 CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=3" run_case armed-rocm-lost   1 yes yes lost-rocm
 SHARE= CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=5" run_case no-share          0 yes yes normal
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=2" run_case armed-empty-probed 0 yes yes empty-probed
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=2" run_case armed-empty-probe-error 1 no no empty-probe-error
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }
