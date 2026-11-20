@@ -95,6 +95,10 @@ APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
+COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
+# Where a shard's coverage records go, relative to the checkout.
+COVERAGE_DIR = ".runtime-shard-coverage"
+COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.json"
 # pytest-shard would select a subset a second time on top of the plan.
 # -n: pytest-xdist workers don't get the plan, so each shard would run it all.
 _UNSHARDABLE_ARGS = ("--num-shards", "--shard-id", "-n", "--numprocesses")
@@ -909,9 +913,15 @@ def plan_step(
                 planned["prefix"] = prefix
                 planned["label"] = f"Command ({position + 1}/{len(commands)})"
                 planned["position"] = position
-                # A test the plan doesn't name runs in the first shard that
-                # runs the command at all.
-                planned["fallback"] = owners(planned)[0]
+                # A test the plan doesn't name runs in the least-loaded shard
+                # that runs the command at all; that shard also collects the
+                # command's full inventory, a cost shard 0 shouldn't always pay.
+                # A fallback plan has no estimates: its first owner.
+                runs = owners(planned)
+                estimates = result["estimates"]
+                planned["fallback"] = (
+                    min(runs, key=estimates.__getitem__) if estimates else runs[0]
+                )
     except Exception as error:  # never block the step on its sharding
         result, reason = None, str(error)
     return result, summary(step_key, result, reason)
@@ -968,9 +978,17 @@ def plugin_source() -> str:
         return base64.b64encode(zlib.compress(f.read().encode())).decode()
 
 
-def shard_job_setup() -> List[str]:
+def shard_job_setup(checkout: str) -> List[str]:
     """Commands that install the plugin in a shard job, before its own. $$ is
-    a literal $ in the uploaded pipeline."""
+    a literal $ in the uploaded pipeline.
+
+    Args:
+        checkout: Where this job can see the Buildkite checkout, the only
+            place artifact_paths can upload the coverage records from.
+
+    Returns:
+        The commands.
+    """
     unpack_plugin = (
         "import base64, os, sys, zlib; sys.stdout.write(zlib.decompress("
         f"base64.b64decode(os.environ['{PLUGIN_ENV}'])).decode())"
@@ -984,6 +1002,7 @@ def shard_job_setup() -> List[str]:
         # command that sets its own PYTHONPATH (PYTHONPATH=/vllm-workspace
         # pytest ...) doesn't replace. It exits 0: a failed copy only warns.
         f"python3 {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
+        f'export {COVERAGE_DIR_ENV}="{checkout}/{COVERAGE_DIR}"',
     ]
 
 
