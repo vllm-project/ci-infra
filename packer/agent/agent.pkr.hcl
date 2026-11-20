@@ -28,6 +28,9 @@ build {
   sources = ["source.amazon-ebs.agent"]
   provisioner "shell" {
     script = "install-agent.sh"
+    environment_vars = [
+      "REQUIRE_EXACT_AGENT_VERSION=true"
+    ]
   }
   post-processor "manifest" {
     output     = "manifest-${var.architecture}.json"

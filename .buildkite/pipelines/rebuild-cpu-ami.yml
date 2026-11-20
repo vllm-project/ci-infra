@@ -11,6 +11,12 @@
 #   2. Update SSM parameter with new AMI ID
 #   3. Update Launch Templates and ASGs directly
 #   4. Cleanup old AMIs
+#
+# Canary mode: setting CANARY_STACK_VERSION (e.g. "7.2.0") on a manual build
+# builds the AMI from that Elastic CI Stack base, keeps the base image's
+# agent, and names the AMI so the cleanup step's filter cannot match it.
+# The publish steps (update-ssm, update-launch-templates, cleanup-amis) are
+# skipped, so a canary build never rolls anything out.
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
@@ -21,7 +27,7 @@ env:
 steps:
   - label: ":packer: Build CPU AMI"
     key: build-ami
-    if: build.branch == "main" || build.env("AGENT_ONLY") == "1"
+    if: build.branch == "main" || build.env("AGENT_ONLY") == "1" || (build.env("CANARY_STACK_VERSION") != null && build.env("CANARY_STACK_VERSION") != "")
     command:
       - |
         set -euo pipefail
@@ -29,6 +35,18 @@ steps:
           bash packer/agent/build.sh
           exit 0
         fi
+
+        AMI_NAME_PREFIX="vllm-buildkite-stack-linux-cpu-build"
+        if [[ -n "$${CANARY_STACK_VERSION:-}" ]]; then
+          echo "--- :warning: Canary build against Elastic CI Stack v$${CANARY_STACK_VERSION} (publish steps are skipped)"
+          if [[ ! "$$CANARY_STACK_VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$$ ]]; then
+            echo "Error: CANARY_STACK_VERSION must be a stack version like 7.2.0, got: '$$CANARY_STACK_VERSION'"
+            exit 1
+          fi
+          STACK_VERSION="$$CANARY_STACK_VERSION"
+          AMI_NAME_PREFIX="vllm-buildkite-stack-canary-linux-cpu-build"
+        fi
+
         cd packer/cpu
 
         # Install a pinned standalone yq if not available. The PyPI yq package
@@ -192,6 +210,7 @@ steps:
           -var "subnet_id=$$SUBNET_ID" \
           -var "ecr_token=$$ECR_TOKEN" \
           -var "vllm_commit=$$VLLM_COMMIT" \
+          -var "ami_name_prefix=$$AMI_NAME_PREFIX" \
           buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"
@@ -226,7 +245,7 @@ steps:
 
   - label: ":aws: Update SSM Parameter"
     key: update-ssm
-    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1" && (build.env("CANARY_STACK_VERSION") == null || build.env("CANARY_STACK_VERSION") == "")
     command:
       - |
         echo "--- :ssm: Updating SSM parameter with new AMI ID"
@@ -248,7 +267,7 @@ steps:
 
   - label: ":rocket: Update Launch Templates"
     key: update-launch-templates
-    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1" && (build.env("CANARY_STACK_VERSION") == null || build.env("CANARY_STACK_VERSION") == "")
     command:
       - |
         set -euo pipefail
@@ -359,7 +378,7 @@ steps:
 
   - label: ":broom: Cleanup Old AMIs"
     key: cleanup-amis
-    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1" && (build.env("CANARY_STACK_VERSION") == null || build.env("CANARY_STACK_VERSION") == "")
     command:
       - |
         set -euo pipefail
