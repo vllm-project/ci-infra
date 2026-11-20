@@ -159,13 +159,16 @@ def compare(
                     if len(shards) > 1
                 },
                 "unverified": None,
+                "unverified_detail": None,
             }
+            # Reasons name the problem only, so commands with the same problem
+            # group together; which shards are involved goes in the detail.
             unverified = []
+            details = []
             if expected is None:
-                unverified.append(
-                    "no full test list to compare against (shard "
-                    f"{command['fallback'] + 1} collects it and didn't save one)"
-                )
+                unverified.append("no full test list to compare against")
+                if command["fallback"] not in missing:
+                    details.append(f"shard {command['fallback'] + 1} saved no test list")
             elif not expected:
                 unverified.append("the full test list is empty")
             if unexpected:
@@ -186,9 +189,11 @@ def compare(
             if missing:
                 shards = ", ".join(str(shard + 1) for shard in missing)
                 noun = "shard" if len(missing) == 1 else "shards"
-                unverified.append(f"{noun} {shards} left no record of which tests ran")
+                unverified.append("no record of which tests ran")
+                details.append(f"no record from {noun} {shards}")
             if unverified:
                 result["unverified"] = "; ".join(unverified)
+                result["unverified_detail"] = " · ".join(details) or None
             if expected and not missing:
                 for nodeid in sorted(set(expected) - ran):
                     if nodeid in finished_planned:
@@ -326,7 +331,10 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         for step_results in by_step.values():
             reasons: Dict[str, List[str]] = {}
             for result in step_results:
-                reasons.setdefault(result["unverified"], []).append(_command_name(result))
+                name = _command_name(result)
+                if result.get("unverified_detail"):
+                    name += f" · {result['unverified_detail']}"
+                reasons.setdefault(result["unverified"], []).append(name)
             lines = [_step_heading(step_results[0])]
             for reason, names in reasons.items():
                 lines.append(f"- {reason[0].upper()}{reason[1:]}:")
