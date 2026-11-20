@@ -30,6 +30,11 @@ INSTALL_AGENT = REPO_ROOT / "packer/agent/install-agent.sh"
 
 V6_AMI_PREFIX = "vllm-buildkite-stack-linux-cpu-build"
 CANARY_AMI_PREFIX = "vllm-buildkite-stack-canary-linux-cpu-build"
+V7_AMI_PREFIX = "vllm-buildkite-stack-v7-linux-cpu-build"
+V6_SSM_PARAM = "/buildkite/cpu-build-ami/us-east-1"
+V7_SSM_PARAM = "/buildkite/cpu-build-ami/v7/us-east-1"
+V6_TARGET_STACKS = "bk-cpu-queue-postmerge-us-east-1 bk-small-cpu-queue-release bk-cpu-queue-release"
+V7_TARGET_STACKS = "bk-cpu-queue-premerge-us-east-1"
 PINNED_AGENT_VERSION = "3.138.2"
 
 
@@ -47,11 +52,11 @@ def run_canary_selection(env):
     script = (
         "set -euo pipefail\n"
         + canary_selection_fragment()
-        + '\necho "$STACK_VERSION|$AMI_NAME_PREFIX"'
+        + '\necho "$STACK_VERSION|$AMI_NAME_PREFIX|$SSM_PARAM_US_EAST_1|$TARGET_STACKS"'
     )
     return subprocess.run(
         ["bash", "-c", script],
-        env={"PATH": os.environ["PATH"], **env},
+        env={"PATH": os.environ["PATH"], **PIPELINE["env"], **env},
         capture_output=True,
         text=True,
     )
@@ -77,41 +82,156 @@ def test_commands_have_no_bare_dollar():
     assert bare_dollar_lines == []
 
 
+V6_SELECTION = f"6.21.0|{V6_AMI_PREFIX}|{V6_SSM_PARAM}|{V6_TARGET_STACKS}"
+
+
 def test_canary_selection_defaults_match_daily_v6():
-    assert_selection({"STACK_VERSION": "6.21.0"}, f"6.21.0|{V6_AMI_PREFIX}")
+    assert_selection({}, V6_SELECTION)
 
 
 def test_canary_selection_with_empty_canary_version():
-    assert_selection(
-        {"STACK_VERSION": "6.21.0", "CANARY_STACK_VERSION": ""},
-        f"6.21.0|{V6_AMI_PREFIX}",
-    )
+    assert_selection({"CANARY_STACK_VERSION": "", "AMI_LINE": ""}, V6_SELECTION)
 
 
 def test_canary_selection_with_canary_version():
+    # A canary keeps the v6 publish values, but its publish steps never run.
     assert_selection(
-        {"STACK_VERSION": "6.21.0", "CANARY_STACK_VERSION": "7.2.0"},
-        f"7.2.0|{CANARY_AMI_PREFIX}",
+        {"CANARY_STACK_VERSION": "7.2.0"},
+        f"7.2.0|{CANARY_AMI_PREFIX}|{V6_SSM_PARAM}|{V6_TARGET_STACKS}",
     )
+
+
+def test_v7_line_selection():
+    assert_selection(
+        {"AMI_LINE": "v7"},
+        f"7.2.0|{V7_AMI_PREFIX}|{V7_SSM_PARAM}|{V7_TARGET_STACKS}",
+    )
+
+
+def test_unknown_ami_line_is_rejected():
+    result = run_canary_selection({"AMI_LINE": "v8"})
+    assert result.returncode != 0
+    assert "AMI_LINE" in result.stdout + result.stderr
+
+
+def test_canary_and_ami_line_together_are_rejected():
+    result = run_canary_selection({"CANARY_STACK_VERSION": "7.2.0", "AMI_LINE": "v7"})
+    assert result.returncode != 0
+    assert "AMI_LINE" in result.stdout + result.stderr
 
 
 def test_canary_selection_rejects_malformed_version():
-    result = run_canary_selection(
-        {"STACK_VERSION": "6.21.0", "CANARY_STACK_VERSION": "v7.2.0"}
-    )
+    result = run_canary_selection({"CANARY_STACK_VERSION": "v7.2.0"})
     assert result.returncode != 0
     assert "CANARY_STACK_VERSION" in result.stdout + result.stderr
     # Fails before any build/download: the canary prefix is never selected.
     assert CANARY_AMI_PREFIX not in result.stdout
 
 
-def test_canary_ami_name_escapes_cleanup_filter():
-    command = STEPS["cleanup-amis"]["command"][0]
-    cleanup_filter = re.search(r"Values=([^\"]+)", command).group(1)
+def cleanup_filter_for(tmp_path, prefix):
+    """The describe-images name filter the cleanup step uses for a line."""
+    calls = run_publish_step(tmp_path, "cleanup-amis", {"ami-name-prefix": prefix})
+    filters = [c for c in calls if c.startswith("aws ec2 describe-images")]
+    assert filters, calls
+    return re.search(r"Name=name,Values=(\S+)", filters[0]).group(1)
+
+
+def test_canary_ami_name_escapes_cleanup_filter(tmp_path):
     canary_name = f"{CANARY_AMI_PREFIX}-20260101000000"
+    for prefix in (V6_AMI_PREFIX, V7_AMI_PREFIX):
+        assert not fnmatch.fnmatchcase(canary_name, cleanup_filter_for(tmp_path, prefix))
+
+
+def test_each_line_cleans_up_only_its_own_amis(tmp_path):
     v6_name = f"{V6_AMI_PREFIX}-20260101000000"
-    assert not fnmatch.fnmatchcase(canary_name, cleanup_filter)
-    assert fnmatch.fnmatchcase(v6_name, cleanup_filter)
+    v7_name = f"{V7_AMI_PREFIX}-20260101000000"
+    v6_filter = cleanup_filter_for(tmp_path, V6_AMI_PREFIX)
+    v7_filter = cleanup_filter_for(tmp_path, V7_AMI_PREFIX)
+    # The dash keeps a longer name that merely starts with a prefix out.
+    assert v6_filter == f"{V6_AMI_PREFIX}-*"
+    assert fnmatch.fnmatchcase(v6_name, v6_filter)
+    assert not fnmatch.fnmatchcase(v7_name, v6_filter)
+    assert fnmatch.fnmatchcase(v7_name, v7_filter)
+    assert not fnmatch.fnmatchcase(v6_name, v7_filter)
+
+
+def run_publish_step(tmp_path, step_key, meta_data):
+    """Run a publish step's command with stub aws and buildkite-agent.
+
+    meta_data is what the build step recorded. The stub aws logs each call and
+    answers the lookups the steps make; returns the logged calls.
+    """
+    bin_dir = tmp_path / f"bin-{step_key}"
+    bin_dir.mkdir(exist_ok=True)
+    log = tmp_path / f"{step_key}.log"
+    log.write_text("")
+    cases = "".join(
+        f'  "{key}") echo "{value}" ;;\n' for key, value in meta_data.items()
+    )
+    agent = bin_dir / "buildkite-agent"
+    agent.write_text(
+        "#!/bin/bash\n"
+        '[[ "$1 $2" == "meta-data get" ]] || exit 1\n'
+        'case "$3" in\n' + cases + "  *) exit 1 ;;\nesac\n"
+    )
+    aws = bin_dir / "aws"
+    aws.write_text(
+        "#!/bin/bash\n"
+        f'echo "aws $*" >> "{log}"\n'
+        'case "$1 $2" in\n'
+        '  "ssm get-parameter") echo ami-0new ;;\n'
+        '  "cloudformation describe-stack-resource") echo "res-$4" ;;\n'
+        '  "ec2 describe-launch-templates") echo 7 ;;\n'
+        '  "ec2 describe-launch-template-versions") echo ami-0old ;;\n'
+        '  "ec2 create-launch-template-version") echo 8 ;;\n'
+        "esac\n"
+    )
+    # The cleanup step uses GNU date -d; pin the date so the step runs anywhere.
+    date = bin_dir / "date"
+    date.write_text("#!/bin/bash\necho 2026-01-01T00:00:00\n")
+    for stub in (agent, aws, date):
+        stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    command = STEPS[step_key]["command"][0].replace("$$", "$")
+    result = subprocess.run(
+        ["bash", "-c", command],
+        env={"PATH": f"{bin_dir}:{os.environ['PATH']}", **PIPELINE["env"]},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return log.read_text().splitlines()
+
+
+def test_update_ssm_writes_the_recorded_parameter(tmp_path):
+    calls = run_publish_step(
+        tmp_path, "update-ssm", {"ami-us-east-1": "ami-0abc", "ssm-param": V7_SSM_PARAM}
+    )
+    puts = [c for c in calls if c.startswith("aws ssm put-parameter")]
+    assert len(puts) == 1
+    assert f"--name {V7_SSM_PARAM} --value ami-0abc" in puts[0]
+
+
+def test_launch_templates_update_only_the_recorded_stacks(tmp_path):
+    for ssm_param, stacks in ((V7_SSM_PARAM, V7_TARGET_STACKS), (V6_SSM_PARAM, V6_TARGET_STACKS)):
+        calls = run_publish_step(
+            tmp_path,
+            "update-launch-templates",
+            {"ssm-param": ssm_param, "target-stacks": stacks},
+        )
+        assert f"aws ssm get-parameter --name {ssm_param}" in " ".join(calls)
+        described = [
+            c.split("--stack-name ")[1].split()[0]
+            for c in calls
+            if "describe-stack-resource" in c and "AgentLaunchTemplate" in c
+        ]
+        assert described == stacks.split()
+        updates = [c for c in calls if c.startswith("aws autoscaling update-auto-scaling-group")]
+        assert len(updates) == len(stacks.split())
+
+
+def test_build_step_records_the_line_for_publish_steps():
+    for key in ("ssm-param", "target-stacks", "ami-name-prefix"):
+        assert f'meta-data set "{key}"' in BUILD_COMMAND
 
 
 def run_install_agent(tmp_path, fake_agent, require_exact=False):
