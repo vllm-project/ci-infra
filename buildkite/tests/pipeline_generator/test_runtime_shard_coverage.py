@@ -692,7 +692,7 @@ def test_commands_are_compared_apart():
 
 def test_a_long_list_folds_into_counts_per_file_and_points_at_the_log():
     # Busiest file first, then by name; past the file cap, a count of the rest.
-    # Listed in reverse, so ties must be sorted by name, not kept in order.
+    # Listed in reverse: compare() sorts the IDs, so ties come out by name.
     expected = [f"big.py::t{i}" for i in range(3)] + [
         f"f{i:02d}.py::t" for i in reversed(range(coverage.MAX_FILES_SHOWN + 1))
     ]

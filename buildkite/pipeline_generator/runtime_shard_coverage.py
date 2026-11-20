@@ -208,7 +208,8 @@ def _ids(ids: List[str], shards_of: Optional[Dict[str, List[int]]] = None) -> Li
     for nodeid in ids:
         file = nodeid.split("::")[0]
         per_file[file] = per_file.get(file, 0) + 1
-    files = sorted(per_file.items(), key=lambda item: (-item[1], item[0]))
+    # IDs arrive sorted, so equal counts keep file-name order (a stable sort).
+    files = sorted(per_file.items(), key=lambda item: -item[1])
     lines = [
         f"<details><summary>{len(ids)} tests in {len(files)} "
         f"file{'s' if len(files) != 1 else ''}</summary>",
