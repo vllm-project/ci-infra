@@ -414,6 +414,7 @@ def test_same_attempt_number_takes_the_later_record():
 def test_contract_with_the_generator():
     assert coverage.STEPS_ENV == "RUNTIME_SHARD_COVERAGE_STEPS"
     assert coverage.MAX_IDS_INLINE == 5 and coverage.MAX_FILES_SHOWN == 30
+    assert coverage.MAX_COMMAND_CHARS == 100
 
 
 def test_a_soft_fail_step_missed_test_is_still_an_error():
@@ -775,6 +776,29 @@ def test_couldnt_check_names_each_command_under_its_reason():
         "- The full test list is empty:\n"
         "  - custom"
     )
+
+
+def test_compare_carries_the_command_text_and_names_it():
+    steps = {"k": [dict(STEPS["k"][0], command="pytest -v -s t")]}
+    records = [_record(0, ["a"], expected=["a", "b"]), _record(1, [], planned=["b"])]
+    [result] = coverage.compare(steps, records)
+    assert result["command"] == "pytest -v -s t"
+    assert "**k** · `pytest -v -s t` (command 1 of 1)" in coverage.report([result])[1]
+
+
+def test_a_command_of_exactly_the_limit_is_not_cut():
+    text = "pytest " + "x" * (coverage.MAX_COMMAND_CHARS - 7)
+    result = {"label": "Command (1/1)", "command": text}
+    assert coverage._command_name(result) == f"`{text}` (command 1 of 1)"
+
+
+def test_an_unfinished_command_with_tests_to_name_is_listed_even_if_unverified():
+    result = {"step": "k", "label": "Command (1/1)", "command": "pytest a",
+              "soft_fail": False, "tests": 2, "missed": [], "unfinished": [1],
+              "not_run": ["b"], "duplicated": {}, "unexpected": ["z"],
+              "unverified": "1 tests ran that aren't in the full test list"}
+    _, text = coverage.report([result])
+    assert "**k** · `pytest a` (command 1 of 1) · shard 2\n- `b`" in text
 
 
 def test_an_unfinished_command_with_nothing_to_name_is_left_to_couldnt_check():
