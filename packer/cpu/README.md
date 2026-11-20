@@ -104,6 +104,24 @@ pipeline's env, so scheduled daily v6 builds are unaffected. Don't combine it
 with `AGENT_ONLY=1`: the agent-only bake runs first and ignores the canary
 version.
 
+## Daily v7 AMI Line
+
+Queues on Elastic CI Stack v7 need AMIs built from the v7 base. A second daily
+schedule on the same pipeline, on `main` with `AMI_LINE=v7`, builds from the
+v7.2.0 base and publishes like the v6 build, but to its own targets:
+
+| | v6 (default) | `AMI_LINE=v7` |
+|---|---|---|
+| AMI name | `vllm-buildkite-stack-linux-cpu-build-*` | `vllm-buildkite-stack-v7-linux-cpu-build-*` |
+| SSM parameter | `/buildkite/cpu-build-ami/us-east-1` | `/buildkite/cpu-build-ami/v7/us-east-1` |
+| Launch templates updated | postmerge us-east-1, both release stacks | `bk-cpu-queue-premerge-us-east-1` |
+
+The cleanup step filters on the line's own name prefix, so each line only
+deletes its own old AMIs, and neither matches canary AMIs. A v7 queue's stack
+should read its AMI from the v7 SSM parameter (`ImageIdParameter`); a pinned
+`ImageId` would bring the old AMI back on the next stack update. Setting both
+`AMI_LINE` and `CANARY_STACK_VERSION` fails the build.
+
 After the canary AMI exists, point a separate SSM parameter / launch template
 at it (managed in the private Terraform repository) and validate a job on it
 before switching the queue over in the same private-repo update.
