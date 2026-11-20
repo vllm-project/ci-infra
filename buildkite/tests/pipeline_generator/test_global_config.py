@@ -234,7 +234,7 @@ def test_validate_pipeline_config_invalid_repo_traversal():
             _validate_pipeline_config(config)
 
 
-def test_amd_run_all_patterns_use_the_shared_excludes():
+def test_matches_run_all_patterns_applies_the_excludes():
     patterns, excludes = ["csrc/"], ["csrc/cpu/", "csrc/rocm/"]
     match = _matches_run_all_patterns
     assert match(["csrc/attention/a.cu"], patterns, excludes)
@@ -244,14 +244,17 @@ def test_amd_run_all_patterns_use_the_shared_excludes():
     assert not match(["csrc/a.cu"], None, excludes), "no patterns, no match"
 
 
-CUDA_ONLY_CONFIG = """\
+# vLLM's ci_config.yaml in miniature: the CUDA excludes name files that do not
+# affect CUDA, so AMD keeps a list of its own.
+AMD_RUN_ALL_CONFIG = """\
 name: test
 job_dirs: [/tmp]
 registries: reg
 repositories: {main: repo}
-run_all_patterns: ["docker/Dockerfile", "CMakeLists.txt"]
+run_all_patterns: ["docker/Dockerfile"]
+run_all_exclude_patterns: ["docker/Dockerfile.", "csrc/cpu/", "csrc/rocm/"]
+amd_run_all_patterns: ["csrc/", "docker/Dockerfile.rocm_base"]
 """
-CUDA_ONLY_KEY = 'cuda_only_run_all_patterns: ["docker/Dockerfile$"]\n'
 
 
 def _init_with(pipeline_config, list_file_diff, labels=()):
@@ -271,6 +274,41 @@ def _init_with(pipeline_config, list_file_diff, labels=()):
             stack.enter_context(patcher)
         init_global_config("dummy_path")
     return global_config.config
+
+
+@pytest.mark.parametrize(
+    "changed, run_all, amd_run_all",
+    [
+        ("docker/Dockerfile", True, False),
+        ("docker/Dockerfile.rocm_base", False, True),
+        ("csrc/rocm/attention.cu", False, True),
+        ("csrc/attention/a.cu", False, True),
+        ("csrc/cpu/a.cpp", False, False),
+        ("vllm/a.py", False, False),
+    ],
+)
+def test_amd_run_all_uses_its_own_excludes(changed, run_all, amd_run_all):
+    config = _init_with(
+        AMD_RUN_ALL_CONFIG + 'amd_run_all_exclude_patterns: ["csrc/cpu/"]\n',
+        [changed],
+    )
+    assert (config["run_all"], config["amd_run_all"]) == (run_all, amd_run_all)
+
+
+def test_amd_run_all_without_its_own_excludes_excludes_nothing():
+    """The CUDA excludes never apply to AMD, set or not."""
+    config = _init_with(AMD_RUN_ALL_CONFIG, ["csrc/cpu/a.cpp"])
+    assert not config["run_all"] and config["amd_run_all"]
+
+
+CUDA_ONLY_CONFIG = """\
+name: test
+job_dirs: [/tmp]
+registries: reg
+repositories: {main: repo}
+run_all_patterns: ["docker/Dockerfile", "CMakeLists.txt"]
+"""
+CUDA_ONLY_KEY = 'cuda_only_run_all_patterns: ["docker/Dockerfile$"]\n'
 
 
 @pytest.mark.parametrize(

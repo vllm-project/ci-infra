@@ -274,7 +274,9 @@ steps:
 
         echo "New AMI ID: $$NEW_AMI"
 
-        for STACK_NAME in bk-cpu-queue-premerge-us-east-1 bk-cpu-queue-postmerge-us-east-1 bk-small-cpu-queue-release bk-cpu-queue-release; do
+        # bk-cpu-queue-premerge-us-east-1 runs Elastic CI Stack v7 on its own
+        # AMI; this v6 AMI must not reach its launch template.
+        for STACK_NAME in bk-cpu-queue-postmerge-us-east-1 bk-small-cpu-queue-release bk-cpu-queue-release; do
           echo ""
           echo "--- Processing stack: $$STACK_NAME"
 

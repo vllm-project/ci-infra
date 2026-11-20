@@ -73,9 +73,35 @@ _ZN9deep_gemm...
   it must agree with the file when present.
 
 `kernel_table.py` reads a `sync=1` file with no error lines and a whole last
-line as complete. Other files, and every ROCm file, need the footer or must
-be idle. The table's stats print `callback_missed` and
-`rows_usable_footer_rule` (the footer rule alone).
+line as complete, for both backends (ROCm names kernels from the SDK's enqueue
+callback; see ROCM.md). Other files need the footer or must be idle. The
+table's stats print `callback_missed` and `rows_usable_footer_rule` (the
+footer rule alone).
+
+A job that leaves no recording either ran no GPU process (a timing shard of
+CPU-only tests) or lost its recorder, and the files alone cannot tell which.
+So when an armed job passes with none, `ci_setup.sh` runs an exit probe: a
+process with the job's recorder environment initializes the GPU (`cuInit`
+from `libcuda.so.1`, or `hipInit` from the HIP runtime torch's
+`libtorch_hip.so` resolves, else the system one) and records into a scratch
+directory outside the upload. It is bounded by `KERNREC_PROBE_TIMEOUT`
+(default 60 s, plus 5 s to reap; a probe stuck in the driver is abandoned)
+and never changes the job's status. The sidecar keeps the outcome, the
+library used, and the probe's recording as `empty_probe`. `kernel_table.py`
+counts the job as complete and launching nothing only if that recording
+reads as a whole, error-free, footer-validated file of the job's backend
+with no kernels; `collect.sh` counts it as delivered by the same rule, and
+the table's stats print `empty_jobs_probed`. Without it the job is
+unavailable and its row cannot justify a skip.
+
+The probe shows the recorder loads in the environment the job's shell holds
+at exit, so it assumes the job's GPU processes inherit that environment. A
+test that strips it or runs GPU work in another container or host leaves an
+empty shard the probe would wrongly vouch for; such steps must stay unarmed
+(`no_plugin`, `:docker:` and AMD multi-node steps already are). A step whose
+whole row is empty is held by the selector either way
+(`row-launched-no-kernel-at-all`); the probe matters for a shard whose
+siblings recorded kernels.
 
 ## What it sees
 

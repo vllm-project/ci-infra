@@ -10,7 +10,7 @@ from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
-    _amd_mirror_should_run,
+    AMD_ROCM_STACK_FILES,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -513,7 +513,8 @@ KERNREC_SKIP_STEPS = {
 }
 
 # Key prefixes of steps the ROCm recorder stays off, and why. Applies to the
-# AMD mirror and leaves the CUDA step recording.
+# AMD mirror and leaves the CUDA step recording. Matched with startswith, so
+# an entry also covers every key it prefixes.
 KERNREC_AMD_SKIP_STEP_PREFIXES = {
     # Dispatch tracing swaps each completion signal for a pooled one, and
     # rocprofiler-sdk 1.3.5 can release it while HIP still uses it:
@@ -524,6 +525,22 @@ KERNREC_AMD_SKIP_STEP_PREFIXES = {
     "lm-eval-turboquant-": "rocprofiler-sdk dispatch-signal SIGSEGV",
 }
 
+# Keys of steps the ROCm recorder stays off, matched exactly against the
+# step's own key (the CUDA key for a mirror), so no other step shares an
+# entry. An armed step needs a complete recording from every GPU-active
+# process to give a usable row; these never can, so arming them only pads
+# the ROCm table's denominator with rows that stay unusable. With no row the
+# selector keeps them, as it does any unrecorded step.
+KERNREC_AMD_SKIP_STEPS = {
+    # Launch no kernels, so they upload no recordings (nightly 103780).
+    "torch-stable-abi-audit": "static ELF audit, no GPU work",
+    "pytorch-nightly-dependency-override-check": "dependency pin check, no GPU work",
+    # test_preprocess_error_handling.py patches EngineCore in the parent, so
+    # it needs VLLM_WORKER_MULTIPROC_METHOD=fork and its forked EngineCore
+    # records "# error=gpu_use_after_fork" (nightly 103780, engine-1-gpu).
+    "engine-preprocess-error-handling": "forks after GPU use",
+}
+
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
@@ -532,6 +549,7 @@ def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool
             kernrec_amd_enabled()
             and not (step.num_nodes and step.num_nodes > 1)
             and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
+            and step.key not in KERNREC_AMD_SKIP_STEPS
         )
     else:
         enabled = kernrec_enabled()
@@ -1183,13 +1201,7 @@ def _runtime_shard_mode(
     on = _automatic_shard_on(step, amd)
     if not by_default and not on:
         return None
-    if amd:
-        should_run = _amd_mirror_should_run(
-            _step_should_run(step, list_file_diff), list_file_diff
-        )
-    else:
-        should_run = _step_should_run(step, list_file_diff)
-    if not should_run:
+    if not _step_should_run(step, list_file_diff):
         return None
     if by_default and step.parallelism:
         # A fixed split, the step's own or the one its mirror inherits, runs
@@ -1624,11 +1636,8 @@ def convert_group_step_to_buildkite_step(
                     ),
                     recorded_step=amd_command_step,
                 )
-                amd_step.deferred = not _amd_mirror_should_run(
-                    _step_should_run(
-                        _get_amd_mirror_effective_step(step, amd),
-                        list_file_diff,
-                    ),
+                amd_step.deferred = not _step_should_run(
+                    _get_amd_mirror_effective_step(step, amd),
                     list_file_diff,
                 )
                 amd_hardware_steps.append(amd_step)
@@ -1669,6 +1678,12 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     ):
         return True
     if global_config["nightly"] == "1":
+        return True
+    # Every AMD step runs in the ROCm stack image, so a change to what it is
+    # built from runs them all, optional ones included.
+    if is_amd_device(step.device) and any(
+        path in list_file_diff for path in AMD_ROCM_STACK_FILES
+    ):
         return True
     if step.optional:
         return False

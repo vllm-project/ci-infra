@@ -292,6 +292,42 @@ def test_amd_skip_prefix_unarms_only_the_amd_mirror(monkeypatch, fake_global_con
     assert "amd-kernels" in waits_for
 
 
+def test_amd_skip_steps_unarm_only_their_exact_amd_mirror(
+    monkeypatch, fake_global_config
+):
+    """Steps that can never give a usable ROCm row (no GPU work, or a fork
+    after GPU use) run unrecorded on AMD; their CUDA steps, and AMD mirrors
+    whose keys extend or share a prefix with theirs, still record."""
+    monkeypatch.setenv(recorder_switches.KERNREC_ENV_VAR, "1")
+    monkeypatch.setenv(recorder_switches.KERNREC_AMD_ENV_VAR, "1")
+    fake_global_config["run_amd"] = True
+    fake_global_config["nightly"] = "1"
+    skipped = set(buildkite_step.KERNREC_AMD_SKIP_STEPS)
+    assert skipped == {
+        "torch-stable-abi-audit",
+        "pytorch-nightly-dependency-override-check",
+        "engine-preprocess-error-handling",
+    }
+    armed = {"engine", "engine-1-gpu", "engine-preprocess-error-handling-2"}
+    groups = _rendered_groups(
+        *(
+            _gpu_step(key=key, mirror={"amd": {"device": "mi355_dpx"}})
+            for key in sorted(skipped | armed)
+        )
+    )
+    steps = {step.key: step for group in groups for step in group.steps}
+    for key in skipped | armed:
+        assert buildkite_step._carries(steps[key], "kernrec")
+        amd = steps[f"amd-{key}"]
+        assert buildkite_step._carries(amd, "kernrec") is (key in armed)
+        assert (buildkite_step.KERNREC_ARTIFACT_PATH in (amd.artifact_paths or [])) is (
+            key in armed
+        )
+    (collect,) = buildkite_step.kernrec_collect_group(groups).steps
+    waits_for = set(collect.env["CI_SELECTOR_COLLECT_WAIT_FOR"].split())
+    assert waits_for == skipped | armed | {f"amd-{key}" for key in armed}
+
+
 @pytest.mark.parametrize("cuda,amd", [(1, 0), (0, 1)])
 def test_cuda_and_amd_switches_arm_their_backend_alone(
     monkeypatch, fake_global_config, cuda, amd

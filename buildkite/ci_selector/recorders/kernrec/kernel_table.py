@@ -70,8 +70,9 @@ def read_recording(path: Path, footer_rule: bool = False) -> tuple[set[str], int
     - a validated native footer;
     - an idle process whose header reports activity and that never went
       active (ROCm: loaded GPU code; CUDA: created a context);
-    - a CUDA launch-time recording (header sync=1) with no error lines and a
-      whole last line; a footer, if present, must validate.
+    - a launch-time recording (header sync=1; CUDA: driver-API launch
+      callbacks, ROCm: kernel-dispatch enqueue callbacks) with no error lines
+      and a whole last line; a footer, if present, must validate.
 
     footer_rule=True ignores sync=1.
 
@@ -85,6 +86,14 @@ def read_recording(path: Path, footer_rule: bool = False) -> tuple[set[str], int
 def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
     """Names, drops, complete, complete under the footer rule, and the number
     of callback-missed lines."""
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return set(), 0, False, False, 0
+    return _scan_text(text)
+
+
+def _scan_text(text: str) -> tuple[set[str], int, bool, bool, int]:
     names: set[str] = set()
     dropped = 0
     clean = clean_footer = False
@@ -96,10 +105,6 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
     sync = False
     active = False
     missed = 0
-    try:
-        text = path.read_text(errors="replace")
-    except OSError:
-        return names, dropped, False, False, 0
     lines = text.splitlines()
     for line in lines:
         if not line:
@@ -123,7 +128,7 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
                     # launch (ROCm: GPU code loaded; CUDA: first context).
                     # Only headers that say so promise the marker.
                     reports_activity = fields.get("activity") == "1"
-                    sync = fields.get("sync") == "1" and fields.get("backend") == "cuda"
+                    sync = fields.get("sync") == "1"
                 elif line == "# gpu_active":
                     active = True
                 elif line.startswith("# dropped="):
@@ -186,13 +191,51 @@ def _scan(path: Path) -> tuple[set[str], int, bool, bool, int]:
 def _backend(path: Path) -> str | None:
     try:
         with path.open() as stream:
-            header = stream.readline().split()
+            return _header_backend(stream.readline())
     except OSError:
         return "unknown"
+
+
+def _header_backend(line: str) -> str | None:
+    header = line.split()
     if header[:2] != ["#", "kernrec"]:
         return None  # read_recording already makes it unclean
     return next(
         (p.split("=", 1)[1] for p in header if p.startswith("backend=")), "cuda"
+    )
+
+
+def _empty_probe_ok(meta: dict, backend: str) -> bool:
+    """Whether a job without recordings proved its recorder would have written one.
+
+    ci_setup.sh runs the probe at exit only when an armed, successful job left
+    no recording: a process with the job's recorder environment initializes
+    the GPU, writing elsewhere, and its recording is kept in the sidecar. It
+    must read as a whole, error-free, footer-validated recording of this
+    backend that launched nothing. Anything else leaves the job unavailable:
+    no files alone cannot tell "no GPU process ran" from "the recorder never
+    loaded".
+    """
+    probe = meta.get("empty_probe")
+    if (
+        backend not in ("cuda", "rocm")
+        or meta.get("collection_available") is not True
+        or meta.get("collection_error")
+        or meta.get("recordings") != []
+        or not isinstance(probe, dict)
+        or probe.get("ok") is not True
+        or not isinstance(probe.get("recording"), str)
+    ):
+        return False
+    text = probe["recording"]
+    names, dropped, _, complete_footer_rule, _ = _scan_text(text)
+    return (
+        not names
+        and not dropped
+        and complete_footer_rule
+        and _header_backend(text.split("\n", 1)[0]) == backend
+        # A footer, not the idle rule: an idle header alone proves no exit.
+        and any(line.startswith("# end ") for line in text.splitlines())
     )
 
 
@@ -202,6 +245,7 @@ def _trace_health(job_dir: Path, files: list[Path]) -> tuple[str, bool, bool, bo
 
     Neither backend independently inventories every expected GPU worker.
     Completeness here concerns the processes that initialized the recorder.
+    A job without recordings counts only with a successful empty probe.
     """
     backends = {_backend(f) for f in files} - {None}
     meta = {}
@@ -214,7 +258,8 @@ def _trace_health(job_dir: Path, files: list[Path]) -> tuple[str, bool, bool, bo
     if not backends:
         backends.add(meta.get("backend", "unknown"))
     backend = next(iter(backends)) if len(backends) == 1 else "unknown"
-    complete = bool(files) and backend in {"cuda", "rocm"}
+    recorded = bool(files) or _empty_probe_ok(meta, backend)
+    complete = recorded and backend in {"cuda", "rocm"}
     complete_footer_rule = complete
     for path in files:
         _, dropped, clean, clean_footer_rule, _ = _scan(path)
@@ -224,7 +269,7 @@ def _trace_health(job_dir: Path, files: list[Path]) -> tuple[str, bool, bool, bo
         )
     listed = meta.get("recordings")
     downloaded = not isinstance(listed, list) or set(listed) <= {f.name for f in files}
-    available = bool(files) and meta.get("collection_available") is not False
+    available = recorded and meta.get("collection_available") is not False
     trusted = downloaded and available and not meta.get("collection_error")
     return (
         backend,
@@ -339,6 +384,7 @@ def build(a) -> int:
     # Reported in stats only, never published in rows.
     complete_footer_rule: dict[str, bool] = {}
     callback_missed = 0
+    empty_probed = 0
     unfiled = 0
     for job in job_iter:
         if a.backend and job["trace_health"][0] not in {a.backend, "unknown"}:
@@ -369,6 +415,7 @@ def build(a) -> int:
             complete_footer_rule.get(step, True) and footer_rule
         )
         row["recording_available"] &= recording_available
+        empty_probed += recording_available and not job["files"]
         if row["backend"] != backend:
             row["backend"] = "unknown"
         row["trace_complete"] = row["trace_complete"] and trace_complete
@@ -422,6 +469,7 @@ def build(a) -> int:
                 if usable({**r, "trace_complete": complete_footer_rule[step]})
             ),
             "callback_missed": callback_missed,
+            "empty_jobs_probed": empty_probed,
             "rows_incomplete": sum(1 for r in rows.values() if not r["complete"]),
             "rows_with_drops": sum(1 for r in rows.values() if r["dropped"]),
         },
