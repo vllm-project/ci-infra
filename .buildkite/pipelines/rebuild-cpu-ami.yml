@@ -408,10 +408,29 @@ steps:
         fi
         echo "Keeping release AMI: $$RELEASE_AMI"
 
+        # Never delete an AMI an Auto Scaling group can still launch: after a
+        # promotion the release stacks boot the old AMI until Terraform applies.
+        IN_USE_AMIS=$$(aws autoscaling describe-auto-scaling-groups --region us-east-1 \
+          --query 'AutoScalingGroups[].[MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId || LaunchTemplate.LaunchTemplateId, MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version || LaunchTemplate.Version]' \
+          --output text | while read -r LT_ID LT_VERSION; do
+            aws ec2 describe-launch-template-versions --region us-east-1 \
+              --launch-template-id "$$LT_ID" --versions "$$LT_VERSION" \
+              --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' --output text
+          done)
+        if [[ -z "$$IN_USE_AMIS" ]]; then
+          echo "Error: found no AMIs in use by Auto Scaling groups; not deleting anything"
+          exit 1
+        fi
+        echo "AMIs in use by Auto Scaling groups:" $$IN_USE_AMIS
+
         for ((i=KEEP; i<TOTAL; i++)); do
           AMI_ID=$${AMI_ARRAY[$$i]}
           if [[ "$$AMI_ID" == "$$RELEASE_AMI" ]]; then
             echo "Skipping $$AMI_ID: promoted to the release queues"
+            continue
+          fi
+          if [[ " $$(echo $$IN_USE_AMIS) " == *" $$AMI_ID "* ]]; then
+            echo "Skipping $$AMI_ID: an Auto Scaling group still launches it"
             continue
           fi
           echo "Deleting AMI: $$AMI_ID"

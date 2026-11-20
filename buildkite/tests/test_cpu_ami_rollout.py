@@ -40,7 +40,17 @@ case "$1 $2" in
       echo "ParameterNotFound" >&2; exit 254
     fi
     echo "$RELEASE_AMI" ;;
+  "autoscaling describe-auto-scaling-groups")
+    if [[ -n "${ASG_READ_FAILS:-}" ]]; then echo "AccessDenied" >&2; exit 254; fi
+    i=0
+    for ami in $IN_USE_AMIS; do i=$((i + 1)); printf 'lt-%s\t%s\n' "$ami" "$i"; done ;;
+  "ec2 describe-launch-template-versions")
+    # The template ID carries the AMI it launches, so the stub needs no state.
+    for arg in "$@"; do
+      if [[ "$arg" == lt-* ]]; then echo "${arg#lt-}"; fi
+    done ;;
 esac
+exit 0
 """
 # BSD date on a laptop has no -d; the cutoff value itself is never checked.
 STUB_DATE = '#!/bin/bash\necho "2026-01-01T00:00:00"\n'
@@ -69,6 +79,7 @@ def run_cleanup(tmp_path, extra_env=None):
         "CALL_LOG": str(call_log),
         "OLD_AMIS": " ".join(OLD_AMIS),
         "RELEASE_AMI": RELEASE_AMI,
+        "IN_USE_AMIS": "ami-000000000000000aa ami-000000000000000bb",
         **PIPELINE["env"],
         **(extra_env or {}),
     }
@@ -119,5 +130,27 @@ def test_cleanup_deletes_nothing_without_the_release_parameter(tmp_path):
 def test_cleanup_deletes_nothing_when_the_parameter_holds_no_ami(tmp_path):
     """Terraform seeds parameters with "placeholder" until a real value lands."""
     result, deregistered = run_cleanup(tmp_path, {"RELEASE_AMI": "placeholder"})
+    assert result.returncode != 0
+    assert deregistered == []
+
+
+def test_cleanup_keeps_amis_an_auto_scaling_group_still_launches(tmp_path):
+    """After a promotion the release stacks boot the old AMI until the apply."""
+    result, deregistered = run_cleanup(
+        tmp_path, {"IN_USE_AMIS": "ami-0000000000000000d ami-0000000000000000f"}
+    )
+    assert result.returncode == 0, result.stderr
+    assert deregistered == ["ami-0000000000000000e"]
+    assert "Skipping ami-0000000000000000d: an Auto Scaling group still launches it" in result.stdout
+
+
+def test_cleanup_deletes_nothing_when_auto_scaling_groups_cannot_be_read(tmp_path):
+    result, deregistered = run_cleanup(tmp_path, {"ASG_READ_FAILS": "1"})
+    assert result.returncode != 0
+    assert deregistered == []
+
+
+def test_cleanup_deletes_nothing_when_no_ami_is_in_use(tmp_path):
+    result, deregistered = run_cleanup(tmp_path, {"IN_USE_AMIS": ""})
     assert result.returncode != 0
     assert deregistered == []
