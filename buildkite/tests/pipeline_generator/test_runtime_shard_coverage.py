@@ -731,6 +731,19 @@ def test_a_soft_fail_steps_state_and_outcome_are_logged(monkeypatch, capsys):
     assert results[0]["soft_failed"] is True
 
 
+def test_a_planned_test_missing_from_a_partial_inventory_is_still_a_miss():
+    # Codex review: the inventory lists only `a`; finished shard 1 planned `b`
+    # and never reported it. That must fail, not pass on the short inventory.
+    records = [
+        _record(0, ["a"], expected=["a"], planned=["a"]),
+        _record(1, [], planned=["b"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["missed"] == ["b"]
+    assert result["unverified"] == "1 planned tests absent from the expected inventory"
+    assert coverage.report([result])[0] == "error"
+
+
 def test_couldnt_check_groups_a_steps_commands_by_reason():
     results = [
         {"step": "s", "label": f"Command ({n}/6)", "soft_fail": True,

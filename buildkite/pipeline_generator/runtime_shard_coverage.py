@@ -169,6 +169,17 @@ def compare(
                 unverified.append(
                     f"{len(unexpected)} reported tests absent from the expected inventory"
                 )
+            # A shard collected these, so they exist; the inventory missed them.
+            # Reported ones are already counted as unexpected above.
+            planned_absent = (
+                (finished_planned | unfinished_planned) - set(expected) - ran
+                if expected is not None
+                else set()
+            )
+            if planned_absent:
+                unverified.append(
+                    f"{len(planned_absent)} planned tests absent from the expected inventory"
+                )
             if missing:
                 shards = ", ".join(str(shard + 1) for shard in missing)
                 noun = "shard" if len(missing) == 1 else "shards"
@@ -185,6 +196,10 @@ def compare(
                         result["not_run"].append(nodeid)
                     else:
                         result["missed"].append(nodeid)
+                # Planned in a finished shard but absent from a short inventory.
+                result["missed"] = sorted(
+                    set(result["missed"]) | (finished_planned - ran - set(expected))
+                )
             else:
                 result["missed"] = sorted(finished_planned - ran)
             results.append(result)
