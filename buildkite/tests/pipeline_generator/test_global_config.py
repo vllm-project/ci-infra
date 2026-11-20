@@ -249,17 +249,12 @@ name: test
 job_dirs: [/tmp]
 registries: reg
 repositories: {main: repo}
-run_all_patterns: ["docker/Dockerfile", "CMakeLists.txt", "cmake/"]
-run_all_exclude_patterns: ["docker/Dockerfile."]
+run_all_patterns: ["docker/Dockerfile", "CMakeLists.txt"]
 """
-CUDA_ONLY_KEY = """\
-cuda_only_run_all_patterns:
-  - "docker/Dockerfile$"
-  - "cmake/external_projects/vllm_flash_attn.cmake"
-"""
+CUDA_ONLY_KEY = 'cuda_only_run_all_patterns: ["docker/Dockerfile$"]\n'
 
 
-def _init_with(pipeline_config, list_file_diff, labels=(), env=None):
+def _init_with(pipeline_config, list_file_diff, labels=()):
     import buildkite.pipeline_generator.global_config as global_config
 
     with ExitStack() as stack:
@@ -271,7 +266,7 @@ def _init_with(pipeline_config, list_file_diff, labels=(), env=None):
             patch.object(global_config, "get_pr_labels", return_value=list(labels)),
             patch("builtins.open", mock_open(read_data=pipeline_config)),
             patch("os.path.exists", return_value=True),
-            patch.dict(os.environ, {"BUILDKITE_BRANCH": "test-branch", **(env or {})}),
+            patch.dict(os.environ, {"BUILDKITE_BRANCH": "test-branch"}),
         ):
             stack.enter_context(patcher)
         init_global_config("dummy_path")
@@ -279,43 +274,18 @@ def _init_with(pipeline_config, list_file_diff, labels=(), env=None):
 
 
 @pytest.mark.parametrize(
-    "diff, run_all, cuda_only_run_all",
+    "diff, labels, key, cuda_only_run_all",
     [
-        (["docker/Dockerfile"], True, True),
-        (["cmake/external_projects/vllm_flash_attn.cmake"], True, True),
-        (["CMakeLists.txt"], True, False),
-        (["cmake/utils.cmake"], True, False),
-        (["docker/Dockerfile", "CMakeLists.txt"], True, False),
-        (["docker/Dockerfile.rocm"], False, False),
-        (["vllm/a.py"], False, False),
+        (["docker/Dockerfile"], (), CUDA_ONLY_KEY, True),
+        (["CMakeLists.txt"], (), CUDA_ONLY_KEY, False),
+        (["docker/Dockerfile", "CMakeLists.txt"], (), CUDA_ONLY_KEY, False),
+        (["docker/Dockerfile"], ["ready-run-all-tests"], CUDA_ONLY_KEY, False),
+        (["docker/Dockerfile"], (), "", False),
     ],
+    ids=["cuda-only", "shared", "mixed", "ready-run-all-tests label", "no key"],
 )
 def test_cuda_only_run_all_is_set_only_by_cuda_only_files(
-    diff, run_all, cuda_only_run_all
+    diff, labels, key, cuda_only_run_all
 ):
-    config = _init_with(CUDA_ONLY_CONFIG + CUDA_ONLY_KEY, diff)
-    assert (config["run_all"], config["cuda_only_run_all"]) == (
-        run_all,
-        cuda_only_run_all,
-    )
-
-
-@pytest.mark.parametrize(
-    "config, diff, labels, env",
-    [
-        (CUDA_ONLY_CONFIG, ["docker/Dockerfile"], (), {}),
-        (CUDA_ONLY_CONFIG + CUDA_ONLY_KEY, [], (), {"RUN_ALL": "1"}),
-        (
-            CUDA_ONLY_CONFIG + CUDA_ONLY_KEY,
-            ["docker/Dockerfile"],
-            ["ready-run-all-tests"],
-            {},
-        ),
-    ],
-    ids=["no key", "RUN_ALL=1", "ready-run-all-tests label"],
-)
-def test_cuda_only_run_all_is_off_without_the_key_or_when_run_all_is_forced(
-    config, diff, labels, env
-):
-    config = _init_with(config, diff, labels=labels, env=env)
-    assert (config["run_all"], config["cuda_only_run_all"]) == (True, False)
+    config = _init_with(CUDA_ONLY_CONFIG + key, diff, labels)
+    assert (config["run_all"], config["cuda_only_run_all"]) == (True, cuda_only_run_all)

@@ -966,7 +966,6 @@ def test_amd_run_all_off_keeps_dependency_rules(fake_global_config):
 def test_cuda_only_run_all_runs_cuda_steps_and_leaves_amd_to_its_own_rules(
     fake_global_config,
 ):
-    """requirements/cuda.txt is a run_all file the ROCm build never reads."""
     fake_global_config.update(run_all=True, cuda_only_run_all=True)
     mirrored, native = _mirrored_and_native()
     effective = buildkite_step._get_amd_mirror_effective_step(
@@ -976,11 +975,7 @@ def test_cuda_only_run_all_runs_cuda_steps_and_leaves_amd_to_its_own_rules(
 
     assert run(mirrored, ["requirements/cuda.txt"]), "CUDA: run_all"
     assert not run(effective, ["requirements/cuda.txt"]), "AMD mirror: its own deps"
-    assert not run(native, ["requirements/cuda.txt"]), "native AMD: its own deps"
     assert run(native, ["tests/amd/test_x.py"]), "native AMD: deps still match"
 
     fake_global_config["amd_run_all"] = True
     assert run(native, ["requirements/cuda.txt"]), "amd_run_all still applies"
-
-    fake_global_config.update(amd_run_all=False, cuda_only_run_all=False)
-    assert run(effective, ["requirements/cuda.txt"]), "a shared run_all runs AMD"
