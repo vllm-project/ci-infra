@@ -1698,7 +1698,9 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         )
     ):
         return True
-    if global_config["run_all"]:
+    if global_config["run_all"] and not (
+        global_config.get("cuda_only_run_all") and is_amd_device(step.device)
+    ):
         return True
     # AMD is not selected by ci-selector yet: a file that runs everything on
     # AMD may be narrowed on CUDA (csrc/, which ROCm compiles through HIPify).

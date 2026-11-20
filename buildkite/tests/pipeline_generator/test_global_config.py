@@ -257,7 +257,7 @@ amd_run_all_patterns: ["csrc/", "docker/Dockerfile.rocm_base"]
 """
 
 
-def _init_with(pipeline_config, list_file_diff):
+def _init_with(pipeline_config, list_file_diff, labels=()):
     import buildkite.pipeline_generator.global_config as global_config
 
     with ExitStack() as stack:
@@ -266,7 +266,7 @@ def _init_with(pipeline_config, list_file_diff):
             patch.object(
                 global_config, "get_list_file_diff", return_value=list_file_diff
             ),
-            patch.object(global_config, "get_pr_labels", return_value=[]),
+            patch.object(global_config, "get_pr_labels", return_value=list(labels)),
             patch("builtins.open", mock_open(read_data=pipeline_config)),
             patch("os.path.exists", return_value=True),
             patch.dict(os.environ, {"BUILDKITE_BRANCH": "test-branch"}),
@@ -299,3 +299,31 @@ def test_amd_run_all_without_its_own_excludes_excludes_nothing():
     """The CUDA excludes never apply to AMD, set or not."""
     config = _init_with(AMD_RUN_ALL_CONFIG, ["csrc/cpu/a.cpp"])
     assert not config["run_all"] and config["amd_run_all"]
+
+
+CUDA_ONLY_CONFIG = """\
+name: test
+job_dirs: [/tmp]
+registries: reg
+repositories: {main: repo}
+run_all_patterns: ["docker/Dockerfile", "CMakeLists.txt"]
+"""
+CUDA_ONLY_KEY = 'cuda_only_run_all_patterns: ["docker/Dockerfile$"]\n'
+
+
+@pytest.mark.parametrize(
+    "diff, labels, key, cuda_only_run_all",
+    [
+        (["docker/Dockerfile"], (), CUDA_ONLY_KEY, True),
+        (["CMakeLists.txt"], (), CUDA_ONLY_KEY, False),
+        (["docker/Dockerfile", "CMakeLists.txt"], (), CUDA_ONLY_KEY, False),
+        (["docker/Dockerfile"], ["ready-run-all-tests"], CUDA_ONLY_KEY, False),
+        (["docker/Dockerfile"], (), "", False),
+    ],
+    ids=["cuda-only", "shared", "mixed", "ready-run-all-tests label", "no key"],
+)
+def test_cuda_only_run_all_is_set_only_by_cuda_only_files(
+    diff, labels, key, cuda_only_run_all
+):
+    config = _init_with(CUDA_ONLY_CONFIG + key, diff, labels)
+    assert (config["run_all"], config["cuda_only_run_all"]) == (True, cuda_only_run_all)
