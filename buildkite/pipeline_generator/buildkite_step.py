@@ -930,7 +930,7 @@ def _collect_step(
     )
 
 
-def shard_coverage_step(
+def shard_coverage_check_step(
     groups: "List[BuildkiteGroupStep]",
 ) -> "Optional[BuildkiteCommandStep]":
     """The job that checks no test dropped out of a build's shards, or None
@@ -977,7 +977,7 @@ def shard_coverage_step(
     retry = ensure_infra_failure_retry(None)
     return BuildkiteCommandStep(
         label=":mag: Check every test ran",
-        key="runtime-shard-coverage",
+        key="runtime-shard-coverage-check",
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
             "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),

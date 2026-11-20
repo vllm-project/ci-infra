@@ -983,7 +983,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
         "buildkite-agent",
         "annotate",
         "--context",
-        "runtime-shard-coverage",
+        "runtime-shard-coverage-check",
         "--style",
     ]
     assert calls[1][5] == "error" and "`gone`" in annotated[0]
@@ -1039,7 +1039,7 @@ def test_main_fails_closed_with_no_records(monkeypatch):
         "buildkite-agent",
         "annotate",
         "--context",
-        "runtime-shard-coverage",
+        "runtime-shard-coverage-check",
         "--style",
     ]
     assert calls[1][5] == "error"
@@ -1119,7 +1119,7 @@ def test_main_annotates_under_its_step_key(monkeypatch):
     from the pipeline's: same script, and the agent sets BUILDKITE_STEP_KEY
     to the job's own key."""
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))
-    monkeypatch.setenv("BUILDKITE_STEP_KEY", "runtime-shard-coverage-2")
+    monkeypatch.setenv("BUILDKITE_STEP_KEY", "runtime-shard-coverage-check-2")
     calls = []
 
     def fake_run(command, check, **kwargs):
@@ -1133,7 +1133,7 @@ def test_main_annotates_under_its_step_key(monkeypatch):
         "buildkite-agent",
         "annotate",
         "--context",
-        "runtime-shard-coverage-2",
+        "runtime-shard-coverage-check-2",
     ]
 
 

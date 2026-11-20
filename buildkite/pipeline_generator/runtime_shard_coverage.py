@@ -522,7 +522,7 @@ def main() -> int:
             "--context",
             # A separately uploaded coverage job gets its own context; retrying
             # the same job replaces its stale report.
-            os.getenv("BUILDKITE_STEP_KEY") or "runtime-shard-coverage",
+            os.getenv("BUILDKITE_STEP_KEY") or "runtime-shard-coverage-check",
             "--style",
             style,
         ],

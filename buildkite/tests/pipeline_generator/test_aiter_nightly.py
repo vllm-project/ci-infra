@@ -86,7 +86,7 @@ NIGHTLY_JOBS = {
     buildkite_step._generate_step_key("Unkeyed MI300"),
     "amd-cpu-tool",
     # direct-mi355 is sharded, so its coverage check runs too.
-    "runtime-shard-coverage",
+    "runtime-shard-coverage-check",
 }
 
 
@@ -271,7 +271,7 @@ def test_shards_and_records_only_its_own_jobs(build, monkeypatch):
     assert record["skipped"].startswith("AITER nightly")
     # The coverage check is the generator's own job, not a selected step.
     assert set(record["legacy_keys"]) == set(record["scheduled_keys"]) == (
-        set(jobs) - {"runtime-shard-coverage"}
+        set(jobs) - {"runtime-shard-coverage-check"}
     )
 
 

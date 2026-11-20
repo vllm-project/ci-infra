@@ -2359,7 +2359,7 @@ def test_a_fallback_plan_gets_a_coverage_check_with_owners_it_runs(
     for planned in plan["commands"]:
         assert planned["fallback"] == min(rs.owners(planned))
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    job = buildkite_step.shard_coverage_step([group])
+    job = buildkite_step.shard_coverage_check_step([group])
     [checked] = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).values()
     assert [c["fallback"] for c in checked] == [
         c["fallback"] for c in plan["commands"]
@@ -3184,8 +3184,8 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     [step] = _render(_step(automatic_shard=True))
     mirror = _render_mirror(_mirror_step())
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step, mirror])
-    job = buildkite_step.shard_coverage_step([group])
-    assert job.key == "runtime-shard-coverage"
+    job = buildkite_step.shard_coverage_check_step([group])
+    assert job.key == "runtime-shard-coverage-check"
     # Depends on the sharded steps: no agent waits while they queue and run.
     assert job.depends_on == ["model-executor", "amd-model-executor"]
     assert job.timeout_in_minutes == buildkite_step.COVERAGE_TIMEOUT_MINUTES == 30
@@ -3235,7 +3235,7 @@ def test_coverage_job_propagates_a_steps_soft_fail(fake_global_config, checkout)
     step.soft_fail = True
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
 
-    job = buildkite_step.shard_coverage_step([group])
+    job = buildkite_step.shard_coverage_check_step([group])
 
     steps = json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"])
     assert [c["soft_fail"] for c in steps["model-executor"]] == [True, True]
@@ -3249,9 +3249,9 @@ def test_coverage_job_skips_unsharded_builds_and_waits_on_the_sharded_steps(
     [plain] = _render(_step())
     plain.key = "plain"
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[plain])
-    assert buildkite_step.shard_coverage_step([group]) is None
+    assert buildkite_step.shard_coverage_check_step([group]) is None
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[sharded, plain])
-    job = buildkite_step.shard_coverage_step([group])
+    job = buildkite_step.shard_coverage_check_step([group])
     assert job.depends_on == ["model-executor"]  # not the unsharded step
     assert json.loads(job.env["RUNTIME_SHARD_COVERAGE_STEPS"]).keys() == {
         "model-executor"
@@ -3264,7 +3264,7 @@ def test_coverage_job_skips_unsharded_builds_and_waits_on_the_sharded_steps(
             )
         ],
     )
-    job = buildkite_step.shard_coverage_step([image, group])
+    job = buildkite_step.shard_coverage_check_step([image, group])
     assert job.depends_on == ["model-executor"]  # the shards bring the image
 
 
@@ -3274,7 +3274,7 @@ def test_coverage_job_embeds_and_decodes_the_generator_script(
     fake_global_config["run_all"] = True
     [step] = _render(_step(automatic_shard=True))
     group = buildkite_step.BuildkiteGroupStep(group="g", steps=[step])
-    job = buildkite_step.shard_coverage_step([group])
+    job = buildkite_step.shard_coverage_check_step([group])
     with open(
         os.path.join(
             os.path.dirname(buildkite_step.__file__), "runtime_shard_coverage.py"
@@ -3285,7 +3285,7 @@ def test_coverage_job_embeds_and_decodes_the_generator_script(
     assert all("raw.githubusercontent.com" not in command for command in job.commands)
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_PREMERGE.value
     fake_global_config["branch"] = "main"
-    job = buildkite_step.shard_coverage_step([group])
+    job = buildkite_step.shard_coverage_check_step([group])
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_POSTMERGE.value
 
     command = shlex.split(job.commands[-1])
