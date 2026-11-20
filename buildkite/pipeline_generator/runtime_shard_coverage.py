@@ -385,13 +385,16 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
             continue
         step = result["step"]
         if step not in outcomes:
-            terminal = _step_property("state", step) in (
+            state = _step_property("state", step)
+            outcome = _step_property("outcome", step)
+            print(f"soft-fail step {step}: state={state} outcome={outcome}")
+            terminal = state in (
                 "finished",
                 "ignored",
                 "canceled",
                 "waiting_failed",
             )
-            outcomes[step] = terminal and _step_property("outcome", step) in (
+            outcomes[step] = terminal and outcome in (
                 "soft_failed",
                 "hard_failed",
                 "errored",
