@@ -22,6 +22,7 @@ packed into the job environment at generation and decoded there.
 import glob
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -31,7 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
 ARTIFACTS = ".runtime-shard-coverage/*/*.json"
 # Buildkite refuses an annotation over 1 MiB; the log keeps the whole list.
-MAX_IDS_SHOWN = 30
+MAX_IDS_INLINE = 5
+MAX_FILES_SHOWN = 30
 
 
 def latest_records(records: List[Dict[str, Any]]) -> Dict[Tuple, Dict[str, Any]]:
@@ -190,21 +192,60 @@ def compare(
 
 
 def _ids(ids: List[str], shards_of: Optional[Dict[str, List[int]]] = None) -> List[str]:
-    lines = []
-    for nodeid in ids[:MAX_IDS_SHOWN]:
-        line = f"- `{nodeid}`"
-        if shards_of:
-            line += ": shards " + ", ".join(
-                str(shard + 1) for shard in shards_of[nodeid]
-            )
-        lines.append(line)
-    if len(ids) > MAX_IDS_SHOWN:
-        lines.append(f"- and {len(ids) - MAX_IDS_SHOWN} more, listed in this job's log")
+    """A short list of test IDs as bullets; a long one folded into a
+    <details> block with a count per test file. The job log has every ID."""
+    if len(ids) <= MAX_IDS_INLINE:
+        lines = []
+        for nodeid in ids:
+            line = f"- `{nodeid}`"
+            if shards_of:
+                line += ": shards " + ", ".join(
+                    str(shard + 1) for shard in shards_of[nodeid]
+                )
+            lines.append(line)
+        return lines
+    per_file: Dict[str, int] = {}
+    for nodeid in ids:
+        file = nodeid.split("::")[0]
+        per_file[file] = per_file.get(file, 0) + 1
+    files = sorted(per_file.items(), key=lambda item: (-item[1], item[0]))
+    lines = [
+        f"<details><summary>{len(ids)} tests in {len(files)} "
+        f"file{'s' if len(files) != 1 else ''}</summary>",
+        "",
+    ]
+    for file, count in files[:MAX_FILES_SHOWN]:
+        lines.append(f"- `{file}`: {count}")
+    if len(files) > MAX_FILES_SHOWN:
+        lines.append(f"- and {len(files) - MAX_FILES_SHOWN} more files")
+    lines += ["", "Every test ID is in this job's log.", "</details>"]
     return lines
+
+
+def _commands(labels: List[str]) -> str:
+    """"Command (2/6)" for one label; "Commands 1, 2, 4 of 6" for several."""
+    if len(labels) == 1:
+        return labels[0]
+    numbers, total = [], None
+    for label in labels:
+        match = re.fullmatch(r"Command \((\d+)/(\d+)\)", label)
+        if not match:
+            return ", ".join(labels)
+        numbers.append(match.group(1))
+        total = match.group(2)
+    return f"Commands {', '.join(numbers)} of {total}"
+
+
+def _step_heading(result: Dict[str, Any]) -> str:
+    soft = " (soft-fail step)" if result["soft_fail"] else ""
+    return f"**{result['step']}**{soft}"
 
 
 def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     """The annotation for a build's results.
+
+    Each step's findings are their own Markdown block, separated by blank
+    lines, so they stay apart on a narrow screen.
 
     Returns:
         (its style: error, warning or success; its markdown). Error unless
@@ -220,42 +261,62 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     unfinished = [result for result in results if result["unfinished"]]
     unverified = [result for result in results if result["unverified"]]
     duplicated = [result for result in results if result["duplicated"]]
-    lines = []
-    if missed:
-        for result in missed:
-            count = len(result["missed"])
-            if result["unfinished"] or result["unverified"]:
-                lines.append(f"### :x: {count} tests ran in no finished shard")
-            else:
-                lines.append(
-                    f"### :x: {count} tests ran in no shard, though every shard finished"
-                )
-            lines.append(f"**{result['step']}**, {result['label']}:")
-            lines.extend(_ids(result["missed"]))
+    blocks = []
+    for result in missed:
+        count = len(result["missed"])
+        if result["unfinished"] or result["unverified"]:
+            title = f"### :x: {count} tests ran in no finished shard"
+        else:
+            title = f"### :x: {count} tests ran in no shard, though every shard finished"
+        blocks.append(title)
+        blocks.append(
+            "\n".join(
+                [f"{_step_heading(result)} · {result['label']}"] + _ids(result["missed"])
+            )
+        )
     if unfinished:
-        lines.append("### Shards that didn't finish, so these tests may not have run")
+        blocks.append("### Shards that didn't finish, so these tests may not have run")
         for result in unfinished:
             shards = ", ".join(str(shard + 1) for shard in result["unfinished"])
-            soft = " (soft-fail step)" if result["soft_fail"] else ""
-            lines.append(
-                f"**{result['step']}**, {result['label']}: shard {shards}{soft}"
+            blocks.append(
+                "\n".join(
+                    [f"{_step_heading(result)} · {result['label']} · shard {shards}"]
+                    + _ids(result["not_run"])
+                )
             )
-            lines.extend(_ids(result["not_run"]))
     if duplicated:
         # Costs a shard's time and can hide order-dependent tests, but loses none.
-        lines.append("### Tests that ran in more than one shard")
+        blocks.append("### Tests that ran in more than one shard")
         for result in duplicated:
-            lines.append(f"**{result['step']}**, {result['label']}:")
-            lines.extend(_ids(list(result["duplicated"]), result["duplicated"]))
-    if unverified:
-        lines.append("### Couldn't check")
-        for result in unverified:
-            soft = " (soft-fail step)" if result["soft_fail"] else ""
-            lines.append(
-                f"**{result['step']}**, {result['label']}: {result['unverified']}{soft}"
+            blocks.append(
+                "\n".join(
+                    [f"{_step_heading(result)} · {result['label']}"]
+                    + _ids(list(result["duplicated"]), result["duplicated"])
+                )
             )
-            lines.extend(_ids(result.get("unexpected", [])))
-    if lines:
+    if unverified:
+        blocks.append("### Couldn't check")
+        # One block per step; commands with the same reason share a line.
+        by_step: Dict[str, List[Dict[str, Any]]] = {}
+        for result in unverified:
+            by_step.setdefault(result["step"], []).append(result)
+        for step_results in by_step.values():
+            reasons: Dict[str, List[str]] = {}
+            for result in step_results:
+                reasons.setdefault(result["unverified"], []).append(result["label"])
+            lines = [_step_heading(step_results[0])]
+            for reason, labels in reasons.items():
+                lines.append(f"- {_commands(labels)}: {reason}")
+            blocks.append("\n".join(lines))
+            for result in step_results:
+                if result.get("unexpected"):
+                    blocks.append(
+                        "\n".join(
+                            [f"Reported but not expected, {result['label']}:"]
+                            + _ids(result["unexpected"])
+                        )
+                    )
+    if blocks:
         blocking = [
             result
             for result in results
@@ -263,7 +324,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
             and not result.get("soft_failed", False)
         ]
         style = "error" if missed or blocking else "warning"
-        return style, "\n".join(lines)
+        return style, "\n\n".join(blocks)
     steps = len({result["step"] for result in results})
     return "success", f"Every test ran: {tests} tests across {steps} sharded steps."
 
@@ -406,14 +467,6 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
 
 def main() -> int:
     steps = json.loads(os.environ[STEPS_ENV])
-    wait_timed_out = os.path.exists(
-        os.path.join(
-            os.environ.get("TMPDIR", "/tmp"),
-            "runtime-shard-coverage-"
-            + os.environ.get("BUILDKITE_JOB_ID", "")
-            + "-wait-timed-out",
-        )
-    )
     with tempfile.TemporaryDirectory() as folder:
         # Every attempt, not only the latest, so latest_records() can pick the
         # latest that finished. An env var, not the flag: an agent too old for
@@ -437,28 +490,14 @@ def main() -> int:
         for nodeid, shards in result["duplicated"].items():
             numbers = ", ".join(str(shard + 1) for shard in shards)
             print(f"duplicated: {result['step']}: {nodeid}: shards {numbers}")
-    retry_pending = wait_timed_out and any(
-        (result["retryable"] or result["missing_shards"])
-        and not result.get("soft_failed", False)
+    if style == "error" and any(
+        result["retryable"] and not result.get("soft_failed", False)
         for result in results
-    )
-    if style == "error" and (
-        retry_pending
-        or any(
-            result["retryable"] and not result.get("soft_failed", False)
-            for result in results
-        )
     ):
-        if retry_pending:
-            text += (
-                "\n\nShards were still pending at the wait deadline; after they "
-                "finish, retry this coverage job."
-            )
-        else:
-            text += (
-                "\n\nAfter the retried shard finishes, retry this coverage job too "
-                "so it compares the new records."
-            )
+        text += (
+            "\n\nAfter the retried shard finishes, retry this coverage job too "
+            "so it compares the new records."
+        )
     print(text)
     subprocess.run(
         [
