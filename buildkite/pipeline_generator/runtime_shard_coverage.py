@@ -34,6 +34,7 @@ ARTIFACTS = ".runtime-shard-coverage/*/*.json"
 # Buildkite refuses an annotation over 1 MiB; the log keeps the whole list.
 MAX_IDS_INLINE = 5
 MAX_FILES_SHOWN = 30
+MAX_COMMAND_CHARS = 100
 
 
 def latest_records(records: List[Dict[str, Any]]) -> Dict[Tuple, Dict[str, Any]]:
@@ -143,6 +144,7 @@ def compare(
             result = {
                 "step": step_key,
                 "label": command["label"],
+                "command": command.get("command"),
                 "soft_fail": bool(command.get("soft_fail", False)),
                 "tests": len(expected or []),
                 "missed": [],
@@ -161,13 +163,14 @@ def compare(
             unverified = []
             if expected is None:
                 unverified.append(
-                    f"shard {command['fallback'] + 1} recorded no test list"
+                    "no full test list to compare against (shard "
+                    f"{command['fallback'] + 1} collects it and didn't save one)"
                 )
             elif not expected:
-                unverified.append("expected inventory is empty")
+                unverified.append("the full test list is empty")
             if unexpected:
                 unverified.append(
-                    f"{len(unexpected)} reported tests absent from the expected inventory"
+                    f"{len(unexpected)} tests ran that aren't in the full test list"
                 )
             # A shard collected these, so they exist; the inventory missed them.
             # Reported ones are already counted as unexpected above.
@@ -178,12 +181,12 @@ def compare(
             )
             if planned_absent:
                 unverified.append(
-                    f"{len(planned_absent)} planned tests absent from the expected inventory"
+                    f"{len(planned_absent)} tests were planned but aren't in the full test list"
                 )
             if missing:
                 shards = ", ".join(str(shard + 1) for shard in missing)
                 noun = "shard" if len(missing) == 1 else "shards"
-                unverified.append(f"{noun} {shards} recorded nothing")
+                unverified.append(f"{noun} {shards} left no record of which tests ran")
             if unverified:
                 result["unverified"] = "; ".join(unverified)
             if expected and not missing:
@@ -238,18 +241,17 @@ def _ids(ids: List[str], shards_of: Optional[Dict[str, List[int]]] = None) -> Li
     return lines
 
 
-def _commands(labels: List[str]) -> str:
-    """"Command (2/6)" for one label; "Commands 1, 2, 4 of 6" for several."""
-    if len(labels) == 1:
-        return labels[0]
-    numbers, total = [], None
-    for label in labels:
-        match = re.fullmatch(r"Command \((\d+)/(\d+)\)", label)
-        if not match:
-            return ", ".join(labels)
-        numbers.append(match.group(1))
-        total = match.group(2)
-    return f"Commands {', '.join(numbers)} of {total}"
+def _command_name(result: Dict[str, Any]) -> str:
+    """The command as the job log shows it: "`pytest -v -s v1/core`
+    (command 1 of 9)". Without its text (an older generator), the label."""
+    match = re.fullmatch(r"Command \((\d+)/(\d+)\)", result["label"])
+    where = f"command {match.group(1)} of {match.group(2)}" if match else result["label"]
+    text = result.get("command")
+    if not text:
+        return where
+    if len(text) > MAX_COMMAND_CHARS:
+        text = text[: MAX_COMMAND_CHARS - 1] + "…"
+    return f"`{text}` ({where})"
 
 
 def _step_heading(result: Dict[str, Any]) -> str:
@@ -274,7 +276,12 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
     """
     tests = sum(result["tests"] for result in results)
     missed = [result for result in results if result["missed"]]
-    unfinished = [result for result in results if result["unfinished"]]
+    # An unfinished command with no test to name is left to "Couldn't check".
+    unfinished = [
+        result
+        for result in results
+        if result["unfinished"] and (result["not_run"] or not result["unverified"])
+    ]
     unverified = [result for result in results if result["unverified"]]
     duplicated = [result for result in results if result["duplicated"]]
     blocks = []
@@ -287,7 +294,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         blocks.append(title)
         blocks.append(
             "\n".join(
-                [f"{_step_heading(result)} · {result['label']}"] + _ids(result["missed"])
+                [f"{_step_heading(result)} · {_command_name(result)}"] + _ids(result["missed"])
             )
         )
     if unfinished:
@@ -296,7 +303,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
             shards = ", ".join(str(shard + 1) for shard in result["unfinished"])
             blocks.append(
                 "\n".join(
-                    [f"{_step_heading(result)} · {result['label']} · shard {shards}"]
+                    [f"{_step_heading(result)} · {_command_name(result)} · shard {shards}"]
                     + _ids(result["not_run"])
                 )
             )
@@ -306,7 +313,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         for result in duplicated:
             blocks.append(
                 "\n".join(
-                    [f"{_step_heading(result)} · {result['label']}"]
+                    [f"{_step_heading(result)} · {_command_name(result)}"]
                     + _ids(list(result["duplicated"]), result["duplicated"])
                 )
             )
@@ -319,16 +326,17 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
         for step_results in by_step.values():
             reasons: Dict[str, List[str]] = {}
             for result in step_results:
-                reasons.setdefault(result["unverified"], []).append(result["label"])
+                reasons.setdefault(result["unverified"], []).append(_command_name(result))
             lines = [_step_heading(step_results[0])]
-            for reason, labels in reasons.items():
-                lines.append(f"- {_commands(labels)}: {reason}")
+            for reason, names in reasons.items():
+                lines.append(f"- {reason[0].upper()}{reason[1:]}:")
+                lines.extend(f"  - {name}" for name in names)
             blocks.append("\n".join(lines))
             for result in step_results:
                 if result.get("unexpected"):
                     blocks.append(
                         "\n".join(
-                            [f"Reported but not expected, {result['label']}:"]
+                            [f"Ran but not in the full test list, {_command_name(result)}:"]
                             + _ids(result["unexpected"])
                         )
                     )

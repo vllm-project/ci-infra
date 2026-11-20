@@ -67,7 +67,7 @@ def test_an_inventory_that_omits_a_reported_test_fails_closed():
     [result] = coverage.compare(STEPS, records)
     assert result["unexpected"] == ["extra"]
     assert result["missed"] == []
-    assert result["unverified"] == "1 reported tests absent from the expected inventory"
+    assert result["unverified"] == "1 tests ran that aren't in the full test list"
     style, text = coverage.report([result])
     assert style == "error"
     assert "`extra`" in text
@@ -119,7 +119,7 @@ def test_retry_advice_depends_on_missing_shard_evidence(monkeypatch):
 def test_an_empty_inventory_is_not_proof_of_coverage():
     records = [_record(0, [], expected=[]), _record(1, [])]
     [result] = coverage.compare(STEPS, records)
-    assert result["unverified"] == "expected inventory is empty"
+    assert result["unverified"] == "the full test list is empty"
     assert coverage.report([result])[0] == "error"
 
 
@@ -131,7 +131,7 @@ def test_a_test_no_finished_shard_ran_is_a_miss():
     assert style == "error"
     assert text == (
         "### :x: 1 tests ran in no shard, though every shard finished\n\n"
-        "**k** · Command (1/1)\n- `c`"
+        "**k** · command 1 of 1\n- `c`"
     )
 
 
@@ -170,7 +170,7 @@ def test_an_unfinished_shard_is_apart_from_misses_but_fails_closed():
     assert style == "error"
     assert text == (
         "### Shards that didn't finish, so these tests may not have run\n\n"
-        "**k** · Command (1/1) · shard 2\n- `b`"
+        "**k** · command 1 of 1 · shard 2\n- `b`"
     )
 
 
@@ -226,11 +226,11 @@ def test_a_shard_with_no_record_fails_closed():
     [result] = coverage.compare(STEPS, [_record(0, ["a"], expected=["a", "b"])])
     assert result["unfinished"] == [] and result["missed"] == []
     assert result["not_run"] == []  # which tests it owned can't be known
-    assert result["unverified"] == "shard 2 recorded nothing"
+    assert result["unverified"] == "shard 2 left no record of which tests ran"
     style, text = coverage.report([result])
     assert style == "error"
     assert text == (
-        "### Couldn't check\n\n**k**\n- Command (1/1): shard 2 recorded nothing"
+        "### Couldn't check\n\n**k**\n- Shard 2 left no record of which tests ran:\n  - command 1 of 1"
     )
 
 
@@ -251,7 +251,7 @@ def test_a_missing_record_next_to_an_unfinished_shard_hides_its_not_run():
     records = [_record(0, ["a"], expected=["a", "b"], finished=False)]
     [result] = coverage.compare(STEPS, records)
     assert result["unfinished"] == [0] and result["not_run"] == []
-    assert result["unverified"] == "shard 2 recorded nothing"
+    assert result["unverified"] == "shard 2 left no record of which tests ran"
     assert coverage.report([result])[0] == "error"
 
 
@@ -266,11 +266,11 @@ def test_a_dead_first_shard_still_gives_its_list():
 
 def test_no_expected_list_cannot_be_checked_and_fails_closed():
     [result] = coverage.compare(STEPS, [_record(0, ["a"]), _record(1, ["b"])])
-    assert result["unverified"] == "shard 1 recorded no test list"
+    assert result["unverified"] == "no full test list to compare against (shard 1 collects it and didn't save one)"
     style, text = coverage.report([result])
     assert style == "error"
     assert text == (
-        "### Couldn't check\n\n**k**\n- Command (1/1): shard 1 recorded no test list"
+        "### Couldn't check\n\n**k**\n- No full test list to compare against (shard 1 collects it and didn't save one):\n  - command 1 of 1"
     )
 
 
@@ -309,7 +309,7 @@ def test_an_expected_list_never_comes_from_another_step():
     ]
     results = coverage.compare(steps, records)
     assert results[0]["unverified"] is None
-    assert results[1]["unverified"] == "shard 1 recorded no test list"
+    assert results[1]["unverified"] == "no full test list to compare against (shard 1 collects it and didn't save one)"
 
 
 def test_the_latest_valid_inventory_wins_over_an_older_valid_list():
@@ -327,7 +327,7 @@ def test_the_latest_valid_inventory_wins_over_an_older_valid_list():
 def test_nothing_uploaded_is_unverified_not_clean():
     [result] = coverage.compare(STEPS, [])
     assert result["unverified"] == (
-        "shard 1 recorded no test list; shards 1, 2 recorded nothing"
+        "no full test list to compare against (shard 1 collects it and didn't save one); shards 1, 2 left no record of which tests ran"
     )
     assert coverage.report([result])[0] == "error"
 
@@ -353,7 +353,7 @@ def test_a_duplicate_alone_is_a_warning_naming_the_test_and_its_shards():
     assert style == "warning"
     assert text == (
         "### Tests that ran in more than one shard\n\n"
-        "**k** · Command (1/1)\n- `b`: shards 1, 2"
+        "**k** · command 1 of 1\n- `b`: shards 1, 2"
     )
 
 
@@ -517,10 +517,10 @@ def test_relaxed_soft_failure_does_not_trigger_retry_advice_for_other_errors(
 
 def test_a_soft_fail_step_unverified_fails_closed():
     [result] = coverage.compare(SOFT_STEPS, [_record(0, ["a"], expected=["a", "b"])])
-    assert result["unverified"] == "shard 2 recorded nothing"
+    assert result["unverified"] == "shard 2 left no record of which tests ran"
     style, text = coverage.report([result])
     assert style == "error"
-    assert "**k** (soft-fail step)\n- Command (1/1): shard 2 recorded nothing" in text
+    assert "**k** (soft-fail step)\n- Shard 2 left no record of which tests ran:\n  - command 1 of 1" in text
 
 
 def test_main_relaxes_unverified_only_for_allowed_soft_fail_outcomes(monkeypatch):
@@ -740,36 +740,51 @@ def test_a_planned_test_missing_from_a_partial_inventory_is_still_a_miss():
     ]
     [result] = coverage.compare(STEPS, records)
     assert result["missed"] == ["b"]
-    assert result["unverified"] == "1 planned tests absent from the expected inventory"
+    assert result["unverified"] == "1 tests were planned but aren't in the full test list"
     assert coverage.report([result])[0] == "error"
 
 
-def test_couldnt_check_groups_a_steps_commands_by_reason():
+def test_couldnt_check_names_each_command_under_its_reason():
     results = [
-        {"step": "s", "label": f"Command ({n}/6)", "soft_fail": True,
-         "unverified": "shard 1 recorded nothing", "unexpected": []}
-        for n in (1, 2, 4)
+        {"step": "s", "label": f"Command ({n}/6)", "command": f"pytest -v -s t{n}",
+         "soft_fail": True, "unverified": "shard 1 left no record of which tests ran",
+         "unexpected": []}
+        for n in (1, 2)
     ] + [
-        {"step": "s", "label": "Command (5/6)", "soft_fail": True,
-         "unverified": "shard 2 recorded nothing", "unexpected": ["x"]},
-        {"step": "t", "label": "custom", "soft_fail": False,
-         "unverified": "shard 1 recorded nothing", "unexpected": []},
-        {"step": "t", "label": "other", "soft_fail": False,
-         "unverified": "shard 1 recorded nothing", "unexpected": []},
+        {"step": "s", "label": "Command (5/6)", "command": "pytest " + "x" * 120,
+         "soft_fail": True, "unverified": "shard 2 left no record of which tests ran",
+         "unexpected": ["y"]},
+        {"step": "t", "label": "custom", "command": None, "soft_fail": False,
+         "unverified": "the full test list is empty", "unexpected": []},
     ]
     for result in results:
         result.update(tests=1, missed=[], unfinished=[], not_run=[], duplicated={})
     style, text = coverage.report(results)
     assert style == "error"
+    long = "pytest " + "x" * (coverage.MAX_COMMAND_CHARS - 8) + "…"
     assert text == (
         "### Couldn't check\n\n"
         "**s** (soft-fail step)\n"
-        "- Commands 1, 2, 4 of 6: shard 1 recorded nothing\n"
-        "- Command (5/6): shard 2 recorded nothing\n\n"
-        "Reported but not expected, Command (5/6):\n- `x`\n\n"
+        "- Shard 1 left no record of which tests ran:\n"
+        "  - `pytest -v -s t1` (command 1 of 6)\n"
+        "  - `pytest -v -s t2` (command 2 of 6)\n"
+        "- Shard 2 left no record of which tests ran:\n"
+        f"  - `{long}` (command 5 of 6)\n\n"
+        f"Ran but not in the full test list, `{long}` (command 5 of 6):\n- `y`\n\n"
         "**t**\n"
-        "- custom, other: shard 1 recorded nothing"
+        "- The full test list is empty:\n"
+        "  - custom"
     )
+
+
+def test_an_unfinished_command_with_nothing_to_name_is_left_to_couldnt_check():
+    result = {"step": "k", "label": "Command (6/9)", "command": "pytest a",
+              "soft_fail": False, "tests": 0, "missed": [], "unfinished": [2],
+              "not_run": [], "duplicated": {}, "unexpected": [],
+              "unverified": "no full test list to compare against (shard 1 collects it and didn't save one)"}
+    _, text = coverage.report([result])
+    assert "Shards that didn't finish" not in text  # no heading with nothing under it
+    assert "  - `pytest a` (command 6 of 9)" in text
 
 
 def test_records_from_another_build_are_ignored_when_the_build_is_known():
@@ -781,7 +796,7 @@ def test_records_from_another_build_are_ignored_when_the_build_is_known():
     ]
     [result] = coverage.compare(STEPS, records, build_id="this-build")
     assert result["unverified"] == (
-        "shard 1 recorded no test list; shards 1, 2 recorded nothing"
+        "no full test list to compare against (shard 1 collects it and didn't save one); shards 1, 2 left no record of which tests ran"
     )
     assert coverage.report([result])[0] == "error"
 
@@ -826,7 +841,7 @@ def test_no_matching_artifacts_preserves_soft_fail_outcome(monkeypatch, stream):
     assert len(downloads) == 1
     assert styles == ["warning"]
     assert "artifact download failed" not in annotated[0]
-    assert "recorded nothing" in annotated[0]
+    assert "left no record of which tests ran" in annotated[0]
     assert "After the retried shard finishes" not in annotated[0]
 
 

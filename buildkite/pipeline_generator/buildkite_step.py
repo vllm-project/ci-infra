@@ -958,6 +958,8 @@ def shard_coverage_check_step(
                 {
                     "position": planned["position"],
                     "label": planned["label"],
+                    # Shown in the annotation, so a reader knows which command.
+                    "command": " ".join(["pytest"] + planned["args"]),
                     "fallback": planned["fallback"],
                     "owners": runtime_shard.owners(planned),
                     # Only a terminal failure on a soft-fail step relaxes gaps;

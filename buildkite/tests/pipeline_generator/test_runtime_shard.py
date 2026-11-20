@@ -3200,6 +3200,8 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     me = steps["model-executor"][0]
     assert me["fallback"] == plan["commands"][0]["fallback"]
     assert me["label"] == plan["commands"][0]["label"]
+    assert me["command"] == " ".join(["pytest"] + plan["commands"][0]["args"])
+    assert me["command"].startswith("pytest ")
     assert me["owners"] == rs.owners(plan["commands"][0])
     assert me["soft_fail"] is False
     # Sharded steps upload their records; the AMD mirror too.
