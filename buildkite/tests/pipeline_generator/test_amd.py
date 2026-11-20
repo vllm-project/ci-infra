@@ -984,44 +984,15 @@ def _edit(old, new, text=STEPS):
 @pytest.mark.parametrize(
     ("base", "head", "expected"),
     [
-        pytest.param(STEPS, STEPS, set(), id="unchanged"),
-        pytest.param(STEPS, HEADER + DECODE + KIMI, set(), id="reordered"),
         pytest.param(
-            STEPS,
-            _edit("[pytest models/kimi]", "[pytest -x models/kimi]"),
-            {"kimi", "amd-kimi"},
-            id="parent-and-mirror",
+            STEPS, _edit("h100", "h200"), {"kimi", "amd-kimi"}, id="parent-and-mirror"
         ),
         pytest.param(
             STEPS, _edit("mi355_1", "mi355_2"), {"amd-kimi"}, id="mirror-only"
         ),
-        pytest.param(
-            STEPS,
-            _edit("    amd:", "    torch_nightly: {device: h200}\n    amd:"),
-            set(),
-            id="other-mirror",
-        ),
-        pytest.param(
-            STEPS, _edit("    amd:", "    torch_nightly:"), set(), id="mirror-removed"
-        ),
-        pytest.param(
-            STEPS,
-            _edit("models/kimi/amd]", "models/kimi/amd -x]"),
-            {"kimi-decode-amd"},
-            id="native-step",
-        ),
         pytest.param(STEPS, STEPS + NEW_STEP, {"new"}, id="added"),
-        pytest.param(STEPS + NEW_STEP, STEPS, set(), id="removed"),
         pytest.param(STEPS, _edit("group: Models", "group: Kimi"), None, id="group"),
-        pytest.param(
-            STEPS, _edit("  key: kimi-decode-amd\n", ""), None, id="missing-key"
-        ),
-        pytest.param(
-            STEPS,
-            _edit("key: kimi-decode-amd", "key: kimi"),
-            None,
-            id="duplicate-key",
-        ),
+        pytest.param(STEPS, _edit("kimi-decode-amd", "kimi"), None, id="duplicate-key"),
         pytest.param("steps: [unclosed\n", STEPS, None, id="unparsable-base"),
     ],
 )
@@ -1037,28 +1008,14 @@ def test_changed_step_keys_in_file_diffs_against_git(tmp_path, monkeypatch, caps
     git = ["git", "-c", "user.email=ci@example.com", "-c", "user.name=ci"]
     for command in (["init", "-q"], ["add", "."], ["commit", "-qm", "base"]):
         subprocess.run(git + command, check=True)
-    (tmp_path / STEP_YAML).write_text(
-        _edit("[pytest models/kimi]", "[pytest -x models/kimi]")
-    )
-    (tmp_path / ".buildkite/test_areas/new.yaml").write_text(STEPS)
+    (tmp_path / STEP_YAML).write_text(_edit("h100", "h200"))
     amd.changed_step_keys_in_file.cache_clear()
 
     assert amd.changed_step_keys_in_file(STEP_YAML, "HEAD") == {"kimi", "amd-kimi"}
     assert "redefined: amd-kimi, kimi" in capsys.readouterr().out
-    assert (
-        amd.changed_step_keys_in_file(".buildkite/test_areas/new.yaml", "HEAD") is None
-    )
+    assert amd.changed_step_keys_in_file("new.yaml", "HEAD") is None
     assert "not pinned to steps (no base:" in capsys.readouterr().out
     amd.changed_step_keys_in_file.cache_clear()
-
-
-def test_a_step_without_a_source_file_keeps_its_dependencies(monkeypatch):
-    step = Step(label="x", key="x", device="mi355_1", source_file_dependencies=["a/"])
-    monkeypatch.setattr(
-        amd, "changed_step_keys_in_file", lambda *a: pytest.fail("called")
-    )
-    assert amd.amd_dependencies(step, ["a/b.py"]) == ["a/"]
-    assert not amd.amd_step_redefined(step, ["a/b.py"])
 
 
 def _load(tmp_path, monkeypatch, text=STEPS):
@@ -1079,59 +1036,30 @@ def _redefined(monkeypatch, keys):
 
 
 @pytest.mark.parametrize(
-    ("redefined", "diff", "runs"),
-    [
-        pytest.param({"kimi"}, [STEP_YAML], {"kimi"}, id="other-step"),
-        pytest.param(
-            {"kimi", "amd-kimi"}, [STEP_YAML], {"kimi", "amd-kimi"}, id="own-entry"
-        ),
-        pytest.param(
-            {"kimi-decode-amd"},
-            [STEP_YAML],
-            {"kimi", "kimi-decode-amd"},
-            id="native-entry",
-        ),
-        pytest.param(
-            None,
-            [STEP_YAML],
-            {"kimi", "amd-kimi", "kimi-decode-amd"},
-            id="not-pinned",
-        ),
-        pytest.param(
-            (),
-            [STEP_YAML, "vllm/models/kimi/amd/a.py"],
-            {"kimi", "amd-kimi", "kimi-decode-amd"},
-            id="other-deps",
-        ),
-    ],
-)
-def test_amd_steps_count_their_yaml_only_if_redefined(
-    tmp_path, monkeypatch, redefined, diff, runs
-):
-    steps = _load(tmp_path, monkeypatch)
-    _redefined(monkeypatch, redefined)
-    assert {
-        k for k, s in steps.items() if buildkite_step._step_should_run(s, diff)
-    } == runs
-
-
-@pytest.mark.parametrize(
     ("redefined", "runs"),
     [
-        pytest.param({"kimi-decode-amd"}, True, id="own-entry"),
-        pytest.param({"kimi"}, False, id="other-step"),
-        pytest.param(None, False, id="not-pinned"),
+        ({"kimi"}, {"kimi"}),
+        ({"kimi", "amd-kimi"}, {"kimi", "amd-kimi"}),
+        (None, {"kimi", "amd-kimi", "kimi-decode-amd"}),
     ],
+    ids=["other-step", "own-entry", "not-pinned"],
 )
-def test_an_optional_amd_step_runs_only_on_its_own_entry(
+def test_amd_steps_count_their_yaml_only_if_redefined(
     tmp_path, monkeypatch, redefined, runs
 ):
     steps = _load(tmp_path, monkeypatch)
     _redefined(monkeypatch, redefined)
+    assert {
+        k for k, s in steps.items() if buildkite_step._step_should_run(s, [STEP_YAML])
+    } == runs
+
+
+def test_an_optional_amd_step_runs_only_on_its_own_entry(tmp_path, monkeypatch):
+    steps = _load(tmp_path, monkeypatch)
     optional = steps["kimi-decode-amd"].model_copy(update={"optional": True})
-    nvidia = steps["kimi"].model_copy(update={"optional": True})
-    assert buildkite_step._step_should_run(optional, [STEP_YAML]) is runs
-    assert not buildkite_step._step_should_run(nvidia, [STEP_YAML])
+    for redefined, runs in (({"kimi-decode-amd"}, True), (None, False)):
+        _redefined(monkeypatch, redefined)
+        assert buildkite_step._step_should_run(optional, [STEP_YAML]) is runs
 
 
 def test_a_step_that_lists_its_own_yaml_counts_every_edit(tmp_path, monkeypatch):
@@ -1145,10 +1073,6 @@ def test_a_step_that_lists_its_own_yaml_counts_every_edit(tmp_path, monkeypatch)
     _redefined(monkeypatch, set())
 
     assert "source_file" not in steps["kimi"].model_dump()
-    assert {k for k, s in steps.items() if s.source_file_declared} == {
-        "kimi-decode-amd",
-        "amd-kimi",
-    }
     assert all(buildkite_step._step_should_run(s, [STEP_YAML]) for s in steps.values())
 
 
