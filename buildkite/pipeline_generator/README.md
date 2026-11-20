@@ -55,6 +55,11 @@ run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
 
+# Optional. run_all_patterns matches that only the CUDA build reads: they run
+# every CUDA step but not every AMD step.
+cuda_only_run_all_patterns:
+  - "docker/Dockerfile$"
+
 # Optional. List of regex patterns to trigger all AMD tests, on top of
 # run_all_patterns (which already triggers AMD too). For files that matter to
 # AMD but are excluded or left out above, e.g. docker/Dockerfile.rocm_base.
