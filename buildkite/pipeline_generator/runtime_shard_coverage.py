@@ -373,9 +373,10 @@ def _step_property(name: str, step: str) -> Optional[str]:
 def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
     """Do not turn a step's existing soft failure into a hard coverage failure.
 
-    A passed soft-fail step still has to prove its coverage. Only a terminal
-    state and a soft_failed, hard_failed, errored or canceled outcome may relax
-    its gaps. A pending step, passed, neutral or unavailable outcome stays hard.
+    A passed soft-fail step still has to prove its coverage. Only a canceled
+    step, or a terminal state with a soft_failed, hard_failed, errored or
+    canceled outcome, may relax its gaps. A pending step, or a finished one
+    with a passed, neutral or unavailable outcome, stays hard.
     """
     outcomes = {}
     for result in results:
@@ -394,11 +395,11 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
                 "canceled",
                 "waiting_failed",
             )
-            outcomes[step] = terminal and outcome in (
-                "soft_failed",
-                "hard_failed",
-                "errored",
-                "canceled",
+            # Buildkite reports a soft-fail step with a canceled shard as
+            # state canceled, outcome neutral: the state is the failure.
+            outcomes[step] = state == "canceled" or (
+                terminal
+                and outcome in ("soft_failed", "hard_failed", "errored", "canceled")
             )
         result["soft_failed"] = outcomes[step]
 

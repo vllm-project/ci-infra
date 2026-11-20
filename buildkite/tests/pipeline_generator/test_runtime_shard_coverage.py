@@ -463,6 +463,9 @@ def test_unfinished_soft_fail_shard_needs_a_soft_failed_outcome(monkeypatch):
         ("finished\n", "soft_failed\n", 0),
         ("finished\n", "errored\n", 0),
         ("canceled\n", "canceled\n", 0),
+        # What Buildkite reports for a soft-fail step with a canceled shard
+        # (build 104463): the canceled state alone is the allowed failure.
+        ("canceled\n", "neutral\n", 0),
         ("ignored\n", "soft_failed\n", 0),
         ("waiting_failed\n", "hard_failed\n", 0),
         ("running\n", "hard_failed\n", 1),
