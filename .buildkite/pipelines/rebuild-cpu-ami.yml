@@ -39,6 +39,10 @@ steps:
     command:
       - |
         set -euo pipefail
+        if [[ "$${AGENT_ONLY:-0}" == 1 && -n "$${AMI_LINE:-}" ]]; then
+          echo "Error: AGENT_ONLY bakes the release-worker agent AMI; unset AMI_LINE"
+          exit 1
+        fi
         if [[ "$${AGENT_ONLY:-0}" == 1 ]]; then
           bash packer/agent/build.sh
           exit 0
