@@ -3188,7 +3188,7 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert job.key == "runtime-shard-coverage-check"
     # Depends on the sharded steps: no agent waits while they queue and run.
     assert job.depends_on == ["model-executor", "amd-model-executor"]
-    assert job.timeout_in_minutes == buildkite_step.COVERAGE_TIMEOUT_MINUTES == 30
+    assert job.timeout_in_minutes == buildkite_step.COVERAGE_TIMEOUT_MINUTES == 15
     assert "CI_SELECTOR_COLLECT_WAIT_FOR" not in job.env
     assert len(job.commands) == 1  # the checker, no wait loop
     assert job.allow_dependency_failure is True and job.soft_fail is False

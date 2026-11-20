@@ -845,8 +845,9 @@ COLLECT_WAIT = (
 )
 
 
-# The checker itself takes seconds; the rest is artifact download.
-COVERAGE_TIMEOUT_MINUTES = 30
+# The job starts after the shards end and runs in about half a minute; its
+# worst case (three 60 s download tries, step reads, annotate) is ~7 min.
+COVERAGE_TIMEOUT_MINUTES = 15
 
 
 def _collect_step(
