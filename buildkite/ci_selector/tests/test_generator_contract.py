@@ -360,6 +360,9 @@ def test_our_replica_behaves_like_the_generators_own_rule():
         "_source_file_dependencies_match": (
             buildkite_step._source_file_dependencies_match
         ),
+        # No diff below edits a yaml.
+        "amd_dependencies": lambda step, diff: step.source_file_dependencies,
+        "amd_step_redefined": lambda step, diff: False,
     }
     source = textwrap.dedent(inspect.getsource(buildkite_step._step_should_run))
     exec(source, namespace)  # noqa: S102

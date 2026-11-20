@@ -11,6 +11,8 @@ from amd import (
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
     AMD_ROCM_STACK_FILES,
+    amd_dependencies,
+    amd_step_redefined,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -1686,7 +1688,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     ):
         return True
     if step.optional:
-        return False
+        # As the selector gate does: an edited optional step runs on its PR.
+        return is_amd_device(step.device) and amd_step_redefined(step, list_file_diff)
     if (
         is_amd_gpu_device(step.device)
         and not step.dind
@@ -1703,13 +1706,18 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     # AMD may be narrowed on CUDA (csrc/, which ROCm compiles through HIPify).
     if global_config.get("amd_run_all") and is_amd_device(step.device):
         return True
+    if is_amd_device(step.device):
+        return _source_file_dependencies_match(
+            amd_dependencies(step, list_file_diff), list_file_diff
+        )
     return _source_file_dependencies_match(
         step.source_file_dependencies, list_file_diff
     )
 
 
 def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
-    source_file_dependencies = list(amd.get("source_file_dependencies") or [])
+    mirror_dependencies = amd.get("source_file_dependencies") or []
+    source_file_dependencies = list(mirror_dependencies)
     for dependency in step.source_file_dependencies or []:
         if dependency not in source_file_dependencies:
             source_file_dependencies.append(dependency)
@@ -1723,6 +1731,8 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
             "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
+            "source_file_declared": step.source_file_declared
+            or step.source_file in mirror_dependencies,
         }
     )
 

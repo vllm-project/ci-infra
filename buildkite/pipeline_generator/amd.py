@@ -1,10 +1,27 @@
 import os
 import re
+import subprocess
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, TypedDict
+from functools import lru_cache
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Mapping,
+    Optional,
+    TypedDict,
+)
+
+import yaml
 
 from constants import AgentQueue, DeviceType, Platform
+from global_config import get_global_config
+
+if TYPE_CHECKING:
+    from step import Step
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -616,3 +633,112 @@ def build_amd_step_options(
         "priority": 200,
         "retry": AMD_RETRY,
     }
+
+
+def amd_dependencies(step: "Step", list_file_diff: List[str]) -> List[str]:
+    """The step's source_file_dependencies, without its own yaml when the diff
+    edits that yaml but not the step's entry."""
+    dependencies = step.source_file_dependencies or []
+    if step.source_file_declared:
+        return dependencies
+    redefined = _redefined_keys(step, list_file_diff)
+    if redefined is None or step.key in redefined:
+        return dependencies
+    return [d for d in dependencies if d != step.source_file]
+
+
+def amd_step_redefined(step: "Step", list_file_diff: List[str]) -> bool:
+    """Whether the diff changes or adds the step's own yaml entry."""
+    redefined = _redefined_keys(step, list_file_diff)
+    return redefined is not None and step.key in redefined
+
+
+def _redefined_keys(
+    step: "Step", list_file_diff: List[str]
+) -> Optional[FrozenSet[str]]:
+    """Keys the diff's edit to the step's yaml redefines. None when the yaml
+    is not edited or the edit can't be pinned to steps: either way the step's
+    dependencies apply as written."""
+    if step.source_file not in list_file_diff:
+        return None
+    return changed_step_keys_in_file(step.source_file, _diff_base_ref())
+
+
+def _diff_base_ref() -> Optional[str]:
+    """The commit get_list_file_diff diffs against."""
+    global_config = get_global_config()
+    if global_config["branch"] == "main":
+        return "HEAD~1"
+    merge_base = global_config.get("merge_base_commit")
+    return merge_base.strip() if merge_base else None
+
+
+@lru_cache(maxsize=None)
+def changed_step_keys_in_file(
+    path: str, base_ref: Optional[str]
+) -> Optional[FrozenSet[str]]:
+    """`changed_step_keys` between `base_ref` and the checkout. Cached: every
+    AMD step in the file asks, on each of its _step_should_run calls."""
+    base = subprocess.run(
+        ["git", "show", f"{base_ref}:{path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if base.returncode == 0:
+        with open(path, encoding="utf-8") as f:
+            keys = changed_step_keys(base.stdout, f.read())
+        shown = (
+            "not pinned to steps" if keys is None else ", ".join(sorted(keys)) or "none"
+        )
+    else:  # a new file (git diff already ran against base_ref)
+        keys, shown = None, f"not pinned to steps (no base: {base.stderr.strip()})"
+    print(f"{path}: AMD steps count the edit only if redefined: {shown}")
+    return keys
+
+
+def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]]:
+    """Keys whose entry changed, plus `amd-<key>` if it has a `mirror.amd`
+    block (only that for a mirror-only change). None if the edit can't be
+    pinned to steps."""
+    head = yaml.safe_load(head_text)
+    try:
+        base = yaml.safe_load(base_text)
+    except yaml.YAMLError:
+        # Main's copy is broken: don't fail the PR that fixes it.
+        return None
+    base_steps, head_steps = _steps_by_key(base), _steps_by_key(head)
+    if (
+        base_steps is None
+        or head_steps is None
+        or _without(base, "steps") != _without(head, "steps")
+    ):
+        return None
+    changed = set()
+    for key, entry in head_steps.items():
+        old = base_steps.get(key)
+        edited = old is None or _without(old, "mirror") != _without(entry, "mirror")
+        if edited:
+            changed.add(key)
+        amd = _amd_block(entry)
+        if amd is not None and (edited or _amd_block(old) != amd):
+            changed.add(f"amd-{key}")
+    return frozenset(changed)
+
+
+def _steps_by_key(doc: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    entries = doc.get("steps") if isinstance(doc, dict) else None
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict) and entry.get("key") for entry in entries
+    ):
+        return None
+    steps = {entry["key"]: entry for entry in entries}
+    return steps if len(steps) == len(entries) else None
+
+
+def _without(entry: Dict[str, Any], field: str) -> Dict[str, Any]:
+    return {name: value for name, value in entry.items() if name != field}
+
+
+def _amd_block(entry: Dict[str, Any]) -> Any:
+    return (entry.get("mirror") or {}).get("amd")
