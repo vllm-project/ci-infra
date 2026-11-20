@@ -145,6 +145,27 @@ repo = "{repo}"
 api_url = "https://api.github.com/repos/" + repo + "/commits/" + commit + "/check-runs"
 max_wait = {max_wait}
 wait_interval = {wait_interval}
+
+
+def rocm_cache_only(run):
+    # The vLLM pre-commit job also fails a PR that changes the ROCm base image
+    # until a maintainer chooses /ci rocm cache or nocache, which needs this
+    # CI first. Proceed only if that step is the sole failure; anything else,
+    # or no answer, blocks as before.
+    if not run.get("id"):
+        return False
+    request = urllib.request.Request("https://api.github.com/repos/" + repo + "/actions/jobs/" + str(run["id"]))
+    request.add_header("User-Agent", "vllm-ci-precommit-check")
+    request.add_header("Accept", "application/vnd.github+json")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            steps = json.load(response).get("steps") or []
+    except (OSError, http.client.HTTPException, ValueError):
+        return False
+    failed = {{step.get("name") for step in steps if step.get("conclusion") == "failure"}}
+    return failed == {{"ROCm base image cache"}}
+
+
 # Time from a fixed start, so requests that time out count against max_wait too.
 start = time.monotonic()
 while True:
@@ -172,6 +193,10 @@ while True:
         # conclusions (skipped, cancelled, neutral, stale, ...) are not real
         # failures, and pre-commit is also a required check on the PR, so let CI
         # proceed rather than false-failing the whole build.
+        if conclusion == "failure" and rocm_cache_only(precommit_run):
+            subprocess.run(["buildkite-agent", "annotate", ":warning: pre-commit failed only on its ROCm base image cache step, which waits for a maintainer to comment /ci rocm cache or /ci rocm nocache after CI; allowing CI to proceed.", "--style", "warning"], check=False)
+            print("pre-commit failed only on the ROCm base image cache step; allowing CI to proceed.")
+            raise SystemExit(0)
         if conclusion in ("failure", "timed_out", "action_required"):
             subprocess.run(["buildkite-agent", "annotate", ":x: pre-commit check failed on this PR (conclusion: " + str(conclusion) + "). Please fix pre-commit issues before running CI.", "--style", "error"], check=False)
             raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
