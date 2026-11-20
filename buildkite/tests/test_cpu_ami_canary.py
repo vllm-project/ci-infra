@@ -43,7 +43,9 @@ def canary_selection_fragment():
 
     Buildkite unescapes $$ to $ before the shell runs, so do the same here.
     """
-    start = BUILD_COMMAND.index(f'AMI_NAME_PREFIX="{V6_AMI_PREFIX}"')
+    # From the top, so the AGENT_ONLY guard runs too; tests never set
+    # AGENT_ONLY without AMI_LINE, so the agent bake itself never starts.
+    start = BUILD_COMMAND.index("set -euo pipefail")
     end = BUILD_COMMAND.index("cd packer/cpu")
     return BUILD_COMMAND[start:end].replace("$$", "$")
 
@@ -112,6 +114,14 @@ def test_unknown_ami_line_is_rejected():
     result = run_canary_selection({"AMI_LINE": "v8"})
     assert result.returncode != 0
     assert "AMI_LINE" in result.stdout + result.stderr
+
+
+def test_agent_only_with_ami_line_fails_before_the_bake():
+    # The agent-only bake must not silently swallow a line selection.
+    for line in ("v7", "v8"):
+        result = run_canary_selection({"AGENT_ONLY": "1", "AMI_LINE": line})
+        assert result.returncode != 0
+        assert "AMI_LINE" in result.stdout + result.stderr
 
 
 def test_canary_and_ami_line_together_are_rejected():
