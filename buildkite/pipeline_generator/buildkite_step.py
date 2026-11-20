@@ -4,7 +4,6 @@ from copy import deepcopy
 import json
 import math
 import os
-import time
 import re
 import shlex
 
@@ -946,14 +945,12 @@ def shard_coverage_check_step(
     is red then, and retrying the shard releases it.
     """
     steps = {}
-    sharded = []
     for group in groups:
         for step in group.steps:
             packed = (step.env or {}).get(runtime_shard.PLAN_ENV)
             if not packed:
                 continue
             plan = runtime_shard.unpack(packed)
-            sharded.append(step)
             steps[step.key] = [
                 {
                     "position": planned["position"],
