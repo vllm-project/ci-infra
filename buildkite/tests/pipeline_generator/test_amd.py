@@ -182,19 +182,21 @@ def test_amd_cpu_step_gets_only_the_repo_wide_retries():
 
 
 @pytest.mark.parametrize(
-    ("device", "queue", "dind", "expected_gpu_count"),
+    ("device", "queue", "dind", "expected_gpu_count", "gpu_size_tag"),
     [
-        ("mi300_4", AgentQueue.AMD_MI300_4, False, "4"),
-        ("mi300_4", AgentQueue.AMD_MI300_4, True, "4"),
-        ("mi325_1", AgentQueue.AMD_MI325_1, False, "1"),
-        ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
-        ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
-        ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
-        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, False, "1"),
-        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, True, "1"),
+        ("mi300_4", AgentQueue.AMD_MI300_4, False, "4", False),
+        ("mi300_4", AgentQueue.AMD_MI300_4, True, "4", False),
+        ("mi325_1", AgentQueue.AMD_MI325_1, False, "1", False),
+        ("mi325_1", AgentQueue.AMD_MI325_1, True, "1", False),
+        ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1", False),
+        ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1", False),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, False, "1", True),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, True, "1", True),
     ],
 )
-def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
+def test_direct_amd_gpu_steps_use_dind_flag(
+    device, queue, dind, expected_gpu_count, gpu_size_tag
+):
     step = Step(
         label="AMD direct test",
         group="Direct AMD",
@@ -222,7 +224,10 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     }[device]
     assert command_step.label == f":amd: ({tag}) AMD direct test"
     assert command_step.depends_on == ["image-build-amd"]
-    assert command_step.agents == {"queue": queue}
+    expected_agents = {"queue": queue}
+    if gpu_size_tag:
+        expected_agents["gpu_size"] = expected_gpu_count
+    assert command_step.agents == expected_agents
     assert command_step.commands == [
         "bash .buildkite/scripts/hardware_ci/run-amd-test.sh",
     ]
@@ -337,6 +342,35 @@ def test_mi250_steps_share_one_queue_split_by_gpu_size(device, gpu_size):
     assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == gpu_size
 
 
+@pytest.mark.parametrize(
+    "device,gpu_size",
+    [("mi300_dpx", "1"), ("mi300_dpx_2", "2"), ("mi300_dpx_4", "4")],
+)
+def test_mi300_dpx_steps_share_one_queue_split_by_gpu_size(device, gpu_size):
+    """MI300 DPX jobs (all partition counts) route to the unified
+    amd_mi300_dpx queue with a gpu_size tag, never to per-count sub-queues."""
+    step = Step(
+        label="MI300 DPX test",
+        group="Direct AMD",
+        key=f"amd-{device}",
+        device=device,
+        dind=False,
+        agent_tags={"gpu_size": "99", "queue": "other", "label": "x"},
+        commands=["pytest tests/foo.py"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.agents == {
+        "queue": AgentQueue.AMD_MI300_DPX,
+        "gpu_size": gpu_size,
+        "label": "x",
+    }
+    assert command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == gpu_size
+    pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
+    assert "resources" not in pod_patch["containers"][0]
+
+
 def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     monkeypatch.setenv(amd.ROCM_DEBUG_AGENT_ENV_VAR, "1")
     step = Step(
@@ -419,7 +453,11 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert len(amd_group.steps) == 1
     assert amd_command_step.key == "amd-mirrored-test"
     assert amd_command_step.depends_on == ["image-build-amd"]
-    assert amd_command_step.agents == {"queue": queue}
+    cfg = amd.AMD_DEVICE_CONFIGS[device]
+    expected_agents = {"queue": queue}
+    if cfg.gpu_size_tag:
+        expected_agents["gpu_size"] = str(cfg.default_gpu_count)
+    assert amd_command_step.agents == expected_agents
     assert amd_command_step.soft_fail is False
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
@@ -555,7 +593,11 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
     amd_command_step = amd_group.steps[0]
     assert isinstance(amd_command_step, buildkite_step.BuildkiteCommandStep)
     assert amd_command_step.key == "amd-native-mirrored-test"
-    assert amd_command_step.agents == {"queue": queue}
+    cfg = amd.AMD_DEVICE_CONFIGS[device]
+    expected_agents = {"queue": queue}
+    if cfg.gpu_size_tag:
+        expected_agents["gpu_size"] = str(cfg.default_gpu_count)
+    assert amd_command_step.agents == expected_agents
     assert amd_command_step.env["VLLM_CI_EXPECTED_GPU_COUNT"] == "1"
     assert amd_command_step.plugins is not None
     pod_patch = amd_command_step.plugins[0]["kubernetes"]["podSpecPatch"]
@@ -845,6 +887,8 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
         ),
         ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
         ("LM Eval Small Models", "mi300_dpx", ":amd: (MI300 DPX) LM Eval Small Models"),
+        ("LM Eval Small Models", "mi300_dpx_2", ":amd: (MI300 DPX) LM Eval Small Models"),
+        ("LM Eval Small Models", "mi300_dpx_4", ":amd: (MI300 DPX) LM Eval Small Models"),
         (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
         (":docker: Refresh ROCm base", "amd_cpu", ":docker: Refresh ROCm base"),
     ],
