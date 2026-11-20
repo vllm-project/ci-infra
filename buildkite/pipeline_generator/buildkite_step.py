@@ -513,7 +513,8 @@ KERNREC_SKIP_STEPS = {
 }
 
 # Key prefixes of steps the ROCm recorder stays off, and why. Applies to the
-# AMD mirror and leaves the CUDA step recording.
+# AMD mirror and leaves the CUDA step recording. Matched with startswith, so
+# an entry also covers every key it prefixes.
 KERNREC_AMD_SKIP_STEP_PREFIXES = {
     # Dispatch tracing swaps each completion signal for a pooled one, and
     # rocprofiler-sdk 1.3.5 can release it while HIP still uses it:
@@ -524,6 +525,22 @@ KERNREC_AMD_SKIP_STEP_PREFIXES = {
     "lm-eval-turboquant-": "rocprofiler-sdk dispatch-signal SIGSEGV",
 }
 
+# Keys of steps the ROCm recorder stays off, matched exactly against the
+# step's own key (the CUDA key for a mirror), so no other step shares an
+# entry. An armed step needs a complete recording from every GPU-active
+# process to give a usable row; these never can, so arming them only pads
+# the ROCm table's denominator with rows that stay unusable. With no row the
+# selector keeps them, as it does any unrecorded step.
+KERNREC_AMD_SKIP_STEPS = {
+    # Launch no kernels, so they upload no recordings (nightly 103780).
+    "torch-stable-abi-audit": "static ELF audit, no GPU work",
+    "pytorch-nightly-dependency-override-check": "dependency pin check, no GPU work",
+    # test_preprocess_error_handling.py patches EngineCore in the parent, so
+    # it needs VLLM_WORKER_MULTIPROC_METHOD=fork and its forked EngineCore
+    # records "# error=gpu_use_after_fork" (nightly 103780, engine-1-gpu).
+    "engine-preprocess-error-handling": "forks after GPU use",
+}
+
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
@@ -532,6 +549,7 @@ def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool
             kernrec_amd_enabled()
             and not (step.num_nodes and step.num_nodes > 1)
             and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
+            and step.key not in KERNREC_AMD_SKIP_STEPS
         )
     else:
         enabled = kernrec_enabled()
