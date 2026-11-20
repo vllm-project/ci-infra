@@ -1348,7 +1348,8 @@ def _run_precommit_gate(monkeypatch, *answers):
     """Run the gate's generated `python3 -c` program in-process, with GitHub
     answering each poll from `answers` in turn: an exception to raise (a
     TimeoutError also costs the 30 s request timeout), a response to return,
-    or the check runs to return. Returns (exit code, seconds slept,
+    the check runs to return, or (a dict) the pre-commit job with its
+    steps. Returns (exit code, seconds slept,
     annotations, seconds on the clock when the gate ended)."""
     (gate,) = buildkite_step.create_precommit_group_step("vllm-project/vllm", "abc123").steps
     (command,) = gate.commands
@@ -1365,6 +1366,9 @@ def _run_precommit_gate(monkeypatch, *answers):
             raise answer
         if isinstance(answer, _BodyCutOff):
             return answer
+        if isinstance(answer, dict):
+            assert request.full_url.endswith("/repos/vllm-project/vllm/actions/jobs/7")
+            return io.BytesIO(json.dumps(answer).encode())
         return io.BytesIO(json.dumps({"check_runs": answer}).encode())
 
     def sleep(seconds):
@@ -1430,6 +1434,39 @@ def test_the_precommit_gate_never_sleeps_past_its_wait_limit(monkeypatch):
     # wait is cut to 30 s and the final poll lands on the limit, not past it.
     code, _, _, ended = _run_precommit_gate(monkeypatch, TimeoutError(), *[_github_error(502)] * 100)
     assert code == 0 and ended == buildkite_step.PRECOMMIT_MAX_WAIT
+
+
+PRECOMMIT_FAILED_JOB = [{"id": 7, "name": "pre-commit", "status": "completed", "conclusion": "failure"}]
+PRECOMMIT_STEPS = ["Run pre-commit", "pip-compile (only if its inputs changed)", "ROCm base image cache"]
+
+
+def _job(*failed_steps):
+    return {"steps": [{"name": name, "conclusion": "failure" if name in failed_steps else "success"} for name in PRECOMMIT_STEPS]}
+
+
+def test_the_precommit_gate_lets_ci_run_before_the_rocm_base_image_cache_decision(monkeypatch):
+    # A PR that changes the ROCm base image fails pre-commit until a maintainer
+    # comments /ci rocm cache or nocache, which needs this CI to run first.
+    code, _, annotations, _ = _run_precommit_gate(monkeypatch, PRECOMMIT_FAILED_JOB, _job("ROCm base image cache"))
+    assert code == 0 and "/ci rocm cache" in annotations[0]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        _job("Run pre-commit", "ROCm base image cache"),
+        _job("Run pre-commit"),
+        {"steps": []},
+        _github_error(404),
+        _github_error(503),
+        TimeoutError(),
+    ],
+)
+def test_the_precommit_gate_still_blocks_any_other_precommit_failure(monkeypatch, answer):
+    # A lint failure next to the cache step, or a job whose steps cannot be
+    # read, blocks as before.
+    code, _, annotations, _ = _run_precommit_gate(monkeypatch, PRECOMMIT_FAILED_JOB, answer)
+    assert code and "pre-commit check failed" in code and "failed" in annotations[0]
 
 
 def test_the_precommit_gate_fails_on_a_github_4xx(monkeypatch):
