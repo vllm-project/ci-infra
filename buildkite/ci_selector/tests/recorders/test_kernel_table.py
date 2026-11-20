@@ -432,6 +432,7 @@ def test_footerless_process_is_clean_only_if_it_never_went_active(
 
 
 SYNC = "# kernrec v1 backend=cuda recorder=cupti activity=1 sync=1 pid=7 ppid=1 exe=py"
+ROCM_SYNC = IDLE.replace("activity=1", "activity=1 sync=1")
 FOOTER = "# end records=1 unique=1 dropped=0 errors=0 unresolved=0"
 
 
@@ -448,9 +449,14 @@ FOOTER = "# end records=1 unique=1 dropped=0 errors=0 unresolved=0"
         (f"{SYNC}\n# gpu_active\nk", False),
         (f"{SYNC.replace('sync=1', 'sync=2')}\n# gpu_active\nk\n", False),
         (
-            f"{IDLE.replace('activity=1', 'activity=1 sync=1')}\n# gpu_active\nk\n",
-            False,
+            f"{ROCM_SYNC}\n# sdk_version=10305 build_sdk_version=10305\n# gpu_active\nk\n",
+            True,
         ),
+        (f"{ROCM_SYNC}\n# gpu_active\nk\n{FOOTER}\n", True),
+        (f"{ROCM_SYNC}\n# gpu_active\nk\n# error=callback-missed m\nm\n", False),
+        (f"{ROCM_SYNC}\n# gpu_active\nk\n# error=callback-unresolved\n", False),
+        (f"{ROCM_SYNC}\n# gpu_active\nk", False),
+        (f"{IDLE}\n# gpu_active\nk\n", False),
     ],
     ids=[
         "killed-after-launch",
@@ -462,12 +468,17 @@ FOOTER = "# end records=1 unique=1 dropped=0 errors=0 unresolved=0"
         "reopened-after-footer",
         "torn-last-line",
         "unknown-format",
-        "rocm-keeps-footer-rule",
+        "rocm-killed-after-launch",
+        "rocm-footer",
+        "rocm-callback-missed",
+        "rocm-callback-unresolved",
+        "rocm-torn-last-line",
+        "rocm-without-sync-keeps-footer-rule",
     ],
 )
 def test_launch_time_recording_is_complete_without_a_footer(tmp_path, text, clean):
-    """sync=1 needs no footer, but one that is present must agree. ROCm and
-    today's CUDA format keep the footer rule."""
+    """sync=1 needs no footer, but one that is present must agree. Files
+    without sync=1 keep the footer rule."""
     path = tmp_path / "kern.7.txt"
     path.write_text(text)
     assert kernel_table.read_recording(path)[2] is clean
@@ -513,6 +524,24 @@ def test_table_reports_misses_and_what_the_footer_rule_would_give(tmp_path):
     # One footerless job is enough to lose the row under the footer rule.
     assert stats["rows_usable_footer_rule"] == 1
     assert stats["callback_missed"] == 1
+
+
+def test_rocm_step_with_killed_launch_time_workers_is_usable(tmp_path):
+    """The ROCm shutdown pattern: a parent with a footer and engine workers
+    SIGKILLed mid-run. With sync=1 the row is usable; without it, it is not."""
+    root = tmp_path / ".kernrec"
+    sdk = "# sdk_version=10305 build_sdk_version=10305"
+    for step, header in [("sync", ROCM_SYNC), ("footer-only", IDLE)]:
+        job = root / f"job-{step}"
+        _sidecar(job, step=step)
+        (job / "kern.1.txt").write_text(f"{header}\n{sdk}\n# gpu_active\nk\n{FOOTER}\n")
+        (job / "kern.2.txt").write_text(f"{header}\n{sdk}\n# gpu_active\nk\nworker\n")
+    table, _ = _build_kernrec(tmp_path, root)
+    rows = table["rows"]
+    assert rows["sync"]["backend"] == "rocm"
+    assert kernel_table.usable(rows["sync"]) is True
+    assert kernel_table.usable(rows["footer-only"]) is False
+    assert table["stats"]["rows_usable_footer_rule"] == 0
 
 
 @pytest.mark.parametrize("missing", [False, True], ids=["all-present", "one-missing"])
