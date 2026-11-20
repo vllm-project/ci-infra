@@ -161,8 +161,10 @@ aws ssm put-parameter --region us-east-1 --overwrite \
   --name /buildkite/release-cpu-build-ami/us-east-1 --value ami-...
 ```
 
-and then applies Terraform in ci-infra-private so the release stacks pick it up.
-The cleanup step never deletes the AMI that parameter points to.
+and then applies Terraform in ci-infra-private the same day: the release stacks
+take that value as their `ImageId`, so the apply rolls it out. The cleanup step
+never deletes the AMI the parameter points to, but it no longer protects the
+one it replaced, which the release stacks boot until the apply.
 
 ### AMI Lifecycle
 
