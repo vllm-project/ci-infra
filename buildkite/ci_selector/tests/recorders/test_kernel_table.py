@@ -614,3 +614,91 @@ def test_unavailable_setup_cannot_reuse_stale_recordings(tmp_path):
     row = table["rows"]["step-x"]
     assert row["passed"] and not row["trace_complete"]
     assert not row["recording_available"]
+
+
+PROBE = (
+    "# kernrec v1 backend=cuda recorder=cupti activity=1 sync=1 pid=9 ppid=1 exe=py\n"
+    "# end records=0 unique=0 dropped=0 errors=0 unresolved=0\n"
+)
+
+
+@pytest.mark.parametrize(
+    "probe,usable",
+    [
+        ({"ok": True, "recording": PROBE}, True),
+        (None, False),
+        ({"ok": False, "detail": "GPU init probe timed out"}, False),
+        ({"ok": True}, False),
+        ({"ok": True, "recording": PROBE.replace("# end", "k\n# end")}, False),
+        # An idle header (no footer) passes the footer rule but proves no exit.
+        ({"ok": True, "recording": PROBE.split("# end")[0]}, False),
+        (
+            {
+                "ok": True,
+                "recording": PROBE.replace(
+                    "cuda recorder=cupti", "rocm recorder=rocprofiler-sdk"
+                ),
+            },
+            False,
+        ),
+        ({"ok": True, "recording": PROBE.replace("errors=0", "errors=1")}, False),
+    ],
+    ids=[
+        "ok",
+        "none",
+        "failed",
+        "no-recording",
+        "kernel",
+        "no-footer",
+        "other-backend",
+        "error",
+    ],
+)
+def test_shard_without_recordings_counts_only_with_a_successful_probe(
+    tmp_path, probe, usable
+):
+    """A timing shard of CPU-only tests initializes no GPU, so it leaves no
+    recording. It may complete its row only if the exit probe showed the
+    recorder loads there; otherwise "no files" may mean "recorder never
+    loaded", and the row must not authorize drops."""
+    root = tmp_path / ".kernrec"
+    _recording((root / "j0").mkdir(parents=True) or root / "j0" / "kern.1.txt", ["kA"])
+    _sidecar(root / "j0", shard=0, count=2)
+    _sidecar(root / "j1", shard=1, count=2)
+    meta = json.loads((root / "j1" / "kernrec.json").read_text())
+    meta.update(backend="cuda", collection_available=True, recordings=[])
+    if probe is not None:
+        meta["empty_probe"] = probe
+    (root / "j1" / "kernrec.json").write_text(json.dumps(meta))
+    table, _ = _build_kernrec(tmp_path, root)
+    row = table["rows"]["step-x"]
+    assert kernel_table.usable(row) is usable
+    assert [table["names"][i] for i in row["kernels"]] == ["kA"]
+    assert row["processes"] == 1
+    assert table["stats"].get("empty_jobs_probed", 0) == int(usable)
+    assert table["stats"]["rows_usable_footer_rule"] == int(usable)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"collection_error": "setup incomplete"},
+        {"collection_available": False},
+        {"recordings": ["kern.1.txt"]},
+    ],
+    ids=["collection-error", "unavailable", "listed-recording-missing"],
+)
+def test_successful_probe_cannot_cover_an_unhealthy_job(tmp_path, change):
+    job = tmp_path / ".kernrec" / "job"
+    _sidecar(job)
+    meta = json.loads((job / "kernrec.json").read_text())
+    meta.update(
+        backend="cuda",
+        collection_available=True,
+        recordings=[],
+        empty_probe={"ok": True, "recording": PROBE},
+    )
+    meta.update(change)
+    (job / "kernrec.json").write_text(json.dumps(meta))
+    table, _ = _build_kernrec(tmp_path, job.parent)
+    assert not kernel_table.usable(table["rows"]["step-x"])

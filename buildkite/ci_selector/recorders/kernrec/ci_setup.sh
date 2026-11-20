@@ -57,10 +57,109 @@ data = {
                         if key in names or key.startswith("VLLM_ROCM_USE_AITER")},
     },
 }
+path = Path(env["KERNREC_DIR"]) / "kernrec.json"
+
+# Initializes the GPU like a workload process would, so the recorder loads.
+PROBE = r"""
+import ctypes
+import sys
+library = ctypes.CDLL(sys.argv[2])
+status = getattr(library, "cuInit" if sys.argv[1] == "cuda" else "hipInit")(0)
+if status:
+    sys.exit("GPU init returned %d" % status)
+"""
+
+
+def hip_library():
+    """The HIP runtime torch's HIP library resolves here, else the system one."""
+    import glob
+    import importlib.util
+    import re
+    import subprocess
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        spec = None
+    if spec and spec.origin:
+        lib = Path(spec.origin).parent / "lib"
+        try:
+            linked = subprocess.run(["ldd", str(lib / "libtorch_hip.so")], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10).stdout
+            match = re.search(r"libamdhip64\.so\S* => (/\S+)", linked)
+            if match:
+                return match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        bundled = sorted(glob.glob(str(lib / "libamdhip64.so*")))
+        if bundled:
+            return bundled[0]
+    system = Path(env.get("ROCM_PATH", "/opt/rocm")) / "lib" / "libamdhip64.so"
+    return str(system) if system.exists() else "libamdhip64.so"
+
+
+# An armed job that passed and left no recording either ran no GPU process or
+# lost its recorder. Show the recorder loads here, writing outside the upload.
+# Whether the recording proves it is kernel_table's call (_empty_probe_ok).
+def empty_probe():
+    import resource
+    import shutil
+    import signal
+    import subprocess
+    import tempfile
+    scratch = tempfile.mkdtemp(prefix="kernrec-probe-")
+    try:
+        library = "libcuda.so.1" if backend == "cuda" else hip_library()
+        process = subprocess.Popen(
+            [sys.executable, "-S", "-c", PROBE, backend, library], cwd=scratch,
+            env=dict(env, KERNREC_DIR=scratch), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+        try:
+            _, stderr = process.communicate(timeout=float(env.get("KERNREC_PROBE_TIMEOUT") or 60))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                # Stuck in the driver: leave it rather than hold the job.
+                return {"ok": False, "detail": "GPU init probe hung in " + library}
+            return {"ok": False, "detail": "GPU init probe timed out in " + library}
+        if process.returncode:
+            status = process.returncode
+            detail = ("probe killed by signal %d" % -status if status < 0
+                      else "probe exited %d" % status)
+            lines = [line for line in stderr.decode(errors="replace").splitlines()
+                     if line.strip() and not line.startswith("***")]
+            return {"ok": False, "detail": (detail + (": " + lines[-1] if lines else ""))[:400]}
+        files = sorted(Path(scratch).iterdir())
+        if len(files) != 1 or not files[0].name.startswith("kern."):
+            return {"ok": False, "detail": "probe wrote %d files with %s, expected one recording"
+                    % (len(files), library)}
+        return {"ok": True, "detail": "recorder loaded with " + library,
+                "recording": files[0].read_text(errors="replace")[:4096]}
+    except Exception as error:
+        return {"ok": False, "detail": ("probe failed: %r" % error)[:300]}
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 if data["exit_status"] is not None:
     # Inventory at finish, so the collector can tell a partial download apart.
     data["recordings"] = sorted(p.name for p in Path(env["KERNREC_DIR"]).glob("kern.*.txt"))
-path = Path(env["KERNREC_DIR"]) / "kernrec.json"
+    try:
+        previous = json.loads(path.read_text())
+    except (OSError, ValueError):
+        previous = None
+    # The setup sidecar must still be there: a wiped job directory is not empty.
+    if (data["exit_status"] == 0 and data["collection_available"]
+            and not data["collection_error"] and not data["recordings"]
+            and backend in ("cuda", "rocm") and isinstance(previous, dict)
+            and previous.get("collection_available") is True):
+        # kernrec_finish can run twice (generator command, then EXIT trap).
+        if previous.get("recordings") == [] and isinstance(previous.get("empty_probe"), dict):
+            data["empty_probe"] = previous["empty_probe"]
+        else:
+            data["empty_probe"] = empty_probe()
 temporary = path.with_suffix(".json.tmp")
 temporary.write_text(json.dumps(data, indent=2) + "\n")
 temporary.chmod(0o666)

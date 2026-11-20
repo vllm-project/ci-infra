@@ -116,32 +116,6 @@ done
 n_files=$(find .kernrec -name 'kern.*.txt' 2>/dev/null | wc -l | tr -d ' ')
 n_jobs=$(find .kernrec -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
 echo "${n_files} recording files from ${n_jobs} jobs"
-# Jobs that delivered at least one recording, per backend: the sidecar names
-# it, else the recording's header, else cuda (sidecars before the field).
-read -r delivered[cuda] delivered[rocm] <<<"$("${KERNREC_PYTHON:-python3}" - <<'PY'
-import json, re
-from pathlib import Path
-count = {"cuda": 0, "rocm": 0}
-for job in Path(".kernrec").glob("*/"):
-    files = sorted(job.glob("kern.*.txt"))
-    if not files:
-        continue
-    backend = None
-    try:
-        backend = json.loads((job / "kernrec.json").read_text()).get("backend")
-    except (OSError, ValueError):
-        pass
-    if not backend:
-        match = re.search(r"backend=(\w+)", files[0].read_text(errors="replace")[:400])
-        backend = match.group(1) if match else "cuda"
-    if backend in count:
-        count[backend] += 1
-print(count["cuda"], count["rocm"])
-PY
-)"
-for backend in cuda rocm; do
-  echo "${backend}: ${delivered[$backend]} jobs delivered, ${expected[$backend]:-unknown} armed"
-done
 if [[ "${n_jobs}" == "0" ]]; then
   for backend in cuda rocm; do verdict[$backend]="nothing delivered"; done
   echo "nothing to fold; done"
@@ -152,6 +126,36 @@ echo "--- :table_tennis_paddle_and_ball: Building the kernel table"
 # From here on a failure is a failure: soft_fail keeps the build green, but
 # a half-built result must never be published as if it were complete.
 curl -sSfL --retry 3 -o kernel_table.py "${RAW}/kernel_table.py" || { echo "cannot fetch kernel_table.py" >&2; exit 1; }
+# Jobs that delivered at least one recording, or an empty-job probe the
+# table accepts, per backend: the sidecar names it, else the recording's
+# header, else cuda (sidecars before the field).
+read -r delivered[cuda] delivered[rocm] <<<"$("${KERNREC_PYTHON:-python3}" - <<'PY'
+import json, re
+from pathlib import Path
+from kernel_table import _empty_probe_ok
+count = {"cuda": 0, "rocm": 0}
+for job in Path(".kernrec").glob("*/"):
+    files = sorted(job.glob("kern.*.txt"))
+    meta = {}
+    try:
+        meta = json.loads((job / "kernrec.json").read_text())
+        meta = meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError):
+        pass
+    if not files and not _empty_probe_ok(meta, meta.get("backend")):
+        continue
+    backend = meta.get("backend")
+    if not backend and files:
+        match = re.search(r"backend=(\w+)", files[0].read_text(errors="replace")[:400])
+        backend = match.group(1) if match else "cuda"
+    if backend in count:
+        count[backend] += 1
+print(count["cuda"], count["rocm"])
+PY
+)"
+for backend in cuda rocm; do
+  echo "${backend}: ${delivered[$backend]} jobs delivered, ${expected[$backend]:-unknown} armed"
+done
 mkdir -p out
 publish=()
 for backend in cuda rocm; do
