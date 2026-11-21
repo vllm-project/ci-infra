@@ -140,11 +140,14 @@ def rocm_build_layout() -> bool:
 
 def rocm_ci_repo() -> str:
     """The trust rule: only non-PR builds of vllm-project/vllm main, not the
-    AITER nightly, write rocm/vllm-ci."""
+    AITER nightly, write rocm/vllm-ci. A build triggered from another build is
+    excluded: a PR job can upload a trigger step with any branch and commit."""
     repo = os.getenv("BUILDKITE_REPO", "")
     trusted = (
         os.getenv("BUILDKITE_PULL_REQUEST") == "false"
         and os.getenv("BUILDKITE_BRANCH") == "main"
+        and os.getenv("BUILDKITE_SOURCE") != "trigger_job"
+        and not os.getenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID")
         and re.search(r"[/:]vllm-project/vllm(\.git)?$", repo)
         and os.getenv("AITER_NIGHTLY") != "1"
     )

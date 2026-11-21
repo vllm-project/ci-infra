@@ -109,6 +109,8 @@ def build_sh_layout(tmp_path, monkeypatch):
     monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
     monkeypatch.setenv("BUILDKITE_BRANCH", "main")
     monkeypatch.delenv("AITER_NIGHTLY", raising=False)
+    monkeypatch.delenv("BUILDKITE_SOURCE", raising=False)
+    monkeypatch.delenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID", raising=False)
     return monkeypatch
 
 
@@ -120,6 +122,9 @@ def build_sh_layout(tmp_path, monkeypatch):
         ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-dev"),
         ({"AITER_NIGHTLY": "1"}, "rocm/vllm-dev"),
         ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-dev"),
+        # A trigger step uploaded by a PR job can build main with any commit.
+        ({"BUILDKITE_SOURCE": "trigger_job"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "1"}, "rocm/vllm-dev"),
     ],
 )
 def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
