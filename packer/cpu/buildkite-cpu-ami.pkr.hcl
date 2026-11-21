@@ -88,6 +88,12 @@ source "amazon-ebs" "cpu_build_box" {
 
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"
+
+  # packer_build_queue may stop and terminate only instances with this tag
+  # (packer-ami-builder-policy in ci-infra-private).
+  run_tags = {
+    vllm-packer = "true"
+  }
 }
 
 build {
