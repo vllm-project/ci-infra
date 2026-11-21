@@ -47,7 +47,10 @@ case "$1 $2" in
   "ec2 describe-launch-template-versions")
     # The template ID carries the AMI it launches, so the stub needs no state.
     for arg in "$@"; do
-      if [[ "$arg" == lt-* ]]; then echo "${arg#lt-}"; fi
+      if [[ "$arg" == lt-* ]]; then
+        if [[ " ${LT_LOOKUP_FAILS:-} " == *" ${arg#lt-} "* ]]; then echo "AccessDenied" >&2; exit 254; fi
+        if [[ " ${LT_LOOKUP_NONE:-} " == *" ${arg#lt-} "* ]]; then echo "None"; else echo "${arg#lt-}"; fi
+      fi
     done ;;
 esac
 exit 0
@@ -152,5 +155,31 @@ def test_cleanup_deletes_nothing_when_auto_scaling_groups_cannot_be_read(tmp_pat
 
 def test_cleanup_deletes_nothing_when_no_ami_is_in_use(tmp_path):
     result, deregistered = run_cleanup(tmp_path, {"IN_USE_AMIS": ""})
+    assert result.returncode != 0
+    assert deregistered == []
+
+
+def test_cleanup_deletes_nothing_when_one_template_lookup_fails(tmp_path):
+    """A failed lookup must not be masked by a later one that succeeds
+    (bash drops errexit inside command substitutions)."""
+    result, deregistered = run_cleanup(
+        tmp_path,
+        {
+            "IN_USE_AMIS": "ami-0000000000000000d ami-0000000000000000f",
+            "LT_LOOKUP_FAILS": "ami-0000000000000000d",
+        },
+    )
+    assert result.returncode != 0
+    assert deregistered == []
+
+
+def test_cleanup_deletes_nothing_when_a_template_has_no_image(tmp_path):
+    result, deregistered = run_cleanup(
+        tmp_path,
+        {
+            "IN_USE_AMIS": "ami-0000000000000000d ami-0000000000000000f",
+            "LT_LOOKUP_NONE": "ami-0000000000000000d",
+        },
+    )
     assert result.returncode != 0
     assert deregistered == []
