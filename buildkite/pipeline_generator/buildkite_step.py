@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
 import math
@@ -39,6 +39,7 @@ from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_amd_enabled, kernrec_enabled
 import runtime_shard
+from unblock_jobs import plain_label
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -265,6 +266,14 @@ def _get_timeout_in_minutes(
     return timeout_in_minutes
 
 
+# Each step gets its own GitHub commit status next to the build's. Buildkite
+# posts a step-level status per step, its parallel jobs folded, and the condition
+# keeps it to the final result (passed, failed, or errored as a timeout does): no
+# pending or running updates, so one request per step, and a retry that passes
+# turns a red status green. Soft fails post nothing.
+STEP_STATUS_PREFIX = "ci/step: "
+
+
 class BuildkiteCommandStep(BaseModel):
     label: str
     group: Optional[str] = None
@@ -286,6 +295,21 @@ class BuildkiteCommandStep(BaseModel):
     # Not selected to run: left out of the pipeline and offered in the
     # "Run more jobs" input step instead (see split_deferred_steps).
     deferred: bool = Field(default=False, exclude=True)
+
+    @computed_field
+    def notify(self) -> List[Dict[str, Any]]:
+        """The step's result status, named by its label as written, so after
+        " Shard %N/%t" is added; GitHub doesn't render Buildkite's emoji."""
+        name = plain_label(self.label)
+        return [
+            {
+                "github_commit_status": {"context": STEP_STATUS_PREFIX + name},
+                "if": (
+                    'step.outcome == "passed" || step.outcome == "hard_failed"'
+                    ' || step.outcome == "errored"'
+                ),
+            }
+        ]
 
     def to_yaml(self):
         return {
