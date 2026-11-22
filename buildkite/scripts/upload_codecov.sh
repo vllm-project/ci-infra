@@ -46,7 +46,7 @@ done
 # Combine all coverage database files into a single .coverage file
 # This will apply the [paths] remapping from .coveragerc to normalize paths to vllm/
 echo "Combining coverage files..."
-COMBINE_OUTPUT=$(python3 -m coverage combine --keep 2>&1)
+COMBINE_OUTPUT=$(coverage combine --keep 2>&1)
 COMBINE_EXIT=$?
 
 echo "$COMBINE_OUTPUT"
@@ -72,7 +72,7 @@ echo "Successfully combined coverage files"
 # Generate XML report from the combined coverage data
 # This will use the path mappings from .coveragerc to normalize paths
 echo "Generating XML coverage report..."
-python3 -m coverage xml -o coverage.xml
+coverage xml -o coverage.xml
 
 if [ ! -f coverage.xml ]; then
     echo "Error: Failed to generate coverage.xml"
