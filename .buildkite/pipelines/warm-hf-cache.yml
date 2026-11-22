@@ -1,0 +1,37 @@
+# Buildkite pipeline for warming the shared HuggingFace model cache.
+#
+# Why: the 28-day flake analysis (254 flaky tests in suite ci-1) shows whole
+# test groups failing together on HF Hub download errors — all 12
+# bitsandbytes tests on the same 32 runs, ~30 MTEB tests on the same 8.
+# Test containers on the L4 GPU queues already share a persistent HF cache
+# (HF_HOME=/fsx/hf_cache, see buildkite/pipeline_generator/plugin/
+# docker_plugin.py); this pipeline keeps it warm so those steps never
+# depend on hub availability. The companion vllm-repo changes set
+# HF_HUB_OFFLINE=1 on the affected steps.
+#
+# Schedule: intended to run nightly (off-peak). The pipeline and its
+# schedule are registered in the Buildkite UI against this repo, mirroring
+# .buildkite/pipelines/rebuild-cpu-ami.yml.
+#
+# Queue: gpu_1_queue because those agents have the /fsx/hf_cache host mount;
+# the job itself is CPU/network only.
+#
+# Retry policy: this job is download-only with no test signal, so retrying
+# any failure is safe. This is deliberately NOT the pattern for test steps —
+# those only retry on agent-loss signatures.
+
+steps:
+  - label: ":huggingface: Warm shared HF model cache"
+    key: warm-hf-cache
+    command: buildkite/scripts/warm-hf-cache.sh
+    agents:
+      queue: gpu_1_queue
+    timeout_in_minutes: 120
+    retry:
+      automatic:
+        - exit_status: -1 # agent loss
+          limit: 1
+        - signal_reason: agent_stop
+          limit: 1
+        - exit_status: 1 # download failures; download-only job, no test signal
+          limit: 2
