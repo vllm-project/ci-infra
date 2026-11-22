@@ -57,6 +57,12 @@ exit 0
 """
 # BSD date on a laptop has no -d; the cutoff value itself is never checked.
 STUB_DATE = '#!/bin/bash\necho "2026-01-01T00:00:00"\n'
+# Cleanup reads the AMI line's name prefix that build-ami recorded; the v6 line.
+STUB_BUILDKITE_AGENT = (
+    '#!/bin/bash\n'
+    'if [[ "$*" == "meta-data get ami-name-prefix" ]]; then echo "vllm-buildkite-stack-linux-cpu-build"; exit 0; fi\n'
+    'exit 1\n'
+)
 
 
 def command_of(step_key):
@@ -75,6 +81,7 @@ def run_cleanup(tmp_path, extra_env=None):
     bin_dir.mkdir()
     write_stub(bin_dir, "aws", STUB_AWS)
     write_stub(bin_dir, "date", STUB_DATE)
+    write_stub(bin_dir, "buildkite-agent", STUB_BUILDKITE_AGENT)
     call_log = tmp_path / "calls.log"
     call_log.touch()
     env = {
@@ -104,8 +111,10 @@ def test_launch_templates_update_only_the_v6_ci_build_stack():
     """Premerge us-east-1 runs Elastic CI Stack v7 and the release stacks boot
     a hand-promoted AMI, so neither may get the daily v6 AMI."""
     loops = re.findall(r"for STACK_NAME in ([^;]+);", command_of("update-launch-templates"))
-    assert len(loops) == 1
-    assert loops[0].split() == ["bk-cpu-queue-postmerge-us-east-1"]
+    assert loops == ["$TARGET_STACKS"]
+    # The first assignment in build-ami is the default (v6) line's target list.
+    v6_targets = re.search(r'TARGET_STACKS="([^"]*)"', command_of("build-ami")).group(1)
+    assert v6_targets.split() == ["bk-cpu-queue-postmerge-us-east-1"]
 
 
 def test_cleanup_keeps_the_release_ami(tmp_path):
