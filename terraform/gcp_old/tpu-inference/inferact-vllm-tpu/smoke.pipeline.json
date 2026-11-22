@@ -1,0 +1,82 @@
+{
+  "steps": [
+    {
+      "label": "inferact-v7x-16-01: 2 host(s), 16 devices",
+      "key": "inferact-v7x-16-01",
+      "agents": {
+        "queue": "tpu_v7x_16_queue_test",
+        "slice": "inferact-v7x-16-01"
+      },
+      "env": {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+      },
+      "timeout_in_minutes": 15,
+      "command": "set -euo pipefail\ntpu-run bash -c 'hostname; test -f /run/tpu-ci-ready; docker info --format \"{{.ServerVersion}}\"; test \"$(ulimit -l)\" = unlimited'\nTPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py\n"
+    },
+    {
+      "label": "inferact-v7x-16-02: 2 host(s), 16 devices",
+      "key": "inferact-v7x-16-02",
+      "agents": {
+        "queue": "tpu_v7x_16_queue_test",
+        "slice": "inferact-v7x-16-02"
+      },
+      "env": {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+      },
+      "timeout_in_minutes": 15,
+      "command": "set -euo pipefail\ntpu-run bash -c 'hostname; test -f /run/tpu-ci-ready; docker info --format \"{{.ServerVersion}}\"; test \"$(ulimit -l)\" = unlimited'\nTPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py\n"
+    },
+    {
+      "label": "inferact-v7x-8-01: 1 host(s), 8 devices",
+      "key": "inferact-v7x-8-01",
+      "agents": {
+        "queue": "tpu_v7x_8_queue_test",
+        "slice": "inferact-v7x-8-01"
+      },
+      "env": {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+      },
+      "timeout_in_minutes": 15,
+      "command": "set -euo pipefail\ntpu-run bash -c 'hostname; test -f /run/tpu-ci-ready; docker info --format \"{{.ServerVersion}}\"; test \"$(ulimit -l)\" = unlimited'\nTPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py\n"
+    },
+    {
+      "label": "inferact-v7x-8-02: 1 host(s), 8 devices",
+      "key": "inferact-v7x-8-02",
+      "agents": {
+        "queue": "tpu_v7x_8_queue_test",
+        "slice": "inferact-v7x-8-02"
+      },
+      "env": {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+      },
+      "timeout_in_minutes": 15,
+      "command": "set -euo pipefail\ntpu-run bash -c 'hostname; test -f /run/tpu-ci-ready; docker info --format \"{{.ServerVersion}}\"; test \"$(ulimit -l)\" = unlimited'\nTPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py\n"
+    },
+    {
+      "label": "inferact-v7x-8-03: 1 host(s), 8 devices",
+      "key": "inferact-v7x-8-03",
+      "agents": {
+        "queue": "tpu_v7x_8_queue_test",
+        "slice": "inferact-v7x-8-03"
+      },
+      "env": {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+      },
+      "timeout_in_minutes": 15,
+      "command": "set -euo pipefail\ntpu-run bash -c 'hostname; test -f /run/tpu-ci-ready; docker info --format \"{{.ServerVersion}}\"; test \"$(ulimit -l)\" = unlimited'\nTPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py\n"
+    },
+    {
+      "label": "inferact-v7x-8-04: 1 host(s), 8 devices",
+      "key": "inferact-v7x-8-04",
+      "agents": {
+        "queue": "tpu_v7x_8_queue_test",
+        "slice": "inferact-v7x-8-04"
+      },
+      "env": {
+        "BUILDKITE_SKIP_CHECKOUT": "true"
+      },
+      "timeout_in_minutes": 15,
+      "command": "set -euo pipefail\ntpu-run bash -c 'hostname; test -f /run/tpu-ci-ready; docker info --format \"{{.ServerVersion}}\"; test \"$(ulimit -l)\" = unlimited'\nTPU_RUN_TIMEOUT=600 tpu-run /opt/tpu-ci/venv/bin/python /opt/tpu-ci/smoke.py\n"
+    }
+  ]
+}
