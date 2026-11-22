@@ -114,7 +114,7 @@ v7.2.0 base and publishes like the v6 build, but to its own targets:
 |---|---|---|
 | AMI name | `vllm-buildkite-stack-linux-cpu-build-*` | `vllm-buildkite-stack-v7-linux-cpu-build-*` |
 | SSM parameter | `/buildkite/cpu-build-ami/us-east-1` | `/buildkite/cpu-build-ami/v7/us-east-1` |
-| Launch templates updated | postmerge us-east-1, both release stacks | `bk-cpu-queue-premerge-us-east-1` |
+| Launch templates updated | postmerge us-east-1 (release stacks are promoted by hand) | `bk-cpu-queue-premerge-us-east-1` |
 
 The cleanup step filters on the line's own name prefix, so each line only
 deletes its own old AMIs, and neither matches canary AMIs. A v7 queue's stack
