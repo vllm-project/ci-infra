@@ -381,6 +381,19 @@ HAMI_GPUMEM_MIB = {
     "kimi-k3-unit-tests-b200": 6144,
     "kernels-mhc-test-b200": 4096,
     "kernels-b200": 90000,
+    "deepseek-v4-kernel-test-b200": 8192,
+    "kernels-minimax-m3-attention-b200": 8192,
+    "fusion-and-compile-unit-tests-2xb200": 8192,
+    "kernels-fusedmoe-layer-test-2-b200s": 24576,
+    "fusion-e2e-tp2-b200": 90000,
+}
+
+# Steps whose quota was staged on more than one GPU, with that GPU count. Every
+# other listed step was staged on one. A step whose GPU count changes keeps
+# whole cards until it is staged again.
+HAMI_GPUS = {
+    "kernels-fusedmoe-layer-test-2-b200s": 2,
+    "fusion-e2e-tp2-b200": 2,
 }
 
 
@@ -427,11 +440,10 @@ def get_k8s_plugin(step: Step, image: str):
         "nvidia.com/gpu"
     ] = step.num_devices or 1
 
-    # Quotas were measured on one GPU; a step that grows keeps whole cards.
     if (
         step.device == DeviceType.B200_K8S
         and step.key in HAMI_GPUMEM_MIB
-        and (step.num_devices or 1) == 1
+        and (step.num_devices or 1) == HAMI_GPUS.get(step.key, 1)
     ):
         # HAMi's webhook only handles Pods carrying this label.
         metadata = plugin["kubernetes"].setdefault("metadata", {})
