@@ -156,6 +156,8 @@ docker run --rm --gpus all nvidia/cuda:12.8.0-base-ubuntu22.04 nvidia-smi
 
 For H200 MIG setup, see [`setup_mig_h200.sh`](setup_mig_h200.sh) and [`teardown_mig_h200.sh`](teardown_mig_h200.sh).
 
+For a Kubernetes GPU node that runs several CI Pods per GPU (GPU sharing with HAMi), follow [`hami/RUNBOOK.md`](hami/RUNBOOK.md).
+
 ## 6. Point HF_HOME at Large Storage
 
 Model weights downloaded during CI jobs go to Hugging Face's cache. By default that is `~/.cache/huggingface` on the root disk, which fills up fast on GPU machines. Point `HF_HOME` at a big disk instead:

@@ -1,0 +1,22 @@
+# HAMi Helm chart 2.11.0 values for a CI GPU cluster that runs the NVIDIA GPU
+# Operator. Tested on the B200 and H100 Kubernetes clusters. See RUNBOOK.md.
+scheduler:
+  replicas: 2                        # leader election is on by default; with one replica, quota Pods created while it is down stay Pending for good
+  defaultSchedulerPolicy:
+    nodeSchedulerPolicy: binpack
+    gpuSchedulerPolicy: binpack      # default is spread; binpack keeps whole cards free for multi-GPU steps
+  admissionWebhook:
+    failurePolicy: Fail              # a labelled Pod is refused at creation when HAMi is down, instead of hanging Pending
+    objectSelector:
+      matchLabels:
+        vllm.ci/gpu-sharing: hami    # opt-in: Pods without this label never reach the webhook
+devicePlugin:
+  nvidiaNodeSelector:
+    gpu: "on"                        # HAMi's device plugin runs only on nodes labelled gpu=on
+  deviceListStrategy: cdi-annotations  # the default envvar cannot start Pods under the GPU Operator's CDI-mode nvidia runtime class
+  # Uncomment when the host's /usr/bin/nvidia-ctk is older than the GPU
+  # Operator's toolkit (RUNBOOK.md step 2 shows the check).
+  # nvidiaHookPath: /usr/local/nvidia/toolkit/nvidia-cdi-hook
+devices:
+  nvidia:
+    runtimeClassName: nvidia         # created by the GPU Operator; CI Pods already use it
