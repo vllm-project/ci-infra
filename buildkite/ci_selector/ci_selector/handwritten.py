@@ -504,6 +504,7 @@ KNOWN_STEP_FIELDS = {
     # Set by the generator's loader, never written in yaml.
     "source_file",
     "source_file_declared",
+    "mirror_source_file_declared",
 }
 
 # mirror.<hw> fields the generator honors (ci-infra buildkite_step.py).
@@ -535,6 +536,10 @@ MIRROR_OVERRIDABLE = {
     # Only splits a mirror job into shards. Whether the job runs, and which
     # tests it runs, never read it, so selection needs nothing from it.
     "automatic_shard",
+    # Set on the `mirror.amd` a `vendors:` step compiles to (the generator's
+    # step_vendors.py): the block is the whole AMD job, with no fallback to
+    # the step. Modelled by _expand_mirror.
+    "_exact",
 }
 
 # The env var the generator reads. Absent means "your rules"; present means

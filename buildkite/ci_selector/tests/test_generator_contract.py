@@ -189,6 +189,7 @@ def test_every_mirror_key_the_generator_reads_is_modelled():
     keys = mirror_override_keys(
         buildkite_step.convert_group_step_to_buildkite_step,
         buildkite_step._get_amd_mirror_effective_step,
+        buildkite_step._mirror_parent,
     )
     # Guard the guard: an upstream rename would empty the scan, and an empty
     # set is a subset of anything.
@@ -209,6 +210,21 @@ def test_every_mirror_key_the_generator_reads_is_modelled():
         f"add them to MIRROR_OVERRIDABLE in {HW}",
         "if the key changes what the step runs: also teach _expand_mirror in "
         "ci_selector/codemap/pipeline/buildkite.py to read it",
+    )
+
+
+def test_every_key_a_compiled_vendors_mirror_carries_is_modelled():
+    """A `vendors:` step's AMD job becomes a `mirror.amd` block holding any of
+    step_vendors.MIRROR_FIELDS, plus its device and the `_exact` marker."""
+    import step_vendors
+
+    carried = set(step_vendors.MIRROR_FIELDS) | {"device", step_vendors.EXACT_MIRROR}
+    assert not carried - handwritten.MIRROR_OVERRIDABLE, drift_message(
+        "a compiled `vendors:` mirror can carry keys we do not model: "
+        f"{sorted(carried - handwritten.MIRROR_OVERRIDABLE)}.",
+        "Preflight would force-select every AMD job of a `vendors:` step.",
+        f"add them to MIRROR_OVERRIDABLE in {HW}, and to _exact_mirror in "
+        "ci_selector/codemap/pipeline/buildkite.py if they change what runs",
     )
 
 
