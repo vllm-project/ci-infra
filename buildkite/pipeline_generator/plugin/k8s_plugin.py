@@ -367,6 +367,23 @@ intel_gpu_k8s_plugin_template = {
 }
 
 
+# GPU-sharing pilot: B200 step key -> HAMi GPU memory quota in MiB. These steps
+# run as a share of one card on the HAMi node (labelled gpu=on, tainted
+# nvidia.com/gpu=hami) instead of taking a whole card. A vLLM engine wants 92%
+# of the memory it sees free at start, so for steps that start engines the
+# quota must be at least 12.5x what earlier tests in the same process still
+# hold (v1-attention measured 1.7 GiB, kernels-root-misc 4.5 GiB).
+# shortcut: a hand list for one node; move the quota into the step config if
+# the pilot is extended.
+HAMI_GPUMEM_MIB = {
+    "v1-attention-b200": 32768,
+    "kernels-root-misc-test-b200": 73728,
+    "kimi-k3-unit-tests-b200": 6144,
+    "kernels-mhc-test-b200": 4096,
+    "kernels-b200": 90000,
+}
+
+
 def get_k8s_plugin(step: Step, image: str):
     if step.device == DeviceType.INTEL_GPU_K8S:
         num_gpus = step.num_devices or 1
@@ -409,6 +426,33 @@ def get_k8s_plugin(step: Step, image: str):
     plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"][
         "nvidia.com/gpu"
     ] = step.num_devices or 1
+
+    # Quotas were measured on one GPU; a step that grows keeps whole cards.
+    if (
+        step.device == DeviceType.B200_K8S
+        and step.key in HAMI_GPUMEM_MIB
+        and (step.num_devices or 1) == 1
+    ):
+        # HAMi's webhook only handles Pods carrying this label.
+        metadata = plugin["kubernetes"].setdefault("metadata", {})
+        metadata.setdefault("labels", {})["vllm.ci/gpu-sharing"] = "hami"
+        pod_spec = plugin["kubernetes"]["podSpec"]
+        pod_spec.setdefault("nodeSelector", {})["gpu"] = "on"
+        # The GPU Operator and HAMi daemonsets already tolerate this taint key.
+        pod_spec.setdefault("tolerations", []).append(
+            {
+                "key": "nvidia.com/gpu",
+                "operator": "Equal",
+                "value": "hami",
+                "effect": "NoSchedule",
+            }
+        )
+        quota_mib = HAMI_GPUMEM_MIB[step.key]
+        container = pod_spec["containers"][0]
+        container["resources"]["limits"]["nvidia.com/gpumem"] = quota_mib
+        container.setdefault("env", []).append(
+            {"name": "VLLM_CI_HAMI_GPUMEM_MIB", "value": str(quota_mib)}
+        )
 
     if step.device == DeviceType.L4:
         num_gpus = step.num_devices or 1
