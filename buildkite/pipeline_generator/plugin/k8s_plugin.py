@@ -350,6 +350,22 @@ HAMI_GPUMEM_MIB = {
     "fusion-e2e-tp2-b200": 92160,
     "weight-reload-refit-2gpu": 92160,
     "multi-modal-flashinfer-autotuning": 122880,
+    # H100 staging: first quotas on an 80 GiB card
+    "v1-attention-h100-mi300": 32768,
+    "deepseek-v4-kernel-test-h100": 16384,
+    "kernels-deepgemm-test-h100": 20480,
+    "kernels-fusedmoe-layer-test-2-h100s": 20480,
+    "distributed-compile-unit-tests-2xh100": 12288,
+    "kernels-minimax-reduce-rms-test-2-gpus": 12288,
+    "kernels-minimax-m3-sparse-prefill-h100": 8192,
+    "kernels-bf16x3-router-gemm-h100": 8192,
+    "kernels-attention-diffkv-test-h100": 8192,
+    "kernels-fp8-moe-test-2xh100": 16384,
+    "dsv41-nvidia-sm80-sm90-decode-8xh100": 12288,
+    "kernels-flashmla-test-h100": 73728,
+    "fusion-e2e-tp2-quick-h100": 40960,
+    "fusion-e2e-quick-h100": 40960,
+    "fault-tolerance-e2e-4xh100": 40960,
 }
 
 
@@ -377,7 +393,10 @@ def get_k8s_plugin(step: Step, image: str):
     ] = step.num_devices or 1
 
     # Quotas were measured on one GPU; a step that grows keeps whole cards.
-    if step.device == DeviceType.B200_K8S and step.key in HAMI_GPUMEM_MIB:
+    if (
+        step.device in (DeviceType.B200_K8S, DeviceType.H100)
+        and step.key in HAMI_GPUMEM_MIB
+    ):
         # HAMi's webhook only handles Pods carrying this label.
         plugin["kubernetes"]["metadata"] = {"labels": {"vllm.ci/gpu-sharing": "hami"}}
         pod_spec = plugin["kubernetes"]["podSpec"]
