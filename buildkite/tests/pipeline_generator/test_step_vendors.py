@@ -105,9 +105,9 @@ def test_the_first_device_of_each_vendor_becomes_the_step_and_its_mirror():
     assert mirror["commands"] == [
         "pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py"
     ]
-    # What a mirror gets when it leaves them out, written down.
+    # The AMD vendor's defaults, written down.
     assert mirror["depends_on"] == ["image-build-amd"]
-    assert mirror["dind"] is True
+    assert mirror["dind"] is False
 
     # A second device is a step of its own, under its own key.
     assert extra["key"] == "amd-v1-attention-mi355"
@@ -153,7 +153,6 @@ def test_an_amd_only_test_is_a_native_amd_step_keyed_amd_key():
         {
             "key": "kernels-mi355",
             "label": "Kernels",
-            "dind": False,
             "commands": ["pytest kernels"],
             "vendors": {"amd": {"devices": {"mi355_1": None}}},
         }
@@ -179,6 +178,61 @@ def test_explicit_keys_win_and_a_mirror_needs_the_amd_prefixed_key():
         "my-amd-job",
         "amd-v1-attention-mi355",
     ]
+
+
+def test_a_device_key_beats_its_vendors_key():
+    raw = _spec()
+    raw["vendors"]["amd"]["key"] = "from-vendor"
+    raw["vendors"]["amd"]["devices"]["mi300_dpx"]["key"] = "from-device"
+    keys = [step["key"] for step in compile_vendor_step(raw)]
+    assert keys == ["v1-attention", "from-device", "amd-v1-attention-mi355"]
+
+    del raw["vendors"]["amd"]["devices"]["mi300_dpx"]["key"]
+    keys = [step["key"] for step in compile_vendor_step(raw)]
+    # A vendor's key is its first device's only.
+    assert keys == ["v1-attention", "from-vendor", "amd-v1-attention-mi355"]
+
+
+def test_an_explicit_key_on_the_nvidia_job_unpairs_the_amd_mirror():
+    raw = _spec()
+    raw["vendors"]["nvidia"]["devices"]["h100"]["key"] = "v1-attention-h100"
+    compiled = compile_vendor_step(raw)
+    assert [step["key"] for step in compiled] == [
+        "v1-attention-h100",
+        "amd-v1-attention",
+        "amd-v1-attention-mi355",
+    ]
+    # A mirror is always keyed amd-<its step's key>, so amd-v1-attention is
+    # a step of its own, with the same fields.
+    assert "mirror" not in compiled[0]
+    assert compiled[1]["device"] == "mi300_dpx"
+    assert compiled[1]["depends_on"] == ["image-build-amd"]
+
+
+def test_vendor_defaults_beat_the_test_level():
+    raw = {
+        "key": "t",
+        "label": "T",
+        "depends_on": ["some-nvidia-build"],
+        "dind": True,
+        "vendors": {
+            "nvidia": {"devices": {"h100": None}},
+            "amd": {"devices": {"mi300_1": None, "mi355_1": {"key": "t-mi355"}}},
+        },
+    }
+    step, second = compile_vendor_step(raw)
+    assert step["depends_on"] == ["some-nvidia-build"]
+    for amd_job in (step["mirror"]["amd"], second):
+        assert amd_job["depends_on"] == ["image-build-amd"]
+        assert amd_job["dind"] is False
+
+    raw["vendors"]["amd"]["dind"] = True
+    raw["vendors"]["amd"]["devices"]["mi355_1"]["depends_on"] = ["other"]
+    step, second = compile_vendor_step(raw)
+    assert step["mirror"]["amd"]["dind"] is True
+    assert step["mirror"]["amd"]["depends_on"] == ["image-build-amd"]
+    assert second["dind"] is True
+    assert second["depends_on"] == ["other"]
 
 
 def test_null_values_are_unset_and_fields_the_generator_ignores_stay_on_steps():
@@ -294,6 +348,18 @@ def test_steps_without_vendors_pass_through_untouched():
         ),
         (lambda r: r["vendors"]["amd"].__setitem__("env", ["A=1"]), "must be a map"),
         (lambda r: r.pop("label"), "no `label` for amd-v1-attention"),
+        (lambda r: r.__setitem__("timeout", 5), "unknown field(s) `timeout`"),
+        (lambda r: r.__setitem__("gpu", "h100"), "replaces `gpu`"),
+        (
+            lambda r: r["vendors"]["amd"].__setitem__("retry", {"automatic": True}),
+            "vendor amd: unknown field(s) `retry`",
+        ),
+        (
+            lambda r: r["vendors"]["amd"]["devices"]["mi300_dpx"].__setitem__(
+                "mount_buildkite_agent", True
+            ),
+            "device mi300_dpx: unknown field(s) `mount_buildkite_agent`",
+        ),
     ],
 )
 def test_invalid_vendor_steps_are_rejected(change, message):
@@ -363,7 +429,6 @@ VENDORS = """\
           label: ":nvidia: (H100) V1 Attention"
           timeout_in_minutes: 40
     amd:
-      dind: false
       env:
         VLLM_ROCM_USE_AITER: "1"
       source_file_dependencies:
@@ -396,7 +461,6 @@ NATIVE_VENDORS = """\
     - pytest kernels
   vendors:
     amd:
-      dind: false
       devices:
         mi355_1:
 """
@@ -587,3 +651,184 @@ def test_changed_step_keys_follow_the_jobs_an_edit_changes(head, expected):
 def test_changed_step_keys_give_up_on_a_base_that_does_not_compile():
     broken = _edit("mi300_dpx", "h200")
     assert amd.changed_step_keys(HEADER + broken, HEADER + SPEC) is None
+
+
+# ---- the compiler and the generator agree on the fields ---------------------
+
+
+def test_job_fields_are_the_step_models_less_what_the_loader_sets():
+    from step import Step
+    from step_vendors import JOB_FIELDS
+
+    loader_only = {
+        "group",
+        "device",
+        "mirror",
+        "source_file",
+        "source_file_declared",
+        "mirror_source_file_declared",
+    }
+    assert set(JOB_FIELDS) == set(Step.model_fields) - loader_only
+
+
+def test_an_exact_mirror_takes_every_field_it_carries_from_its_block():
+    from step import Step
+    from step_vendors import MIRROR_FIELDS
+
+    nvidia = {
+        "working_dir": "/nvidia",
+        "depends_on": ["nvidia-build"],
+        "commands": ["nvidia"],
+        "agent_tags": {"queue": "nvidia"},
+        "num_devices": 8,
+        "num_nodes": 2,
+        "source_file_dependencies": ["nvidia/"],
+        "soft_fail": True,
+        "parallelism": 4,
+        "concurrency": 3,
+        "concurrency_group": "nvidia",
+        "timeout_in_minutes": 99,
+        "env": {"NVIDIA": "1"},
+        "optional": True,
+        "no_plugin": True,
+        "no_gpu": True,
+        "dind": True,
+        "automatic_shard": True,
+        "retry": {"automatic": True},
+        "mount_buildkite_agent": True,
+    }
+    block = {
+        "working_dir": "/amd",
+        "depends_on": ["image-build-amd"],
+        "commands": ["amd"],
+        "agent_tags": {"queue": "amd"},
+        "num_devices": 1,
+        "num_nodes": 1,
+        "source_file_dependencies": ["amd/"],
+        "soft_fail": False,
+        "parallelism": 2,
+        "concurrency": 1,
+        "concurrency_group": "amd",
+        "timeout_in_minutes": 11,
+        "env": {"AMD": "1"},
+        "optional": False,
+        "no_plugin": False,
+        "no_gpu": False,
+        "dind": False,
+        "automatic_shard": False,
+        "label": "A",
+        "device": "mi300_1",
+        EXACT_MIRROR: True,
+    }
+    # Every field an exact mirror carries is set above, to differ from the
+    # step's, so a field _mirror_parent forgets shows up as the NVIDIA value.
+    assert MIRROR_FIELDS - {"label"} <= set(nvidia)
+    assert MIRROR_FIELDS <= set(block)
+    step = Step(label="N", key="n", device="h100", **nvidia)
+    parent = buildkite_step._mirror_parent(step, block)
+    for name in MIRROR_FIELDS - {"label"}:
+        assert getattr(parent, name) == block[name], name
+    # Never read for an AMD job, so never the NVIDIA job's.
+    assert parent.retry is None
+    assert parent.mount_buildkite_agent is False
+
+
+# ---- a second device of one vendor --------------------------------------------
+
+TWO_AMD_LEGACY = """- label: ":nvidia: (H100) T"
+  key: t
+  device: h100
+  source_file_dependencies:
+    - shared/
+  commands:
+    - pytest t
+  mirror:
+    amd:
+      label: ":amd: (MI300) T"
+      device: mi300_1
+      dind: false
+      depends_on:
+        - image-build-amd
+      env:
+        AITER: "1"
+      source_file_dependencies:
+        - rocm/
+      commands:
+        - pytest t --amd
+- label: ":amd: (MI355) T"
+  key: amd-t-mi355
+  device: mi355_1
+  dind: false
+  timeout_in_minutes: 70
+  depends_on:
+    - image-build-amd
+  env:
+    AITER: "1"
+  source_file_dependencies:
+    - shared/
+    - rocm/
+  commands:
+    - pytest t --amd
+"""
+TWO_AMD_VENDORS = """- key: t
+  label: T
+  source_file_dependencies:
+    - shared/
+  vendors:
+    nvidia:
+      commands:
+        - pytest t
+      devices:
+        h100:
+          label: ":nvidia: (H100) T"
+    amd:
+      env:
+        AITER: "1"
+      source_file_dependencies:
+        - rocm/
+      commands:
+        - pytest t --amd
+      devices:
+        mi300_1:
+        mi355_1:
+          key: amd-t-mi355
+          timeout_in_minutes: 70
+"""
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [[], ["shared/x.py"], ["rocm/x.py"], ["other/x.py"], [STEP_YAML]],
+)
+def test_a_second_amd_device_renders_like_a_native_amd_step(
+    tmp_path, monkeypatch, fake_global_config, diff
+):
+    fake_global_config["list_file_diff"] = diff
+    monkeypatch.setattr(amd, "changed_step_keys_in_file", lambda *args: frozenset())
+    legacy = _load(tmp_path / "legacy", monkeypatch, TWO_AMD_LEGACY)
+    vendors = _load(tmp_path / "vendors", monkeypatch, TWO_AMD_VENDORS)
+    assert [step.key for step in vendors] == ["t", "amd-t-mi355"]
+    assert _render(vendors) == _render(legacy)
+
+
+# ---- keys across steps and files ----------------------------------------------
+
+
+def test_a_vendors_job_key_may_not_repeat_another_jobs(tmp_path, monkeypatch):
+    from step import check_vendor_step_keys
+
+    clash = TWO_AMD_VENDORS.replace("key: amd-t-mi355", "key: amd-other")
+    other = """- label: ":nvidia: (H100) Other"
+  key: other
+  device: h100
+  mirror:
+    amd:
+      device: mi300_1
+"""
+    steps = _load(tmp_path, monkeypatch, clash + other)
+    with pytest.raises(VendorStepError, match="Duplicate CI step key amd-other"):
+        check_vendor_step_keys(steps)
+
+    # Only legacy steps sharing a key: left alone, as before.
+    check_vendor_step_keys(_load(tmp_path / "legacy", monkeypatch, other + other))
+    check_vendor_step_keys(_load(tmp_path / "ok", monkeypatch, TWO_AMD_VENDORS))

@@ -1,13 +1,19 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from pydantic import model_validator
+from pydantic import PrivateAttr, model_validator
 from typing_extensions import Self
 from collections import defaultdict
 from global_config import get_global_config
 import os
 import yaml
 
-from step_vendors import EXACT_MIRROR, MIRROR_HARDWARE, expand_vendor_steps
+from step_vendors import (
+    EXACT_MIRROR,
+    MIRROR_HARDWARE,
+    VendorStepError,
+    compile_vendor_step,
+    has_vendors,
+)
 
 
 class Step(BaseModel):
@@ -44,6 +50,8 @@ class Step(BaseModel):
     source_file_declared: bool = Field(default=False, exclude=True)
     # The same for a `vendors:` step's AMD mirror, which lists its own.
     mirror_source_file_declared: bool = Field(default=False, exclude=True)
+    # Whether a `vendors:` step compiled to this one (check_vendor_step_keys).
+    _from_vendors: bool = PrivateAttr(default=False)
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
@@ -79,7 +87,15 @@ class Step(BaseModel):
 def parse_steps_from_yaml(yaml_data: dict):
     group = yaml_data.get("group", None)
     yaml_steps = yaml_data.get("steps", [])
-    steps = [Step.from_yaml(step) for step in expand_vendor_steps(yaml_steps)]
+    steps = []
+    for raw in yaml_steps:
+        if has_vendors(raw):
+            for compiled in compile_vendor_step(raw):
+                step = Step.from_yaml(compiled)
+                step._from_vendors = True
+                steps.append(step)
+        else:
+            steps.append(Step.from_yaml(raw))
     if group:
         for step in steps:
             step.group = group
@@ -138,6 +154,25 @@ def read_steps_from_job_dir(job_dir: str):
                     step.source_file_dependencies.append(source_file)
             steps.extend(file_steps)
     return steps
+
+
+def check_vendor_step_keys(steps: List[Step]) -> None:
+    """Fail on a key that a `vendors:` step's job shares with any other job,
+    in any file: Buildkite rejects the upload. Keys only legacy steps share
+    are left alone, as before."""
+    owners: Dict[str, List[Step]] = defaultdict(list)
+    for step in steps:
+        if step.key:
+            owners[step.key].append(step)
+        if step.key and (step.mirror or {}).get(MIRROR_HARDWARE):
+            owners[f"amd-{step.key}"].append(step)
+    for key, keyed in owners.items():
+        if len(keyed) > 1 and any(step._from_vendors for step in keyed):
+            files = sorted({step.source_file or "?" for step in keyed})
+            raise VendorStepError(
+                f"Duplicate CI step key {key} (a `vendors:` step's job), in "
+                + ", ".join(files)
+            )
 
 
 def exact_mirror(step: Step) -> Optional[Dict[str, Any]]:

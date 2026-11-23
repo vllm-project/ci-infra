@@ -115,26 +115,34 @@ it runs on, instead of a `device` plus a `mirror.amd` copy:
 ```
 
 * Every device is one job. Its definition is the test's fields, then its
-  vendor's, then its device's (the map key is the device). A more specific
-  value replaces a scalar (`label`, `timeout_in_minutes`, `num_devices`,
-  `optional`, `depends_on`, ...). `source_file_dependencies` and `commands`
-  are concatenated in that order, duplicate dependencies dropped, and `env` is
-  merged. A `!` exclusion applies to the jobs whose list it ends up in. A null
-  value counts as unset.
+  vendor's defaults, then its vendor's, then its device's (the map key is the
+  device). A more specific value replaces a scalar (`label`,
+  `timeout_in_minutes`, `num_devices`, `optional`, `depends_on`, ...).
+  `source_file_dependencies` and `commands` are concatenated in that order,
+  duplicate dependencies dropped, and `env` is merged. A `!` exclusion
+  applies to the jobs whose list it ends up in. A null value counts as unset.
 * One vendor's fields never reach another vendor's job: a dependency or env
   var set under `nvidia` is not the AMD jobs', unlike a `mirror.amd` block,
   which takes the step's.
 * Keys: the first non-AMD job is `<key>`, the first AMD job `amd-<key>`. Any
-  other device in a vendor needs its own `key`. A `key` set on a device wins.
+  other device in a vendor needs its own `key`. A `key` set on a device beats
+  one set on its vendor. The AMD job is the other job's AMD mirror only while
+  its key is `amd-` plus that job's key; with an explicit key on either, it is
+  a step of its own (and listed under "AMD - Other" in **Run more jobs**).
 * Vendors: `nvidia` (no `devices` means one job on the default GPU queue),
-  `amd` and `cpu`. An AMD job gets what a `mirror.amd` block gets when it
-  leaves a field out: `depends_on: [image-build-amd]`, `dind: true`, and a
-  label in the `:amd: (<device>) <title>` form. Other vendors are added in
-  `step_vendors.py`.
-* Rejected: an unknown vendor, a device of another vendor, `device` or
-  `mirror` beside `vendors`, a field the step model does not have at the
-  vendor or device level, a second device without a `key`, two jobs with one
-  key.
+  `amd` and `cpu`. An AMD job gets `depends_on: [image-build-amd]`, a label in
+  the `:amd: (<device>) <title>` form, and no dind (`dind: true` opts in;
+  a `mirror.amd` block or a plain AMD step is dind unless it opts out).
+  Vendor defaults beat the test level: a `depends_on` or `dind` set on the
+  test is the other vendors', and only `amd` or its devices replace the AMD
+  ones. Other vendors are added in `step_vendors.py`.
+* Rejected: an unknown vendor, a device of another vendor, `device`, `gpu` or
+  `mirror` beside `vendors`, an unknown field at any level (the test level
+  also takes `num_gpus`, `autorun_on_main`, `if` and
+  `allow_dependency_failure`, which only the vendor-neutral tools read),
+  `retry` or `mount_buildkite_agent` under `amd` (AMD jobs ignore them), a
+  second device without a `key`, and a key a `vendors:` job shares with any
+  other job.
 
 The yaml is compiled when it is loaded (`step_vendors.py`): the first non-AMD
 job becomes the step, the first AMD job its `mirror.amd`, marked `_exact` so

@@ -22,10 +22,12 @@ A test is written once, with per-vendor and per-device additions:
               timeout_in_minutes: 50
 
 Each device under a vendor is one Buildkite job. Its fields are the test's,
-then the vendor's, then the device's: a more specific scalar wins,
-`source_file_dependencies` and `commands` are concatenated in that order
-(duplicate dependencies dropped) and `env` is merged. One vendor's fields
-never reach another vendor's job.
+then the vendor's defaults, then the vendor's, then the device's: a more
+specific scalar wins, `source_file_dependencies` and `commands` are
+concatenated in that order (duplicate dependencies dropped) and `env` is
+merged. A vendor's defaults (an AMD job's `depends_on`) beat the test level,
+so only the vendor or device level replaces them. One vendor's fields never
+reach another vendor's job.
 
 The rest of the generator, and ci_selector, still read the older shape (a
 step with a `device`, plus a `mirror.amd` block for its AMD copy), so a
@@ -34,7 +36,9 @@ step with a `device`, plus a `mirror.amd` block for its AMD copy), so a
   * the first job of a non-AMD vendor is the step itself, keyed `<key>`;
   * the first AMD job, keyed `amd-<key>`, is that step's `mirror.amd`,
     marked `_exact`: its fields are the whole job, with no union with the
-    step's own dependencies, env or commands;
+    step's own dependencies, env or commands. A mirror's key is always
+    `amd-` plus its step's, so when an explicit key breaks that pairing (on
+    either job) the AMD job is a step of its own instead;
   * every other job (an AMD-only test, a second device) is a step of its own;
     an AMD-only test's first job is keyed `amd-<key>`, and a second device in
     one vendor needs a `key` of its own.
@@ -83,6 +87,14 @@ JOB_FIELDS = (
     "dind",
     "automatic_shard",
 )
+# Fields only the test level may set: the generator does not read them, but
+# ci_selector or Buildkite do. Anything else is rejected as a likely typo.
+TEST_ONLY_FIELDS = (
+    "num_gpus",
+    "autorun_on_main",
+    "if",
+    "allow_dependency_failure",
+)
 CONCATENATED_FIELDS = ("source_file_dependencies", "commands")
 MERGED_FIELDS = ("env",)
 # Fields a step's `mirror.amd` block is read for (buildkite_step.py). The rest
@@ -112,6 +124,9 @@ class Vendor:
     deviceless: bool = False
     # Whether its first job can be the primary job's mirror.
     mirror: bool = False
+    # Fields its jobs never read, so the vendor and its devices may not set
+    # them (the test level still may: they are the other vendors').
+    unsupported: frozenset = frozenset()
 
 
 NVIDIA_DEVICES = frozenset(
@@ -148,10 +163,14 @@ VENDORS: Dict[str, Vendor] = {
         name="amd",
         owns_device=is_amd_device,
         key_prefix="amd-",
-        # What a `mirror.amd` block gets when it leaves them out.
-        defaults={"depends_on": [AMD_ARTIFACT_STEP], "dind": True},
+        # The image every AMD job runs in. Unlike a `mirror.amd` block (and a
+        # plain step on an AMD device), a job here is not dind unless it says
+        # so: nearly every AMD job opts out.
+        defaults={"depends_on": [AMD_ARTIFACT_STEP], "dind": False},
         label=get_amd_label,
         mirror=True,
+        # Never read for an AMD job (buildkite_step.py).
+        unsupported=frozenset({"retry", "mount_buildkite_agent"}),
     ),
     "cpu": Vendor(
         name="cpu",
@@ -224,6 +243,11 @@ def compile_vendor_step(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         for name, value in raw.items()
         if name not in JOB_FIELDS and name != VENDORS_FIELD
     }
+    unknown = sorted(name for name in extra if name not in TEST_ONLY_FIELDS)
+    if unknown:
+        raise VendorStepError(
+            f"{where}: unknown field(s) " + ", ".join(f"`{name}`" for name in unknown)
+        )
 
     jobs: List[_Job] = []
     for vendor_name, vendor_block in vendors.items():
@@ -234,7 +258,7 @@ def compile_vendor_step(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
                 + ", ".join(sorted(VENDORS))
             )
         vendor_where = f"{where}, vendor {vendor_name}"
-        vendor_block = _block(vendor_block, vendor_where, allow_devices=True)
+        vendor_block = _block(vendor_block, vendor_where, vendor, allow_devices=True)
         devices = vendor_block.pop(DEVICES_FIELD, None)
         if devices is None:
             if not vendor.deviceless:
@@ -251,7 +275,10 @@ def compile_vendor_step(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if not vendor.owns_device(device):
                     raise VendorStepError(f"{device_where}: not a {vendor_name} device")
                 device_blocks.append(
-                    (device, _block(device_block, device_where, allow_devices=False))
+                    (
+                        device,
+                        _block(device_block, device_where, vendor, allow_devices=False),
+                    )
                 )
         vendor_key = vendor_block.pop("key", None)
         for index, (device, device_block) in enumerate(device_blocks):
@@ -263,7 +290,7 @@ def compile_vendor_step(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
                 )
             key = device_key or (vendor_key if index == 0 else None)
             key = key or f"{vendor.key_prefix}{test_key}"
-            merged = _merge(vendor.defaults, test_fields, vendor_block, device_block)
+            merged = _merge(test_fields, vendor.defaults, vendor_block, device_block)
             label = merged.get("label")
             if not isinstance(label, str) or not label:
                 raise VendorStepError(f"{vendor_where}: no `label` for {key}")
@@ -311,12 +338,15 @@ def compile_vendor_step(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     return compiled
 
 
-def _block(value: Any, where: str, allow_devices: bool) -> Dict[str, Any]:
+def _block(
+    value: Any, where: str, vendor: Vendor, allow_devices: bool
+) -> Dict[str, Any]:
     if value is None:
         return {}
     if not isinstance(value, dict):
         raise VendorStepError(f"{where}: must be a map")
-    allowed = set(JOB_FIELDS) | ({DEVICES_FIELD} if allow_devices else set())
+    allowed = set(JOB_FIELDS) - vendor.unsupported
+    allowed |= {DEVICES_FIELD} if allow_devices else set()
     unknown = sorted(name for name in value if name not in allowed)
     if unknown:
         raise VendorStepError(
