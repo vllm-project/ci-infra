@@ -381,6 +381,45 @@ HAMI_GPUMEM_MIB = {
     "kimi-k3-unit-tests-b200": 6144,
     "kernels-mhc-test-b200": 4096,
     "kernels-b200": 92160,
+    "deepseek-v4-kernel-test-b200": 8192,
+    "kernels-minimax-m3-attention-b200": 8192,
+    "kernels-fla-ops-test-b200": 32768,
+    "qwen4-exp-kernels-b200": 40960,
+    "kernels-gate-linear-cutedsl-b200": 8192,
+    "minimax-m3-model-tests-b200": 49152,
+    "mistral-large-4-unit-tests-b200": 8192,
+    "minimax-m3-mega-moe-test-b200": 8192,
+    "fusion-and-compile-unit-tests-2xb200": 8192,
+    "shardq-metadata-b200": 4096,
+    "fusion-e2e-config-sweep-b200": 92160,
+    "kernels-fp4-moe-test-b200": 73728,
+    "weight-reload-refit-nightly": 92160,
+    "spec-decode-draft-model-nightly-b200": 92160,
+    "spec-decode-speculators-mtp-nightly-b200": 92160,
+    "spec-decode-eagle-nightly-b200": 92160,
+    "spec-decode-dflash2-nightly-b200": 92160,
+    "kernels-fusedmoe-layer-test-2-b200s": 24576,
+    "preload-mooncake-store-2xb200": 92160,
+    "qwen3-5-unit-tests-b200": 16384,
+    "gemm-rs-ar-2xb200": 12288,
+    "fusion-e2e-tp2-b200": 92160,
+    "multi-modal-flashinfer-autotuning": 122880,
+    "dsv41-nvidia-kernels-4xb200": 16384,
+    "glm5next-nvidia-specialized-decode-4xb200": 24576,
+}
+
+# Steps whose quota was staged on more than one GPU, with that GPU count. Every
+# other listed step was staged on one. A step whose GPU count changes keeps
+# whole cards until it is staged again.
+HAMI_GPUS = {
+    "kernels-fusedmoe-layer-test-2-b200s": 2,
+    "preload-mooncake-store-2xb200": 2,
+    "qwen3-5-unit-tests-b200": 2,
+    "gemm-rs-ar-2xb200": 2,
+    "fusion-e2e-tp2-b200": 2,
+    "multi-modal-flashinfer-autotuning": 2,
+    "dsv41-nvidia-kernels-4xb200": 4,
+    "glm5next-nvidia-specialized-decode-4xb200": 4,
 }
 
 
@@ -427,11 +466,10 @@ def get_k8s_plugin(step: Step, image: str):
         "nvidia.com/gpu"
     ] = step.num_devices or 1
 
-    # Quotas were measured on one GPU; a step that grows keeps whole cards.
     if (
         step.device == DeviceType.B200_K8S
         and step.key in HAMI_GPUMEM_MIB
-        and (step.num_devices or 1) == 1
+        and (step.num_devices or 1) == HAMI_GPUS.get(step.key, 1)
     ):
         # HAMi's webhook only handles Pods carrying this label.
         plugin["kubernetes"]["metadata"] = {"labels": {"vllm.ci/gpu-sharing": "hami"}}
