@@ -81,6 +81,67 @@ repositories:
   premerge: "vllm-ci-test-repo"     # Used for PR/pre-merge builds
 ```
 
+## Steps for several vendors and devices
+
+A step in a `job_dirs` file can describe one test for every vendor and device
+it runs on, instead of a `device` plus a `mirror.amd` copy:
+
+```yaml
+- key: v1-attention
+  label: V1 Attention
+  timeout_in_minutes: 40
+  source_file_dependencies:
+    - vllm/v1/attention/
+    - tests/v1/attention
+  vendors:
+    nvidia:
+      devices:
+        h100:
+          label: ":nvidia: (H100) V1 Attention"
+          commands:
+            - pytest -v -s v1/attention
+    amd:
+      env:
+        VLLM_ROCM_USE_AITER: "1"
+      source_file_dependencies:
+        - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+      commands:
+        - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py
+      devices:
+        mi300_dpx:
+          timeout_in_minutes: 50
+        mi355_dpx:
+          key: amd-v1-attention-mi355
+```
+
+* Every device is one job. Its definition is the test's fields, then its
+  vendor's, then its device's (the map key is the device). A more specific
+  value replaces a scalar (`label`, `timeout_in_minutes`, `num_devices`,
+  `optional`, `depends_on`, ...). `source_file_dependencies` and `commands`
+  are concatenated in that order, duplicate dependencies dropped, and `env` is
+  merged. A `!` exclusion applies to the jobs whose list it ends up in. A null
+  value counts as unset.
+* One vendor's fields never reach another vendor's job: a dependency or env
+  var set under `nvidia` is not the AMD jobs', unlike a `mirror.amd` block,
+  which takes the step's.
+* Keys: the first non-AMD job is `<key>`, the first AMD job `amd-<key>`. Any
+  other device in a vendor needs its own `key`. A `key` set on a device wins.
+* Vendors: `nvidia` (no `devices` means one job on the default GPU queue),
+  `amd` and `cpu`. An AMD job gets what a `mirror.amd` block gets when it
+  leaves a field out: `depends_on: [image-build-amd]`, `dind: true`, and a
+  label in the `:amd: (<device>) <title>` form. Other vendors are added in
+  `step_vendors.py`.
+* Rejected: an unknown vendor, a device of another vendor, `device` or
+  `mirror` beside `vendors`, a field the step model does not have at the
+  vendor or device level, a second device without a `key`, two jobs with one
+  key.
+
+The yaml is compiled when it is loaded (`step_vendors.py`): the first non-AMD
+job becomes the step, the first AMD job its `mirror.amd`, marked `_exact` so
+it takes nothing from the step, and every other job a step of its own.
+ci_selector reads the yaml through the same code. Steps with `device` and
+`mirror` work as before.
+
 ## Jobs that are not selected
 
 A step runs when its `source_file_dependencies` match the change (or on

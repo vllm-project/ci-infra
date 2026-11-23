@@ -1534,22 +1534,25 @@ def convert_group_step_to_buildkite_step(
                 and (only_step_keys is None or f"amd-{step_key}" in only_step_keys)
             ):
                 amd = step.mirror["amd"]
+                # What the mirror falls back to: the step, or for a
+                # `vendors:` step's AMD job, nothing but the job itself.
+                parent = _mirror_parent(step, amd)
                 amd_no_plugin = amd.get("no_plugin", False)
-                amd_no_gpu = amd.get("no_gpu", step.no_gpu or False)
+                amd_no_gpu = amd.get("no_gpu", parent.no_gpu or False)
                 amd_num_devices = _first_configured(
                     amd.get("num_devices"),
                     amd.get("num_gpus"),
-                    step.num_devices,
+                    parent.num_devices,
                 )
                 custom_commands = amd.get("commands")
                 if custom_commands:
-                    amd_command_step = step.model_copy(
+                    amd_command_step = parent.model_copy(
                         update={
                             "commands": custom_commands,
-                            "working_dir": amd.get("working_dir", step.working_dir),
+                            "working_dir": amd.get("working_dir", parent.working_dir),
                             "no_plugin": amd_no_plugin,
                             "dind": amd.get("dind", True),
-                            "num_nodes": amd.get("num_nodes", step.num_nodes),
+                            "num_nodes": amd.get("num_nodes", parent.num_nodes),
                         }
                     )
                     amd_commands = _prepare_commands(
@@ -1558,11 +1561,11 @@ def convert_group_step_to_buildkite_step(
                         setup_profile="amd",
                     )
                 else:
-                    amd_command_step = step.model_copy(
+                    amd_command_step = parent.model_copy(
                         update={
                             "no_plugin": amd_no_plugin,
                             "dind": amd.get("dind", True),
-                            "num_nodes": amd.get("num_nodes", step.num_nodes),
+                            "num_nodes": amd.get("num_nodes", parent.num_nodes),
                         }
                     )
                     amd_commands = _prepare_commands(
@@ -1571,11 +1574,11 @@ def convert_group_step_to_buildkite_step(
                         setup_profile="amd",
                     )
 
-                extra_env = dict(step.env or {})
+                extra_env = dict(parent.env or {})
                 extra_env.update(amd.get("env", {}))
                 # A native mirror that opted in plans its own shards, from its
                 # own commands and timings; an explicit parallelism wins.
-                amd_parallelism = amd.get("parallelism", step.parallelism)
+                amd_parallelism = amd.get("parallelism", parent.parallelism)
                 amd_label = amd.get("label")
                 amd_key = f"amd-{step_key}"
                 amd_shard_mode = (
@@ -1620,12 +1623,12 @@ def convert_group_step_to_buildkite_step(
                     dind=amd.get("dind", True),
                     no_plugin=amd_no_plugin,
                     no_gpu=amd_no_gpu,
-                    num_nodes=amd.get("num_nodes", step.num_nodes),
-                    soft_fail=amd.get("soft_fail", step.soft_fail or False),
+                    num_nodes=amd.get("num_nodes", parent.num_nodes),
+                    soft_fail=amd.get("soft_fail", parent.soft_fail or False),
                     parallelism=amd_parallelism,
-                    concurrency=amd.get("concurrency", step.concurrency),
+                    concurrency=amd.get("concurrency", parent.concurrency),
                     concurrency_group=amd.get(
-                        "concurrency_group", step.concurrency_group
+                        "concurrency_group", parent.concurrency_group
                     ),
                     timeout_in_minutes=amd.get("timeout_in_minutes"),
                     agent_tags=amd.get("agent_tags"),
@@ -1715,7 +1718,42 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
     )
 
 
+def _mirror_parent(step: Step, amd: Dict[str, Any]) -> Step:
+    """What a mirror inherits from: its step, unless a `vendors:` step
+    compiled it (step_vendors.py). Then the block is the whole AMD job, so this
+    is the step with every field the block can set taken from it, and only
+    the step's key, label, group and yaml file kept."""
+    if not amd.get("_exact"):
+        return step
+    return step.model_copy(
+        update={
+            "working_dir": amd.get("working_dir"),
+            "depends_on": amd.get("depends_on"),
+            "commands": amd.get("commands"),
+            "agent_tags": amd.get("agent_tags"),
+            "num_devices": amd.get("num_devices"),
+            "num_nodes": amd.get("num_nodes"),
+            "source_file_dependencies": amd.get("source_file_dependencies"),
+            "source_file_declared": step.mirror_source_file_declared,
+            "soft_fail": amd.get("soft_fail", False),
+            "parallelism": amd.get("parallelism"),
+            "concurrency": amd.get("concurrency"),
+            "concurrency_group": amd.get("concurrency_group"),
+            "timeout_in_minutes": amd.get("timeout_in_minutes"),
+            "mount_buildkite_agent": False,
+            "env": amd.get("env"),
+            "retry": None,
+            "optional": amd.get("optional", False),
+            "no_plugin": amd.get("no_plugin", False),
+            "no_gpu": amd.get("no_gpu", False),
+            "dind": amd.get("dind", True),
+            "automatic_shard": amd.get("automatic_shard"),
+        }
+    )
+
+
 def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
+    step = _mirror_parent(step, amd)
     mirror_dependencies = amd.get("source_file_dependencies") or []
     source_file_dependencies = list(mirror_dependencies)
     for dependency in step.source_file_dependencies or []:
@@ -1731,8 +1769,10 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
             "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
+            # An exact block lists the step's yaml itself when the file's
+            # depends_on adds it, so only what it declared counts.
             "source_file_declared": step.source_file_declared
-            or step.source_file in mirror_dependencies,
+            or (not amd.get("_exact") and step.source_file in mirror_dependencies),
         }
     )
 

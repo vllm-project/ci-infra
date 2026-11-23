@@ -703,11 +703,18 @@ def changed_step_keys_in_file(
 def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]]:
     """Keys whose entry changed, plus `amd-<key>` if it has a `mirror.amd`
     block (only that for a mirror-only change). None if the edit can't be
-    pinned to steps."""
-    head = yaml.safe_load(head_text)
+    pinned to steps.
+
+    `vendors:` steps are compared compiled (step_vendors.py), job by job: their
+    AMD job is a whole job of its own, so it changes only if its own fields
+    do."""
+    # Not at the top: step_vendors imports this module.
+    from step_vendors import expand_vendor_document
+
+    head = expand_vendor_document(yaml.safe_load(head_text))
     try:
-        base = yaml.safe_load(base_text)
-    except yaml.YAMLError:
+        base = expand_vendor_document(yaml.safe_load(base_text))
+    except (yaml.YAMLError, ValueError):
         # Main's copy is broken: don't fail the PR that fixes it.
         return None
     base_steps, head_steps = _steps_by_key(base), _steps_by_key(head)
@@ -724,7 +731,10 @@ def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]
         if edited:
             changed.add(key)
         amd = _amd_block(entry)
-        if amd is not None and (edited or _amd_block(old) != amd):
+        inherits = amd is not None and not amd.get("_exact")
+        if amd is not None and (
+            (edited and inherits) or old is None or _amd_block(old) != amd
+        ):
             changed.add(f"amd-{key}")
     return frozenset(changed)
 

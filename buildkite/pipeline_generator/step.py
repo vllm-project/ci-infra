@@ -7,6 +7,8 @@ from global_config import get_global_config
 import os
 import yaml
 
+from step_vendors import EXACT_MIRROR, MIRROR_HARDWARE, expand_vendor_steps
+
 
 class Step(BaseModel):
     label: str
@@ -40,6 +42,8 @@ class Step(BaseModel):
     # lists that file itself.
     source_file: Optional[str] = Field(default=None, exclude=True)
     source_file_declared: bool = Field(default=False, exclude=True)
+    # The same for a `vendors:` step's AMD mirror, which lists its own.
+    mirror_source_file_declared: bool = Field(default=False, exclude=True)
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
@@ -75,7 +79,7 @@ class Step(BaseModel):
 def parse_steps_from_yaml(yaml_data: dict):
     group = yaml_data.get("group", None)
     yaml_steps = yaml_data.get("steps", [])
-    steps = [Step.from_yaml(step) for step in yaml_steps]
+    steps = [Step.from_yaml(step) for step in expand_vendor_steps(yaml_steps)]
     if group:
         for step in steps:
             step.group = group
@@ -100,8 +104,25 @@ def read_steps_from_job_dir(job_dir: str):
                 step.source_file_declared = source_file in (
                     step.source_file_dependencies or []
                 )
+                exact = exact_mirror(step)
+                if exact is not None:
+                    step.mirror_source_file_declared = source_file in (
+                        exact.get("source_file_dependencies") or []
+                    )
             if group_depends_on:
                 for step in file_steps:
+                    # A `vendors:` step's AMD job gets what its step gets
+                    # here, except depends_on, which an AMD job always sets.
+                    exact = exact_mirror(step)
+                    if exact is not None:
+                        if (
+                            not exact.get("working_dir")
+                            and global_config["github_repo_name"] == "vllm-project/vllm"
+                        ):
+                            exact["working_dir"] = "/vllm-workspace/tests"
+                        exact["source_file_dependencies"] = list(
+                            exact.get("source_file_dependencies") or []
+                        ) + [source_file]
                     if not step.depends_on:
                         step.depends_on = group_depends_on
                     if (
@@ -117,6 +138,13 @@ def read_steps_from_job_dir(job_dir: str):
                     step.source_file_dependencies.append(source_file)
             steps.extend(file_steps)
     return steps
+
+
+def exact_mirror(step: Step) -> Optional[Dict[str, Any]]:
+    """The step's `mirror.amd` when a `vendors:` step compiled it: a whole
+    AMD job, which inherits nothing from the step."""
+    amd = (step.mirror or {}).get(MIRROR_HARDWARE)
+    return amd if amd and amd.get(EXACT_MIRROR) else None
 
 
 def group_steps(steps: List[Step]) -> Dict[str, List[Step]]:
