@@ -73,6 +73,59 @@ packer build \
   buildkite-cpu-ami.pkr.hcl
 ```
 
+## Canary Build for a New Elastic CI Stack Version
+
+Before upgrading a queue to a newer Elastic CI Stack, build a canary AMI from
+that stack's base to validate it, without touching the AMI the queues use.
+
+Trigger the "Rebuild CPU Build AMI" pipeline manually with the environment
+variable `CANARY_STACK_VERSION=<new-stack-version>` (for example `7.2.0`). The
+build step then:
+
+- uses the `<new-stack-version>` base AMI,
+- keeps the base image's Buildkite agent automatically — `install-agent.sh`
+  skips its install whenever the base image's stable agent is at least as new
+  as its pin, so newer bases' watchdog never sees a downgrade,
+- names the AMI `vllm-buildkite-stack-canary-linux-cpu-build-*`, which the
+  cleanup step's `vllm-buildkite-stack-linux-cpu-build-*` filter cannot match,
+  so canary AMIs are never auto-deleted.
+
+Canary cleanup is deliberately manual: an age-based rule could deregister an
+AMI that an SSM parameter or launch template still references, deleting a live
+image. Automatic canary cleanup waits for a reference-aware retention
+workflow; until then deregister a canary AMI by hand, only after no stack,
+launch template or SSM parameter references it and it is no longer needed
+for rollback.
+
+The publish steps (update SSM, update launch templates, cleanup) are skipped
+for any non-empty `CANARY_STACK_VERSION`, even on `main`, so a canary build
+never rolls anything out. `CANARY_STACK_VERSION` is never set in the
+pipeline's env, so scheduled daily v6 builds are unaffected. Don't combine it
+with `AGENT_ONLY=1`: the agent-only bake runs first and ignores the canary
+version.
+
+## Daily v7 AMI Line
+
+Queues on Elastic CI Stack v7 need AMIs built from the v7 base. A second daily
+schedule on the same pipeline, on `main` with `AMI_LINE=v7`, builds from the
+v7.2.0 base and publishes like the v6 build, but to its own targets:
+
+| | v6 (default) | `AMI_LINE=v7` |
+|---|---|---|
+| AMI name | `vllm-buildkite-stack-linux-cpu-build-*` | `vllm-buildkite-stack-v7-linux-cpu-build-*` |
+| SSM parameter | `/buildkite/cpu-build-ami/us-east-1` | `/buildkite/cpu-build-ami/v7/us-east-1` |
+| Launch templates updated | postmerge us-east-1 (release stacks are promoted by hand) | `bk-cpu-queue-premerge-us-east-1` |
+
+The cleanup step filters on the line's own name prefix, so each line only
+deletes its own old AMIs, and neither matches canary AMIs. A v7 queue's stack
+should read its AMI from the v7 SSM parameter (`ImageIdParameter`); a pinned
+`ImageId` would bring the old AMI back on the next stack update. Setting both
+`AMI_LINE` and `CANARY_STACK_VERSION` fails the build.
+
+After the canary AMI exists, point a separate SSM parameter / launch template
+at it (managed in the private Terraform repository) and validate a job on it
+before switching the queue over in the same private-repo update.
+
 ## First-Time Setup
 
 1. **Deploy Terraform first** from the [private infrastructure repository](https://github.com/vllm-project/ci-infra-private) (maintainer access required). Review its deployment guidance and plan before applying:
@@ -172,4 +225,3 @@ still launch (so the old release AMI survives until the apply).
 - AMIs are automatically deprecated after 7 days (configurable via `deprecate_days` variable)
 - AMIs older than 3 days are cleaned up automatically, keeping 3 for rollback
 - Snapshots are deleted along with deregistered AMIs
-
