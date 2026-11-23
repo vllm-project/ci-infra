@@ -34,7 +34,7 @@ from utils_lib.docker_utils import (
     get_ecr_cache_registry,
     get_torch_nightly_image,
 )
-from global_config import get_global_config
+from global_config import get_global_config, _matches_run_all_patterns
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
@@ -1826,7 +1826,16 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     # AMD is not selected by ci-selector yet: a file that runs everything on
     # AMD may be narrowed on CUDA (csrc/, which ROCm compiles through HIPify).
-    if global_config.get("amd_run_all") and is_amd_device(step.device):
+    amd_run_all = global_config.get("amd_run_all")
+    if amd_run_all and step.amd_run_all_exclude_patterns:
+        # The step's own excludes add to the pipeline's.
+        amd_run_all = _matches_run_all_patterns(
+            list_file_diff,
+            global_config.get("amd_run_all_patterns"),
+            (global_config.get("amd_run_all_exclude_patterns") or [])
+            + step.amd_run_all_exclude_patterns,
+        )
+    if amd_run_all and is_amd_device(step.device):
         return True
     if is_amd_device(step.device):
         return _source_file_dependencies_match(

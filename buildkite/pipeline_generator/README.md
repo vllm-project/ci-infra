@@ -68,7 +68,9 @@ amd_run_all_patterns:
   - "docker/Dockerfile.rocm_base"
 
 # Optional. List of regex patterns to exclude from amd_run_all_patterns checks.
-# run_all_exclude_patterns does not apply here.
+# run_all_exclude_patterns does not apply here. A step can add its own in a
+# step-level amd_run_all_exclude_patterns: those files then run it (or its AMD
+# mirror) only through its source_file_dependencies.
 amd_run_all_exclude_patterns:
   - "csrc/cpu/"
 

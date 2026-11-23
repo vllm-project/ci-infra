@@ -1040,6 +1040,29 @@ def test_amd_run_all_off_keeps_dependency_rules(fake_global_config):
     )
 
 
+def test_step_amd_run_all_excludes_leave_those_files_to_its_dependencies(
+    fake_global_config,
+):
+    fake_global_config.update(
+        amd_run_all=True,
+        amd_run_all_patterns=["csrc/", "requirements/rocm.txt"],
+        amd_run_all_exclude_patterns=["csrc/cpu/"],
+    )
+    (_, native) = _mirrored_and_native()
+    scoped = native.model_copy(
+        update={
+            "amd_run_all_exclude_patterns": ["csrc/"],
+            "source_file_dependencies": ["tests/amd/", "csrc/kimi_k3/"],
+        }
+    )
+    run = buildkite_step._step_should_run
+
+    assert run(native, ["csrc/sampler.cu"]), "without the field: every csrc/ file"
+    assert not run(scoped, ["csrc/sampler.cu"]), "a kernel it does not list"
+    assert run(scoped, ["csrc/kimi_k3/fused_kda_chunk_kernel_rocm.cu"]), "one it lists"
+    assert run(scoped, ["csrc/sampler.cu", "requirements/rocm.txt"]), "other patterns"
+
+
 def test_cuda_only_run_all_runs_cuda_steps_and_leaves_amd_to_its_own_rules(
     fake_global_config,
 ):
