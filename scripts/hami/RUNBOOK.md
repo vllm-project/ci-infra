@@ -214,9 +214,14 @@ Find each step's quota by measurement, never from the whole-card peak alone:
 
 Rules learned from the first trials:
 
-- vLLM engines take their `gpu_memory_utilization` share (0.92 by default) of
-  what they see, so under a quota the whole-card peak reads high, and engine
-  tests need room above their real peak plus memory left held by earlier tests.
+- A vLLM engine wants `gpu_memory_utilization` (0.92 by default) of the memory
+  it sees free when it starts. Memory still held by earlier tests in the same
+  pytest process counts against that, so a step that starts engines needs a
+  quota of at least 12.5 times the held memory (held / 0.08), however small
+  its peak. A whole card hides this. The failure names both numbers:
+  `Free memory on device cuda:0 (<free>/<quota> GiB) on startup is less than
+  desired GPU memory utilization`; held is quota minus free. Shards change
+  which tests share a process, so check every shard.
 - Tests that size themselves from the card skip or shrink under a quota:
   `large_gpu_mark(min_gb=N)` reads the quota as the card size and can skip
   while the step stays green; a fixed `gpu_memory_utilization` fraction of a
@@ -265,6 +270,7 @@ for that node.
 | Quota Pod stuck Pending `Insufficient nvidia.com/gpumem` after a scheduler outage | it was admitted while `hami-scheduler` was down | delete and recreate it; keep 2 replicas and `failurePolicy: Fail` |
 | Test Pod `ErrImageNeverPull` with `imagePullPolicy: Never` | the cached image was pulled with a pull secret | use `IfNotPresent` |
 | Step green under a quota but with fewer tests run | a test reads the quota as the card size | raise the quota or keep the step whole |
+| `Free memory on device cuda:0 (<free>/<quota> GiB) on startup is less than desired GPU memory utilization` | earlier tests in the process still hold memory | quota at least (quota - free) / 0.08 (step 6) |
 | `No available memory for the cache blocks` | the test sizes its engine as a fraction of the visible memory | keep the step near a whole card |
 | `NCCL split failed` with a HAMi-core OOM line | quota too tight for NCCL setup | raise the quota or keep the step whole |
 | A test fails only on a memory-release check reading near the whole card (`Current: <N> GB`) | HAMi reports NVML memory wrongly after release | keep that step on whole cards |
