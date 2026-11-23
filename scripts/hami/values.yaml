@@ -14,6 +14,9 @@ devicePlugin:
   nvidiaNodeSelector:
     gpu: "on"                        # HAMi's device plugin runs only on nodes labelled gpu=on
   deviceListStrategy: cdi-annotations  # the default envvar cannot start Pods under the GPU Operator's CDI-mode nvidia runtime class
+  tolerations:                       # replaces the chart's list, so it repeats its nvidia.com/gpu entry
+    - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+    - {key: vllm.ci/quarantine, operator: Exists, effect: NoSchedule}  # a plugin Pod restarted during a quarantine can return
   # Uncomment when the host's /usr/bin/nvidia-ctk is older than the GPU
   # Operator's toolkit (RUNBOOK.md step 2 shows the check).
   # nvidiaHookPath: /usr/local/nvidia/toolkit/nvidia-cdi-hook
