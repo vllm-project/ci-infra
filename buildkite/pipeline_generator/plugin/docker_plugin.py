@@ -177,11 +177,7 @@ def get_docker_plugin(step: Step, image: str):
         plugin["mount-checkout"] = True
         plugin["workdir"] = DOCKER_CHECKOUT_MOUNT_PATH
 
-    if (
-        step.label == "Benchmarks"
-        or step.mount_buildkite_agent
-        or step.otel_tracing_enabled()
-    ):
+    if step.should_mount_buildkite_agent():
         plugin["mount_buildkite_agent"] = True
     if step.device in (
         DeviceType.CPU,

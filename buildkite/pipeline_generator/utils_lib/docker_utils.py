@@ -2,17 +2,16 @@ import subprocess
 import os
 import re
 from typing import Tuple
-from global_config import get_global_config
+from global_config import get_global_config, is_pull_request, is_trusted_main
 
 
 def get_image(cpu: bool = False, arm64: bool = False) -> str:
     global_config = get_global_config()
     commit = "$BUILDKITE_COMMIT"
-    branch = global_config["branch"]
     registries = global_config["registries"]
     repositories = global_config["repositories"]
     image = None
-    if branch == "main":
+    if is_trusted_main(global_config):
         image = f"{registries}/{repositories['main']}:{commit}"
     else:
         image = f"{registries}/{repositories['premerge']}:{commit}"
@@ -36,7 +35,7 @@ def get_torch_nightly_image() -> str:
     commit = "$BUILDKITE_COMMIT"
     registries = global_config["registries"]
     repositories = global_config["repositories"]
-    if global_config["branch"] == "main":
+    if is_trusted_main(global_config):
         return f"{registries}/{repositories['main']}:{commit}-torch-nightly"
     else:
         return f"{registries}/{repositories['premerge']}:{commit}-torch-nightly"
@@ -89,7 +88,7 @@ def get_ecr_cache_registry() -> Tuple[str, str]:
     except Exception as e:
         raise RuntimeError(f"Failed to authenticate with AWS ECR: {e}")
 
-    if global_config["pull_request"]:  # PR build
+    if is_pull_request(global_config):  # PR build
         cache_to_tag = f"{test_cache_ecr}:pr-{global_config['pull_request']}"
         if _docker_manifest_exists(cache_to_tag):  # use PR cache if exists
             cache_from_tag = cache_to_tag
@@ -106,7 +105,7 @@ def get_ecr_cache_registry() -> Tuple[str, str]:
         else:
             cache_from_tag = f"{postmerge_cache_ecr}:latest"
     else:  # non-PR build
-        if branch == "main":  # postmerge
+        if is_trusted_main(global_config):  # postmerge
             cache_to_tag = f"{postmerge_cache_ecr}:latest"
             cache_from_tag = f"{postmerge_cache_ecr}:latest"
         else:

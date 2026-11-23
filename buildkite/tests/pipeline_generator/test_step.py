@@ -1316,6 +1316,34 @@ def test_docker_step_queue_routing(monkeypatch, key, label, branch, queue):
     assert buildkite_step.get_agent_queue(step) == queue
 
 
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"BUILDKITE_SOURCE": "trigger_job"},
+        {"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "parent-build-123"},
+        {"BUILDKITE_REPO": "https://github.com/attacker/vllm.git"},
+    ],
+)
+def test_triggered_or_fork_main_build_stays_on_premerge_queues_and_repo(
+    fake_global_config, monkeypatch, env
+):
+    fake_global_config["branch"] = "main"
+    fake_global_config["pull_request"] = "false"
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+
+    cuda_img = Step(label=":docker: Build image", key="image-build", commands=["true"])
+    arm_img = Step(
+        label=":docker: Build arm64 image", key="image-build-arm64", commands=["true"]
+    )
+    assert buildkite_step.get_agent_queue(cuda_img) == AgentQueue.CPU_PREMERGE_US_EAST_1
+    assert buildkite_step.get_agent_queue(arm_img) == AgentQueue.ARM64_CPU_PREMERGE
+
+    vars_ = buildkite_step._get_variables_to_inject()
+    assert vars_["$REPO"] == "vllm-ci-test-repo"
+    assert vars_["$IMAGE_TAG_LATEST"] is None
+
+
 def test_the_precommit_gate_retries_infra_failures():
     # A checkout that times out on the Git mirror lock would otherwise fail
     # the gate and block every test that depends on it.

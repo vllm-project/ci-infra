@@ -54,3 +54,39 @@ def test_get_image_arm64_cpu_matches_the_arm64_cpu_build(monkeypatch):
         docker_utils.get_image(cpu=True, arm64=True)
         == "example.com/vllm/vllm-ci-test-repo:$BUILDKITE_COMMIT-arm64-cpu"
     )
+
+
+def test_triggered_main_build_uses_premerge_image_and_cache(monkeypatch):
+    monkeypatch.setattr(
+        docker_utils, "get_global_config", lambda: _cfg(pull_request="false")
+    )
+    monkeypatch.setenv("BUILDKITE_SOURCE", "trigger_job")
+    assert (
+        docker_utils.get_image()
+        == "example.com/vllm/vllm-ci-test-repo:$BUILDKITE_COMMIT"
+    )
+    assert (
+        docker_utils.get_torch_nightly_image()
+        == "example.com/vllm/vllm-ci-test-repo:$BUILDKITE_COMMIT-torch-nightly"
+    )
+
+    monkeypatch.setattr(docker_utils.subprocess, "Popen", lambda *a, **k: type("P", (), {"stdout": type("S", (), {"close": lambda self: None})(), "wait": lambda self: 0})())
+    monkeypatch.setattr(docker_utils.subprocess, "run", lambda *a, **k: None)
+    monkeypatch.setattr(docker_utils, "_docker_manifest_exists", lambda tag: False)
+    cache_from, cache_to = docker_utils.get_ecr_cache_registry()
+    assert cache_to == "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-test-cache:main"
+    assert cache_from == "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:latest"
+
+
+def test_non_pr_string_false_uses_postmerge_cache_on_trusted_main(monkeypatch):
+    monkeypatch.delenv("BUILDKITE_SOURCE", raising=False)
+    monkeypatch.delenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID", raising=False)
+    monkeypatch.delenv("BUILDKITE_REPO", raising=False)
+    monkeypatch.setattr(
+        docker_utils, "get_global_config", lambda: _cfg(pull_request="false")
+    )
+    monkeypatch.setattr(docker_utils.subprocess, "Popen", lambda *a, **k: type("P", (), {"stdout": type("S", (), {"close": lambda self: None})(), "wait": lambda self: 0})())
+    monkeypatch.setattr(docker_utils.subprocess, "run", lambda *a, **k: None)
+    cache_from, cache_to = docker_utils.get_ecr_cache_registry()
+    assert cache_to == "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:latest"
+    assert cache_from == "936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache:latest"

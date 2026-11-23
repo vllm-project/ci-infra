@@ -16,6 +16,9 @@ def _selector_off(monkeypatch):
 @pytest.fixture
 def fake_global_config(monkeypatch):
     monkeypatch.delenv(buildkite_step.SKIP_TIMEOUT_ENV_VAR, raising=False)
+    monkeypatch.delenv("BUILDKITE_SOURCE", raising=False)
+    monkeypatch.delenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID", raising=False)
+    monkeypatch.delenv("BUILDKITE_REPO", raising=False)
     config = {
         "name": "vllm_ci",
         "github_repo_name": "vllm-project/vllm",

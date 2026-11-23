@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Any
 from pydantic import model_validator
 from typing_extensions import Self
 from collections import defaultdict
-from global_config import get_global_config
+from global_config import get_global_config, is_pull_request, is_triggered_build
 import os
 import yaml
 
@@ -43,6 +43,8 @@ class Step(BaseModel):
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
+        if is_pull_request(config) or is_triggered_build():
+            return False
         treatment_branch = os.getenv("CI_INFRA_OTEL_TREATMENT_BRANCH", "")
         trusted_branch = config["branch"] == "main" or bool(
             treatment_branch
@@ -53,6 +55,21 @@ class Step(BaseModel):
             config["github_repo_name"] == "vllm-project/vllm"
             and trusted_branch
             and config["pull_request"] == "false"
+        )
+
+    def should_mount_buildkite_agent(self) -> bool:
+        """Never mount buildkite-agent into PR or triggered-build containers.
+
+        Untrusted PR code must not be able to opt into buildkite-agent access
+        via PR YAML (``mount_buildkite_agent: true`` or ``label: Benchmarks``).
+        """
+        config = get_global_config()
+        if is_pull_request(config) or is_triggered_build():
+            return False
+        return bool(
+            self.label == "Benchmarks"
+            or self.mount_buildkite_agent
+            or self.otel_tracing_enabled()
         )
 
     @model_validator(mode="after")
