@@ -81,21 +81,26 @@ def test_arm_cpu_plugin_has_no_gpus_and_mounts_the_agent_hf_cache(
     ]
 
 
-# The quotas staged on the sharing node.
+# Each listed step, the GPU count its quota was staged at, and the quota per GPU.
 @pytest.mark.parametrize(
-    ("key", "gpumem_mib"),
+    ("key", "gpus", "gpumem_mib"),
     [
-        ("v1-attention-b200", 32768),
-        ("kernels-root-misc-test-b200", 73728),
-        ("kimi-k3-unit-tests-b200", 6144),
-        ("kernels-mhc-test-b200", 4096),
-        ("kernels-b200", 90000),
+        ("v1-attention-b200", 1, 32768),
+        ("kernels-root-misc-test-b200", 1, 73728),
+        ("kimi-k3-unit-tests-b200", 1, 6144),
+        ("kernels-mhc-test-b200", 1, 4096),
+        ("kernels-b200", 1, 90000),
+        ("deepseek-v4-kernel-test-b200", 1, 8192),
+        ("kernels-minimax-m3-attention-b200", 1, 8192),
+        ("fusion-and-compile-unit-tests-2xb200", 1, 8192),
+        ("kernels-fusedmoe-layer-test-2-b200s", 2, 24576),
+        ("fusion-e2e-tp2-b200", 2, 90000),
     ],
 )
 def test_listed_b200_step_gets_a_hami_share_on_the_sharing_node(
-    fake_global_config, key, gpumem_mib
+    fake_global_config, key, gpus, gpumem_mib
 ):
-    step = Step(label=key, key=key, device="b200-k8s")
+    step = Step(label=key, key=key, device="b200-k8s", num_devices=gpus)
 
     plugin = k8s_plugin.get_k8s_plugin(step, "example/image:latest")
 
@@ -113,7 +118,7 @@ def test_listed_b200_step_gets_a_hami_share_on_the_sharing_node(
     ]
     container = pod_spec["containers"][0]
     assert container["resources"]["limits"] == {
-        "nvidia.com/gpu": 1,
+        "nvidia.com/gpu": gpus,
         "nvidia.com/gpumem": gpumem_mib,
     }
     env = {entry["name"]: entry["value"] for entry in container["env"] if "value" in entry}
@@ -167,8 +172,14 @@ def test_hami_merges_existing_pod_metadata_selector_and_tolerations(
     ]
 
 
+def test_every_listed_step_has_a_test_row():
+    assert len(k8s_plugin.HAMI_GPUMEM_MIB) == 10
+
+
 def test_unlisted_b200_step_keeps_a_whole_card_anywhere(fake_global_config):
-    step = Step(label="Other", key="fusion-e2e-tp2-b200", device="b200-k8s")
+    step = Step(
+        label="Other", key="moe-refactor-dp-ep-test-b200-deepep-v2", device="b200-k8s"
+    )
 
     plugin = k8s_plugin.get_k8s_plugin(step, "example/image:latest")
 
@@ -204,3 +215,30 @@ def test_listed_b200_step_asking_for_two_gpus_keeps_whole_cards(fake_global_conf
     assert "metadata" not in plugin["kubernetes"]
     limits = plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"]
     assert limits == {"nvidia.com/gpu": 2}
+
+
+def test_multi_gpu_step_staged_at_two_gpus_keeps_whole_cards_at_four(
+    fake_global_config,
+):
+    step = Step(
+        label="Fused MoE",
+        key="kernels-fusedmoe-layer-test-2-b200s",
+        device="b200-k8s",
+        num_devices=4,
+    )
+
+    plugin = k8s_plugin.get_k8s_plugin(step, "example/image:latest")
+
+    assert "metadata" not in plugin["kubernetes"]
+    limits = plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"]
+    assert limits == {"nvidia.com/gpu": 4}
+
+
+def test_listed_step_without_a_gpu_count_is_a_one_gpu_share(fake_global_config):
+    # Most step definitions omit num_devices; that means one GPU.
+    step = Step(label="V1 attention", key="v1-attention-b200", device="b200-k8s")
+
+    plugin = k8s_plugin.get_k8s_plugin(step, "example/image:latest")
+
+    limits = plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"]
+    assert limits == {"nvidia.com/gpu": 1, "nvidia.com/gpumem": 32768}
