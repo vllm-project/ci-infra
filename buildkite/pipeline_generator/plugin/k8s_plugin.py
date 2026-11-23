@@ -316,6 +316,40 @@ HAMI_GPUMEM_MIB = {
     "kimi-k3-unit-tests-b200": 6144,
     "kernels-mhc-test-b200": 4096,
     "kernels-b200": 92160,
+    # wave 2 staging: generous first quotas, trimmed after measurement
+    "deepseek-v4-kernel-test-b200": 16384,
+    "kernels-minimax-m3-attention-b200": 16384,
+    "inkling-unit-tests-b200": 40960,
+    "kernels-fla-ops-test-b200": 40960,
+    "qwen4-exp-kernels-b200": 49152,
+    "kernels-gate-linear-cutedsl-b200": 12288,
+    "minimax-m3-model-tests-b200": 49152,
+    "mistral-large-4-unit-tests-b200": 12288,
+    "minimax-m3-mega-moe-test-b200": 12288,
+    "fusion-and-compile-unit-tests-2xb200": 16384,
+    "shardq-metadata-b200": 8192,
+    "weight-reload-refit": 92160,
+    "quantized-moe-test-b200": 92160,
+    "batch-invariance-b200": 92160,
+    "lm-eval-humming-b200-act": 92160,
+    "lm-eval-humming-b200-default": 92160,
+    "lm-eval-small-models-1xb200": 92160,
+    "spec-decode-draft-model-nightly-b200": 92160,
+    "spec-decode-speculators-mtp-nightly-b200": 92160,
+    "spec-decode-eagle-nightly-b200": 92160,
+    "spec-decode-dflash2-nightly-b200": 92160,
+    "fusion-e2e-config-sweep-b200": 92160,
+    "weight-reload-refit-nightly": 92160,
+    "kernels-fp4-moe-test-b200": 92160,
+    "kernels-fusedmoe-layer-test-2-b200s": 32768,
+    "preload-mooncake-store-2xb200": 92160,
+    "qwen3-5-unit-tests-b200": 16384,
+    "gemm-rs-ar-2xb200": 16384,
+    "dsv41-nvidia-kernels-4xb200": 24576,
+    "glm5next-nvidia-specialized-decode-4xb200": 32768,
+    "fusion-e2e-tp2-b200": 92160,
+    "weight-reload-refit-2gpu": 92160,
+    "multi-modal-flashinfer-autotuning": 122880,
 }
 
 
@@ -343,11 +377,7 @@ def get_k8s_plugin(step: Step, image: str):
     ] = step.num_devices or 1
 
     # Quotas were measured on one GPU; a step that grows keeps whole cards.
-    if (
-        step.device == DeviceType.B200_K8S
-        and step.key in HAMI_GPUMEM_MIB
-        and (step.num_devices or 1) == 1
-    ):
+    if step.device == DeviceType.B200_K8S and step.key in HAMI_GPUMEM_MIB:
         # HAMi's webhook only handles Pods carrying this label.
         plugin["kubernetes"]["metadata"] = {"labels": {"vllm.ci/gpu-sharing": "hami"}}
         pod_spec = plugin["kubernetes"]["podSpec"]
