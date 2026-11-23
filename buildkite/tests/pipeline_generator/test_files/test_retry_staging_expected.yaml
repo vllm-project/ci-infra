@@ -1,0 +1,137 @@
+group: test-retry staging
+steps:
+- label: 'test-retry staging: trs-fail'
+  key: trs-fail
+  agents:
+    queue: gpu_1_queue
+  commands:
+  - 'D=/workdir/.test-results/$${BUILDKITE_STEP_ID}/$${BUILDKITE_PARALLEL_JOB:-0}
+    && mkdir -p "$$D" && chmod 0777 /workdir/.test-results "$$(dirname "$$D")" "$$D"
+    && echo "{\"nodeid\": \"t.py::a\", \"outcome\": \"passed\", \"job\": \"$${BUILDKITE_JOB_ID}\"}"
+    >> "$$D/$${BUILDKITE_RETRY_COUNT:-0}.jsonl" && ls -la "$$D"'
+  - echo "retry count $${BUILDKITE_RETRY_COUNT:-0}, job $${BUILDKITE_JOB_ID}"
+  - if [ "$${BUILDKITE_RETRY_COUNT:-0}" = 0 ]; then exit 1; fi
+  - 'echo "--- fact 9: earlier attempts'' files"'
+  - mkdir -p /tmp/trs && cd /tmp/trs && (buildkite-agent artifact download --include-retried-jobs
+    ".test-results/$${BUILDKITE_STEP_ID}/0/*.jsonl" . || echo DOWNLOAD-FAILED) &&
+    find . -type f -exec sh -c 'echo "== $$1"; cat "$$1"' _ {} \;
+  - buildkite-agent meta-data get "test-retry:$${BUILDKITE_JOB_ID}" --default NO-TAG
+    || echo META-GET-FAILED
+  - echo "--- retry passes"
+  soft_fail: false
+  plugins:
+  - docker#v5.2.0:
+      image: test-image
+      always-pull: true
+      propagate-environment: true
+      gpus: all
+      environment:
+      - VLLM_USAGE_SOURCE=ci-test
+      - NCCL_CUMEM_HOST_ENABLE=0
+      - HF_HOME=/mnt/<shared-cache>
+      - HF_TOKEN
+      - CODECOV_TOKEN
+      - BUILDKITE_ANALYTICS_TOKEN
+      - RAY_COMPAT_SLACK_WEBHOOK_URL
+      volumes:
+      - /dev/shm:/dev/shm
+      - /mnt/<shared-cache>:/mnt/<shared-cache>
+      mount-checkout: true
+      mount-buildkite-agent: true
+  env:
+    KEEP: value
+  priority: 0
+  timeout_in_minutes: 20
+  artifact_paths:
+  - .test-results/*/*/*.jsonl
+- label: 'test-retry staging: trs-timeout'
+  key: trs-timeout
+  agents:
+    queue: gpu_1_queue
+  commands:
+  - 'D=/workdir/.test-results/$${BUILDKITE_STEP_ID}/$${BUILDKITE_PARALLEL_JOB:-0}
+    && mkdir -p "$$D" && chmod 0777 /workdir/.test-results "$$(dirname "$$D")" "$$D"
+    && echo "{\"nodeid\": \"t.py::a\", \"outcome\": \"passed\", \"job\": \"$${BUILDKITE_JOB_ID}\"}"
+    >> "$$D/$${BUILDKITE_RETRY_COUNT:-0}.jsonl" && ls -la "$$D"'
+  - 'if [ "$${BUILDKITE_RETRY_COUNT:-0}" != 0 ]; then echo "retry: pass"; exit 0;
+    fi'
+  - sleep 600
+  soft_fail: false
+  plugins:
+  - docker#v5.2.0:
+      image: test-image
+      always-pull: true
+      propagate-environment: true
+      gpus: all
+      environment:
+      - VLLM_USAGE_SOURCE=ci-test
+      - NCCL_CUMEM_HOST_ENABLE=0
+      - HF_HOME=/mnt/<shared-cache>
+      - HF_TOKEN
+      - CODECOV_TOKEN
+      - BUILDKITE_ANALYTICS_TOKEN
+      - RAY_COMPAT_SLACK_WEBHOOK_URL
+      volumes:
+      - /dev/shm:/dev/shm
+      - /mnt/<shared-cache>:/mnt/<shared-cache>
+      mount-checkout: true
+      mount-buildkite-agent: true
+  env:
+    KEEP: value
+  priority: 0
+  timeout_in_minutes: 2
+  artifact_paths:
+  - .test-results/*/*/*.jsonl
+- label: 'test-retry staging: trs-kill'
+  key: trs-kill
+  agents:
+    queue: gpu_1_queue
+  commands:
+  - 'D=/workdir/.test-results/$${BUILDKITE_STEP_ID}/$${BUILDKITE_PARALLEL_JOB:-0}
+    && mkdir -p "$$D" && chmod 0777 /workdir/.test-results "$$(dirname "$$D")" "$$D"
+    && echo "{\"nodeid\": \"t.py::a\", \"outcome\": \"passed\", \"job\": \"$${BUILDKITE_JOB_ID}\"}"
+    >> "$$D/$${BUILDKITE_RETRY_COUNT:-0}.jsonl" && ls -la "$$D"'
+  - 'if [ "$${BUILDKITE_RETRY_COUNT:-0}" != 0 ]; then echo "retry: pass"; exit 0;
+    fi'
+  - python3 -c 'import os, signal; os.kill(os.getpid(), signal.SIGKILL)'
+  soft_fail: false
+  plugins:
+  - docker#v5.2.0:
+      image: test-image
+      always-pull: true
+      propagate-environment: true
+      gpus: all
+      environment:
+      - VLLM_USAGE_SOURCE=ci-test
+      - NCCL_CUMEM_HOST_ENABLE=0
+      - HF_HOME=/mnt/<shared-cache>
+      - HF_TOKEN
+      - CODECOV_TOKEN
+      - BUILDKITE_ANALYTICS_TOKEN
+      - RAY_COMPAT_SLACK_WEBHOOK_URL
+      volumes:
+      - /dev/shm:/dev/shm
+      - /mnt/<shared-cache>:/mnt/<shared-cache>
+      mount-checkout: true
+      mount-buildkite-agent: true
+  env:
+    KEEP: value
+  priority: 0
+  timeout_in_minutes: 10
+  artifact_paths:
+  - .test-results/*/*/*.jsonl
+- block: Retry failed tests (1 of 3)
+  key: trs-button-1
+  depends_on: []
+- key: trs-trigger-1
+  trigger: ci-shadow
+  depends_on:
+  - trs-button-1
+  allow_dependency_failure: true
+  soft_fail: true
+  async: false
+  build:
+    message: 'test-retry staging: press 1'
+    env:
+      STAGING_ROLE: press
+      SRC_JOB: $BUILDKITE_JOB_ID

@@ -296,6 +296,10 @@ class PipelineGenerator:
                     group_of_step,
                 ),
             )
+        if os.getenv("TEST_RETRY_STAGING") == "1":
+            import retry_staging
+
+            retry_staging.add(buildkite_steps_dict)
         with open(self.output_file_path, "w") as f:
             yaml.dump(
                 buildkite_steps_dict, f, sort_keys=False, default_flow_style=False
