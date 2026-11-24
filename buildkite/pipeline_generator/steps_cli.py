@@ -9,6 +9,10 @@ a test_areas file (or one key) resolve to, and the lint of `devices:` steps.
 `depends_on` included) and prints one row per job: key, device, label,
 timeout, optional, commands, dependencies and depends_on. `--format json`
 prints every resolved field, to compare two versions of a file job by job.
+Like loading, `explain` fails (E8, exit 1, after the rows) when a `devices:`
+job repeats another job's key or GitHub status: within the file for a file,
+across `--job-dir` for a key. Only `lint` and the generator see a clash
+between a file and other files.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import click
 import yaml
@@ -27,7 +31,7 @@ from amd import (
     is_amd_gpu_device,
     normalize_amd_depends_on,
 )
-from step import Step
+from step import Step, check_device_step_keys
 from step_lint import lint_paths
 from step_vendors import DeviceStepError
 
@@ -134,10 +138,18 @@ def _row(
 
 def file_rows(path: str, repo: str = DEFAULT_REPO) -> List[Dict[str, Any]]:
     """Every job of a job file, in yaml order."""
+    return steps_rows(_file_steps(path, repo))
+
+
+def _file_steps(path: str, repo: str) -> List[Step]:
     from step import read_steps_from_file
 
+    return read_steps_from_file(path, repo)
+
+
+def steps_rows(steps: List[Step]) -> List[Dict[str, Any]]:
     rows = []
-    for step in read_steps_from_file(path, repo):
+    for step in steps:
         for row in job_rows(step):
             row["step"] = step._origin
             rows.append(row)
@@ -199,12 +211,18 @@ def cli():
     help="The pipeline's github_repo_name (it decides the working-dir default).",
 )
 def explain(target: str, job_dirs, fmt: str, repo: str):
-    """Print the jobs of a job file, or of the step a key belongs to."""
+    """Print the jobs of a job file, or of the step a key belongs to.
+
+    Exits 1 after the rows on E8: a `devices:` job that repeats another
+    job's key or GitHub status within the file (a file) or across
+    `--job-dir` (a key). A clash with other files is left to `lint` and
+    the generator."""
     try:
         if os.path.isfile(target):
-            rows = file_rows(target, repo)
+            steps = _file_steps(target, repo)
+            rows = steps_rows(steps)
         else:
-            rows = _rows_for_key(target, job_dirs, repo)
+            rows, steps = _rows_for_key(target, job_dirs, repo)
     except (DeviceStepError, ValueError, yaml.YAMLError) as error:
         raise click.ClickException(str(error))
     if not rows:
@@ -213,18 +231,31 @@ def explain(target: str, job_dirs, fmt: str, repo: str):
         click.echo(json.dumps(rows, indent=2, sort_keys=True))
     else:
         click.echo(table(rows))
+    try:
+        check_device_step_keys(steps)
+    except DeviceStepError as error:
+        raise click.ClickException(str(error))
 
 
-def _rows_for_key(key: str, job_dirs, repo: str) -> List[Dict[str, Any]]:
-    """Every job of the yaml step that has a job keyed `key`."""
+def _rows_for_key(
+    key: str, job_dirs, repo: str
+) -> Tuple[List[Dict[str, Any]], List[Step]]:
+    """Every job of the yaml step that has a job keyed `key`, and every
+    step under `job_dirs` (to check E8 as the generator does)."""
     from step_lint import yaml_files
 
+    found: List[Dict[str, Any]] = []
+    steps: List[Step] = []
     for path in yaml_files(job_dirs):
-        rows = file_rows(path, repo)
+        file_steps = _file_steps(path, repo)
+        steps.extend(file_steps)
+        if found:
+            continue
+        rows = steps_rows(file_steps)
         origin = next((row["step"] for row in rows if row["key"] == key), None)
         if origin is not None:
-            return [row for row in rows if row["step"] == origin]
-    return []
+            found = [row for row in rows if row["step"] == origin]
+    return found, steps
 
 
 @cli.command()

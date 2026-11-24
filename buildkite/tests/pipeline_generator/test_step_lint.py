@@ -605,7 +605,8 @@ def test_explain_by_key_prints_its_steps_jobs_as_json(tmp_path, monkeypatch):
     _write(
         tmp_path / "areas",
         "spec.yaml",
-        HOISTED + CLEAN.replace("v1-spec-decode", "other"),
+        HOISTED
+        + CLEAN.replace("v1-spec-decode", "other").replace("V1 Spec Decode", "Other"),
     )
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(
@@ -729,3 +730,72 @@ def test_explain_reports_yaml_that_does_not_parse(tmp_path, monkeypatch):
     result = CliRunner().invoke(main_module.main, ["explain", "t.yaml"])
     assert result.exit_code == 1
     assert "Error:" in result.output
+
+
+DUPLICATE_KEY = """\
+group: G
+depends_on:
+  - image-build
+steps:
+  - label: ":nvidia: (H100) Legacy"
+    key: x
+    device: h100
+    commands:
+      - pytest l
+    mirror:
+      amd:
+        device: mi300_1
+  - label: Other
+    key: x2
+    devices:
+      mi355_1:
+        key: amd-x
+    commands:
+      - pytest x
+"""
+
+DUPLICATE_STATUS = """\
+group: G
+depends_on:
+  - image-build
+steps:
+  - label: T
+    key: t
+    devices:
+      h100:
+        timeout_in_minutes: 10
+      mi355_1:
+        timeout_in_minutes: 10
+      mi355_4:
+        key: amd-t-4
+        timeout_in_minutes: 10
+    commands:
+      - pytest x
+"""
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        (DUPLICATE_KEY, "E8 t.yaml: duplicate CI step key amd-x"),
+        (DUPLICATE_STATUS, "GitHub status 'ci/step: (MI355) T'"),
+    ],
+)
+def test_explain_fails_on_a_duplicate_key_or_status_as_lint_does(
+    tmp_path, monkeypatch, text, message
+):
+    (tmp_path / "areas").mkdir()
+    _write(tmp_path / "areas", "t.yaml", text)
+    monkeypatch.chdir(tmp_path / "areas")
+    runner = CliRunner()
+    result = runner.invoke(main_module.main, ["lint", "t.yaml"])
+    assert result.exit_code == 1 and "E8" in result.output
+    result = runner.invoke(main_module.main, ["explain", "t.yaml"])
+    assert result.exit_code == 1
+    assert "| amd-" in result.output  # the rows still print, before the error
+    assert message in result.output
+    monkeypatch.chdir(tmp_path)
+    key = "amd-x" if text is DUPLICATE_KEY else "t"
+    result = runner.invoke(main_module.main, ["explain", key, "--job-dir", "areas"])
+    assert result.exit_code == 1
+    assert "E8" in result.output

@@ -221,6 +221,10 @@ in either form, and prints one row per job: key, device, label, timeout,
 optional, commands, dependencies and depends_on (`--format json` adds every
 resolved field, to compare two versions of a file job by job). An AMD job's
 label, timeout and depends_on are shown as rendered (3-hour default timeout).
+After the rows, `explain` fails with E8 (exit 1) as loading would when a
+`devices:` job repeats another job's key or GitHub status: within the file
+for a file, across `--job-dir` for a key. Only `lint` and the generator
+check a file against the other files.
 
 `lint` reports the errors above and these, and `--fix` rewrites the yaml text
 in place, moving lines with the comments above them:
