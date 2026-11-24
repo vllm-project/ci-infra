@@ -93,12 +93,15 @@ COMMAND_ENV = "RUNTIME_SHARD_COMMAND"
 # checks after the command.
 APPLIED_ENV = "RUNTIME_SHARD_APPLIED"
 PLUGIN_ENV = "RUNTIME_SHARD_PLUGIN"
+RETRY_HELPER_ENV = "RUNTIME_SHARD_RETRY_HELPER"
+RETRY_HELPER_MODULE = "pytest_retry"
+TEST_RETRY_ENV_VAR = "VLLM_CI_TEST_RETRY"
 PLUGIN_DIR = "/tmp/runtime-shard"
 PLUGIN_MODULE = "runtime_shard_plugin"
 COVERAGE_DIR_ENV = "RUNTIME_SHARD_COVERAGE_DIR"
-# Where a shard's coverage records go, relative to the checkout.
+# Where a shard's coverage/retry JSONL records go, relative to the checkout.
 COVERAGE_DIR = ".runtime-shard-coverage"
-COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.json"
+COVERAGE_ARTIFACT_PATH = f"{COVERAGE_DIR}/*/*.jsonl"
 # pytest-shard would select a subset a second time on top of the plan.
 # -n: pytest-xdist workers don't get the plan, so each shard would run it all.
 _UNSHARDABLE_ARGS = ("--num-shards", "--shard-id", "-n", "--numprocesses")
@@ -837,6 +840,16 @@ def _setup_warning(setup: float) -> str:
     )
 
 
+def _step_cwd(root: str, working_dir: Optional[str]) -> str:
+    """Resolve a step's container `working_dir` to a path inside `root`."""
+    if not working_dir:
+        return root
+    workspace = CONTAINER_WORKSPACE.rstrip("/")
+    if not (working_dir.rstrip("/") + "/").startswith(workspace + "/"):
+        raise ValueError(f"working_dir {working_dir} is outside the checkout")
+    return os.path.join(root, os.path.relpath(working_dir, workspace))
+
+
 def plan_step(
     step_key: str,
     commands: List[str],
@@ -866,12 +879,7 @@ def plan_step(
     result = None
     try:
         setup, tests = split_commands(commands)
-        cwd = root
-        if working_dir:
-            workspace = CONTAINER_WORKSPACE.rstrip("/")
-            if not (working_dir.rstrip("/") + "/").startswith(workspace + "/"):
-                raise ValueError(f"working_dir {working_dir} is outside the checkout")
-            cwd = os.path.join(root, os.path.relpath(working_dir, workspace))
+        cwd = _step_cwd(root, working_dir)
         labels = command_labels(commands)
         discovered = [
             {
@@ -935,14 +943,70 @@ def owners(planned: Dict) -> List[int]:
     return sorted(shards)
 
 
-def guard(command: str, planned: Dict, shards: int) -> str:
+def test_retry_enabled() -> bool:
+    """Whether fine-grained pytest retry wiring is enabled for this generation."""
+    return os.getenv(TEST_RETRY_ENV_VAR) == "1"
+
+
+def single_job_plan(
+    step_key: str,
+    commands: List[str],
+    working_dir: Optional[str],
+    repo_root: str,
+) -> Optional[Dict]:
+    """Build a 1-job record/retry plan for a plain-pytest step that is not sharded.
+
+    Returns None when the step's commands are not all plain pytest.
+    """
+    split = split_commands(commands)
+    if split is None:
+        return None
+    setup, tests = split
+    try:
+        cwd = _step_cwd(repo_root, working_dir)
+    except ValueError:
+        return None
+    prefix = os.path.relpath(cwd, repo_root).replace(os.sep, "/")
+    prefix = "" if prefix == "." else prefix + "/"
+    planned_commands = []
+    for index, command in enumerate(tests):
+        _, words = env_and_words(command)
+        position = len(setup) + index
+        planned_commands.append(
+            {
+                "args": words[1:],
+                "prefix": prefix,
+                "label": f"Command ({position + 1}/{len(commands)})",
+                "position": position,
+                "files": {},
+                "split": {},
+                "fallback": 0,
+            }
+        )
+    return {
+        "shards": 1,
+        "key": step_key,
+        "single_job": True,
+        "commands": planned_commands,
+    }
+
+
+def guard(
+    command: str,
+    planned: Dict,
+    shards: int,
+    step_key: Optional[str] = None,
+    enable_retry: bool = False,
+) -> str:
     """A job's command, run only by the shards that have its tests. The others
     say where they run instead of starting pytest to deselect everything.
 
     The command fails if it passed without the plugin applying the plan: a
     pytest that didn't load the plugin, or whose args didn't match the planned
     command's, would have run all of the command's tests in every shard, or
-    none of them, and passed."""
+    none of them, and passed. When `enable_retry` is True, a tagged test retry
+    skips launching pytest completely for commands whose tests all passed
+    earlier in the active retry chain (Tier 1 skip)."""
     position = planned["position"]
     applied = f"{PLUGIN_DIR}/applied-{position}"
     # Each step exits on failure itself: a job runs its lines under `set -e`,
@@ -956,6 +1020,16 @@ def guard(command: str, planned: Dict, shards: int) -> str:
         " applying the shard plan (the plugin didn't load, or didn't match the"
         ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
     )
+    if enable_retry and step_key:
+        command = (
+            f'{{ if [ -n "$${{CI_TEST_RETRY_IN:-}}" ]'
+            f" && python3 {PLUGIN_DIR}/{RETRY_HELPER_MODULE}.py"
+            f' maybe-skip-command {shlex.quote(step_key)} {position}'
+            f' "$${{BUILDKITE_PARALLEL_JOB:-0}}";'
+            f" then :; else {command}; fi; }}"
+        )
+    if shards <= 1:
+        return command
     runs = owners(planned)
     if len(runs) == shards:
         return command
@@ -978,13 +1052,22 @@ def plugin_source() -> str:
         return base64.b64encode(zlib.compress(f.read().encode())).decode()
 
 
-def shard_job_setup(checkout: str) -> List[str]:
+def retry_helper_source() -> str:
+    """pytest_retry.py, packed for a shard or single-job test environment."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), RETRY_HELPER_MODULE)
+    with open(path + ".py") as f:
+        return base64.b64encode(zlib.compress(f.read().encode())).decode()
+
+
+def shard_job_setup(checkout: str, enable_retry: bool = False) -> List[str]:
     """Commands that install the plugin in a shard job, before its own. $$ is
     a literal $ in the uploaded pipeline.
 
     Args:
         checkout: Where this job can see the Buildkite checkout, the only
             place artifact_paths can upload the coverage records from.
+        enable_retry: When True, also runs `pytest_retry.py prepare` before
+            pytest (no-op on Attempt 0 or untagged retries).
 
     Returns:
         The commands.
@@ -993,9 +1076,15 @@ def shard_job_setup(checkout: str) -> List[str]:
         "import base64, os, sys, zlib; sys.stdout.write(zlib.decompress("
         f"base64.b64decode(os.environ['{PLUGIN_ENV}'])).decode())"
     )
-    return [
+    unpack_helper = (
+        "import base64, os, sys, zlib; sys.stdout.write(zlib.decompress("
+        f"base64.b64decode(os.environ['{RETRY_HELPER_ENV}'])).decode())"
+    )
+    commands = [
         f'mkdir -p {PLUGIN_DIR} && python3 -c "{unpack_plugin}"'
-        f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
+        f" > {PLUGIN_DIR}/{PLUGIN_MODULE}.py"
+        f' && python3 -c "{unpack_helper}"'
+        f" > {PLUGIN_DIR}/{RETRY_HELPER_MODULE}.py",
         # On the path of whichever python runs pytest (a venv's included).
         f'export PYTHONPATH="{PLUGIN_DIR}$${{PYTHONPATH:+:$$PYTHONPATH}}"',
         # And in the site-packages of python3 and of pytest's python, which a
@@ -1004,6 +1093,13 @@ def shard_job_setup(checkout: str) -> List[str]:
         f"python3 {PLUGIN_DIR}/{PLUGIN_MODULE}.py",
         f'export {COVERAGE_DIR_ENV}="{checkout}/{COVERAGE_DIR}"',
     ]
+    if enable_retry:
+        commands.append(
+            f"python3 {PLUGIN_DIR}/{RETRY_HELPER_MODULE}.py prepare /tmp/ci-test-retry-in"
+            ' && if [ -f /tmp/ci-test-retry-in/.tag ]; then'
+            ' export CI_TEST_RETRY_IN="/tmp/ci-test-retry-in"; fi'
+        )
+    return commands
 
 
 def annotate(step_key: str, text: str, style: str) -> None:

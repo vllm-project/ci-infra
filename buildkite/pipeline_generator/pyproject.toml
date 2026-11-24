@@ -29,6 +29,7 @@ py-modules = [
     "runtime_shard",
     "runtime_shard_plugin",
     "runtime_shard_coverage",
+    "pytest_retry",
     "unblock_jobs",
     "selector_gate",
 ]

@@ -58,7 +58,7 @@ jobs:
           python -m pip install pytest ./buildkite/pipeline_generator
 
       - name: Check installed generator
-        run: python -I -c 'import runtime_shard, runtime_shard_plugin, runtime_shard_coverage'
+        run: python -I -c 'import runtime_shard, runtime_shard_plugin, runtime_shard_coverage, pytest_retry'
 
       - name: Run tests
         run: python -m pytest buildkite/tests

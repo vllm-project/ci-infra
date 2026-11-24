@@ -1024,7 +1024,7 @@ def test_main_reports_exit_and_annotation(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert coverage.main() == 1
     assert calls[0][:3] == ["buildkite-agent", "artifact", "download"]
-    assert calls[0][3] == ".runtime-shard-coverage/*/*.json"
+    assert calls[0][3] == ".runtime-shard-coverage/*/*.jsonl"
     assert calls[1][:5] == [
         "buildkite-agent",
         "annotate",
@@ -1183,12 +1183,23 @@ def test_main_annotates_under_its_step_key(monkeypatch):
     ]
 
 
+def _normalized(record):
+    return {
+        **record,
+        "build_id": record.get("build_id"),
+        "mode": record.get("mode", "full"),
+        "passed": list(record.get("passed", [])),
+        "failed": list(record.get("failed", [])),
+        "skipped_command": bool(record.get("skipped_command", False)),
+    }
+
+
 def test_read_records_finds_what_download_wrote(tmp_path):
     folder = tmp_path / ".runtime-shard-coverage" / "job"
     folder.mkdir(parents=True)
     record = _record(0, ["a"])
     (folder / "0.json").write_text(json.dumps(record))
-    assert coverage._read_records(str(tmp_path)) == [record]
+    assert coverage._read_records(str(tmp_path)) == [_normalized(record)]
 
 
 def test_a_cut_off_record_is_skipped_and_the_rest_still_read(tmp_path, capsys):
@@ -1197,7 +1208,7 @@ def test_a_cut_off_record_is_skipped_and_the_rest_still_read(tmp_path, capsys):
     (folder / "0.json").write_text('{"step": "k", "ran": ["a"')  # killed mid-write
     record = _record(0, ["a"])
     (folder / "1.json").write_text(json.dumps(record))
-    assert coverage._read_records(str(tmp_path)) == [record]
+    assert coverage._read_records(str(tmp_path)) == [_normalized(record)]
     [line] = capsys.readouterr().out.splitlines()  # named in the log
     assert line.startswith("runtime-shard coverage: skipped unreadable ")
     assert "0.json: " in line and line.endswith("(char 25)")
@@ -1220,7 +1231,7 @@ def test_malformed_records_are_skipped_with_a_diagnostic(tmp_path, capsys):
         (folder / f"{index}.json").write_text(json.dumps(value))
     record = _record(0, ["a"])
     (folder / "8.json").write_text(json.dumps(record))
-    assert coverage._read_records(str(tmp_path)) == [record]
+    assert coverage._read_records(str(tmp_path)) == [_normalized(record)]
     lines = capsys.readouterr().out.splitlines()
     assert len(lines) == len(malformed)
     assert all("runtime-shard coverage: skipped malformed " in line for line in lines)
@@ -1232,7 +1243,7 @@ def test_an_unreadable_record_is_skipped_with_a_diagnostic(tmp_path, capsys):
     (folder / "0.json").mkdir()
     record = _record(0, ["a"])
     (folder / "1.json").write_text(json.dumps(record))
-    assert coverage._read_records(str(tmp_path)) == [record]
+    assert coverage._read_records(str(tmp_path)) == [_normalized(record)]
     assert "skipped unreadable" in capsys.readouterr().out
 
 

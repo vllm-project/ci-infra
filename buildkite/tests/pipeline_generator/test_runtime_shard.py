@@ -1470,7 +1470,10 @@ def _run_after_setup(tmp_path, command, pythonpath="/x", venv=None):
     venv = venv or _venv(tmp_path / "venv")
     script = "\n".join(rs.shard_job_setup("/checkout") + [command]).replace("$$", "$")
     env = dict(
-        os.environ, RUNTIME_SHARD_PLUGIN=rs.plugin_source(), PYTHONPATH=pythonpath
+        os.environ,
+        RUNTIME_SHARD_PLUGIN=rs.plugin_source(),
+        RUNTIME_SHARD_RETRY_HELPER=rs.retry_helper_source(),
+        PYTHONPATH=pythonpath,
     )
     env["PATH"] = str(venv / "bin") + os.pathsep + env["PATH"]
     return subprocess.run(
@@ -1479,7 +1482,8 @@ def _run_after_setup(tmp_path, command, pythonpath="/x", venv=None):
 
 
 FIND_PLUGIN = (
-    'python3 -c "import importlib.util as u;'
+    'python3 -c "import importlib.util as u, pytest_retry;'
+    " assert callable(pytest_retry.parse_record_file);"
     " print(u.find_spec('runtime_shard_plugin').origin)\""
 )
 
@@ -2449,10 +2453,12 @@ def _covered_run(
     if retry is not None:
         env["BUILDKITE_RETRY_COUNT"] = str(retry)
     run = _run(tmp_path, command, plan, shard, extra_env=env)
-    path = tmp_path / "records" / job / "0.json"
+    path = tmp_path / "records" / job / "0.jsonl"
     if not (tmp_path / "records").is_dir() or not path.exists():
         return run, None
-    return run, json.loads(path.read_text())
+    import pytest_retry
+
+    return run, pytest_retry.parse_record_file(str(path))
 
 
 def test_the_first_shard_records_the_whole_command_and_each_what_it_ran(tmp_path):
@@ -2515,7 +2521,7 @@ def test_the_recording_shards_run_does_not_import_other_shards_files(tmp_path):
         "tests/pkg/test_a.py::test_1",
         "tests/pkg/test_b.py::test_1",
     ]
-    assert [p.name for p in (tmp_path / "records").rglob("*.json")] == ["0.json"]
+    assert [p.name for p in (tmp_path / "records").rglob("*.jsonl")] == ["0.jsonl"]
 
 
 def test_only_the_recording_shards_inventory_covers_other_shards_files(tmp_path):
@@ -2596,7 +2602,9 @@ def test_an_inventory_subprocess_that_cannot_start_leaves_the_shard_running(tmp_
     )
     assert run.returncode == 0, run.stdout + run.stderr
     assert _ran(run.stdout) == ["pkg/test_a.py::test_1", "pkg/test_a.py::test_2"]
-    record = json.loads((tmp_path / "records" / "job-0" / "0.json").read_text())
+    import pytest_retry
+
+    record = pytest_retry.parse_record_file(str(tmp_path / "records" / "job-0" / "0.jsonl"))
     assert record["expected"] is None and record["finished"] is True
     assert "couldn't collect the command's full test list" in run.stderr
 
@@ -3174,7 +3182,7 @@ def test_collect_only_writes_no_record_and_a_job_id_is_optional(tmp_path):
     finally:
         os.environ.clear()
         os.environ.update(without_id)
-    assert (tmp_path / "records" / "no-job-id" / "0.json").exists()
+    assert (tmp_path / "records" / "no-job-id" / "0.jsonl").exists()
 
 
 def test_record_directories_can_be_deleted_by_the_agent(tmp_path):
@@ -3195,25 +3203,24 @@ def test_a_record_that_cannot_be_written_leaves_the_job_alone(tmp_path):
 def test_a_write_that_dies_halfway_leaves_the_earlier_record_whole(
     tmp_path, monkeypatch
 ):
+    import pytest_retry
     import runtime_shard_plugin as plugin
 
     monkeypatch.setenv(plugin.COVERAGE_DIR_ENV, str(tmp_path / "records"))
     monkeypatch.setenv("BUILDKITE_JOB_ID", "job-0")
     command = {"files": {}, "split": {}, "prefix": "", "label": "L", "position": 0}
     shard = plugin.ShardPlugin(command, 0, 2, "k")
-    shard._write_record(finished=False)
-    path = tmp_path / "records" / "job-0" / "0.json"
-    assert json.loads(path.read_text())["finished"] is False
+    shard._start_record()
+    path = tmp_path / "records" / "job-0" / "0.jsonl"
+    assert pytest_retry.parse_record_file(str(path))["finished"] is False
 
-    def dies_halfway(record, f):
-        f.write('{"step": "k", "fin')
-        raise OSError("killed")
-
-    monkeypatch.setattr(plugin.json, "dump", dies_halfway)
-    shard._write_record(finished=True)
-    assert json.loads(path.read_text())["finished"] is False
-    records = [p.name for p in path.parent.iterdir() if p.suffix == ".json"]
-    assert records == ["0.json"]
+    # Simulate a truncated trailing line written before SIGKILL.
+    with open(path, "a") as f:
+        f.write('{"event": "finish", "fin')
+    parsed = pytest_retry.parse_record_file(str(path))
+    assert parsed is not None and parsed["finished"] is False
+    records = [p.name for p in path.parent.iterdir() if p.suffix == ".jsonl"]
+    assert records == ["0.jsonl"]
 
 
 # The job that compares them.
@@ -3247,7 +3254,7 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
     assert me["owners"] == rs.owners(plan["commands"][0])
     assert me["soft_fail"] is False
     # Sharded steps upload their records; the AMD mirror too.
-    assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.json"
+    assert rs.COVERAGE_ARTIFACT_PATH == ".runtime-shard-coverage/*/*.jsonl"
     assert rs.COVERAGE_ARTIFACT_PATH in step.artifact_paths
     assert rs.COVERAGE_ARTIFACT_PATH in mirror.artifact_paths
     assert job.label == ":mag: Check every test ran"
@@ -3257,11 +3264,9 @@ def test_generator_adds_one_coverage_job_for_the_sharded_steps(
         {"exit_status": 94, "limit": 1},
         {"exit_status": buildkite_step.HOOK_FAILURE_EXIT_STATUSES, "limit": 1},
     ]
-    assert job.commands == [
-        'python3 -I -c \'import base64,json,os,zlib;'
-        'exec(json.loads(zlib.decompress(base64.b64decode('
-        'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\''
-    ]
+    assert len(job.commands) == 1
+    assert job.commands[0].startswith("python3 -I -c ")
+    assert 'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]' in job.commands[0]
     # And their records land where each job can reach the checkout.
     coverage_setup = rs.shard_job_setup("/workdir")[-1]
     assert 'RUNTIME_SHARD_COVERAGE_DIR="/workdir/' in coverage_setup
@@ -3325,7 +3330,14 @@ def test_coverage_job_embeds_and_decodes_the_generator_script(
         )
     ) as f:
         source = f.read()
-    assert rs.unpack(job.env["RUNTIME_SHARD_COVERAGE_SCRIPT"]) == source
+    with open(
+        os.path.join(os.path.dirname(buildkite_step.__file__), "pytest_retry.py")
+    ) as f:
+        retry_source = f.read()
+    assert rs.unpack(job.env["RUNTIME_SHARD_COVERAGE_SCRIPT"]) == {
+        "pytest_retry.py": retry_source,
+        "runtime_shard_coverage.py": source,
+    }
     assert all("raw.githubusercontent.com" not in command for command in job.commands)
     assert job.agents["queue"] == AgentQueue.SMALL_CPU_PREMERGE.value
     fake_global_config["branch"] = "main"
