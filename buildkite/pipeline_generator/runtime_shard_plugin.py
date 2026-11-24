@@ -514,7 +514,9 @@ class ShardPlugin:
 
     @pytest.hookimpl(trylast=True)  # after -v prints FAILED or ERROR
     def pytest_runtest_logreport(self, report):
-        self.ran.add(report.nodeid)
+        # Runtime subtests can report IDs that are absent from collection.
+        if not isinstance(report, getattr(pytest, "SubtestReport", ())):
+            self.ran.add(report.nodeid)
         if self.reporter is not None and report.failed and not self.expanded:
             self.expanded = True
             self._say("^^^ +++")  # Buildkite: open this file's group

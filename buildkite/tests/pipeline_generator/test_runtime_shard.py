@@ -3118,6 +3118,48 @@ def test_a_failed_test_counts_as_ran_and_keeps_the_job_red(tmp_path):
     assert record["ran"] == ["tests/pkg/test_a.py::test_1", "tests/pkg/test_a.py::test_2"]
 
 
+@pytest.mark.skipif(
+    not hasattr(pytest, "SubtestReport"), reason="requires pytest subtests"
+)
+@pytest.mark.parametrize("subtest_passes", [True, False])
+def test_runtime_subtests_do_not_change_coverage(tmp_path, subtest_passes):
+    _project(
+        tmp_path,
+        {
+            # Schemathesis reports each operation with a runtime node ID.
+            "pkg/conftest.py": (
+                "import pytest\n"
+                "@pytest.hookimpl(tryfirst=True)\n"
+                "def pytest_runtest_logreport(report):\n"
+                "    if isinstance(report, pytest.SubtestReport):\n"
+                "        report.nodeid += '[GET /health]'\n"
+            ),
+            "pkg/test_a.py": (
+                "import pytest\n"
+                "@pytest.mark.parametrize('value', [1, 2])\n"
+                "def test_parameter(value):\n"
+                "    assert value > 0\n"
+                "def test_parent(subtests):\n"
+                "    with subtests.test(label='GET /health'):\n"
+                f"        assert {subtest_passes!r}\n"
+            ),
+        },
+    )
+    run, record = _covered_run(tmp_path, 0, "job-0")
+    expected_status = (
+        pytest.ExitCode.OK if subtest_passes else pytest.ExitCode.TESTS_FAILED
+    )
+    assert run.returncode == expected_status, run.stdout + run.stderr
+    if not subtest_passes:
+        assert "^^^ +++" in _groups(run.stdout)
+    expected = [
+        "tests/pkg/test_a.py::test_parameter[1]",
+        "tests/pkg/test_a.py::test_parameter[2]",
+        "tests/pkg/test_a.py::test_parent",
+    ]
+    assert record["expected"] == record["planned"] == record["ran"] == expected
+
+
 def test_collect_only_writes_no_record_and_a_job_id_is_optional(tmp_path):
     _project(tmp_path, COVERED_FILES)
     _, record = _covered_run(tmp_path, 0, "job-0", command="pytest --collect-only pkg")
