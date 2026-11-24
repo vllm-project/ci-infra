@@ -2,6 +2,7 @@ name: Pipeline generator tests
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - ".github/workflows/pipeline-generator-tests.yml"
       - ".buildkite/pipelines/rebuild-cpu-ami.yml"
@@ -20,8 +21,9 @@ concurrency:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   test:
-    if: github.repository_owner == 'vllm-project'
+    if: github.repository == 'vllm-project/ci-infra'
     uses: vllm-project/ci-infra/.github/workflows/_reusable-pipeline-generator-tests.yml@main

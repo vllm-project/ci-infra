@@ -5,10 +5,39 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
+  auth-check:
+    if: github.repository == 'vllm-project/ci-infra' && github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 5
+    steps:
+      - name: Check PR authorization
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const sameRepo = pr.head.repo && pr.head.repo.full_name === 'vllm-project/ci-infra';
+            const trustedAssoc = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association);
+            const approvedLabels = ['ready', 'verified'];
+            const hasLabel = pr.labels.some(l => approvedLabels.includes(l.name));
+            if (sameRepo || trustedAssoc || hasLabel) {
+              core.info(`Authorized: sameRepo=${sameRepo}, author_association=${pr.author_association}, hasLabel=${hasLabel}`);
+            } else {
+              core.setFailed(`Fork PRs require a maintainer to add the 'ready' or 'verified' label before running tests on vllm-runners (author_association=${pr.author_association}).`);
+            }
+
   test:
-    if: github.repository_owner == 'vllm-project' && github.event_name == 'pull_request'
+    needs: auth-check
+    if: >-
+      ${{ !cancelled() &&
+      github.repository == 'vllm-project/ci-infra' &&
+      github.event_name == 'pull_request' &&
+      needs.auth-check.result == 'success' }}
     runs-on: [self-hosted, linux, x64, vllm-runners]
     timeout-minutes: 10
 
