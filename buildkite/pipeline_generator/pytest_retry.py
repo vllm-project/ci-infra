@@ -92,6 +92,7 @@ def _parse_legacy_json(data: Any) -> Optional[Dict[str, Any]]:
         "finished": data["finished"],
         "finished_at": float(data["finished_at"]),
         "has_finish": bool(data.get("has_finish", data["finished"])),
+        "hook_error": bool(data.get("hook_error", False)),
         "exitstatus": data.get("exitstatus") if _is_int(data.get("exitstatus")) else None,
         "process_exit": (
             data.get("process_exit") if _is_int(data.get("process_exit")) else None
@@ -152,6 +153,7 @@ def _parse_record_with_reason(path: str) -> tuple:
     finished = False
     finished_at = 0.0
     has_finish = False
+    hook_error = False
     exitstatus: Optional[int] = None
     process_exit: Optional[int] = None
 
@@ -193,9 +195,13 @@ def _parse_record_with_reason(path: str) -> tuple:
             raw_exit = event.get("exitstatus")
             if raw_exit is not None and not _is_int(raw_exit):
                 return None, None
+            raw_hook_error = event.get("hook_error", False)
+            if not isinstance(raw_hook_error, bool):
+                return None, None
             has_finish = True
             finished = event["finished"]
             finished_at = float(event["finished_at"])
+            hook_error = raw_hook_error
             exitstatus = raw_exit
         elif kind == "exit":
             raw_exit = event.get("exitstatus")
@@ -214,6 +220,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             "finished": finished,
             "finished_at": finished_at,
             "has_finish": has_finish,
+            "hook_error": hook_error,
             "exitstatus": exitstatus,
             "process_exit": process_exit,
             "expected": header.get("expected"),
@@ -456,7 +463,13 @@ def build_retry_plan(
         # launch pytest, and mid-run crashes (os._exit/SIGKILL) never write a
         # `finish` event (has_finish=False) so their flushed passes stay usable.
         if not record.get("skipped_command") and record.get("has_finish", True):
+            if record.get("hook_error"):
+                return empty
             if not _is_int(process_exit):
+                return empty
+            # Exit code 3 (pytest.ExitCode.INTERNAL_ERROR) always indicates a
+            # plugin/hook/pytest internal error even when a test also failed.
+            if process_exit == 3 or exitstatus == 3:
                 return empty
             if process_exit != 0 and not record.get("failed"):
                 return empty

@@ -89,6 +89,7 @@ def test_parse_jsonl_complete_record(tmp_path):
         "finished": True,
         "finished_at": 123.5,
         "has_finish": True,
+        "hook_error": False,
         "exitstatus": None,
         "process_exit": None,
         "expected": ["a.py::t1", "a.py::t2"],
@@ -2826,6 +2827,124 @@ def test_review8_continue_on_failure_and_unconfirmed_process_exit(tmp_path):
     assert plan_h["active"] is False
     assert plan_h["skip_command"] is False
     assert plan_h["passed"] == set()
+
+
+def test_review9_session_hook_exception_with_failed_test_and_multishard_growth_inventory(
+    tmp_path,
+):
+    # Round 9 Finding 1: Test A passes, test B fails, AND pytest_sessionfinish
+    # raises an exception. Even though B is in `failed`, hook_error=True MUST
+    # invalidate the retry plan so A reruns in full on Attempt 1.
+    hook_dir = tmp_path / "hook-with-fail"
+    _make_project(
+        hook_dir,
+        {
+            "pkg/conftest.py": (
+                "import os\n"
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if os.environ.get('BUILDKITE_RETRY_COUNT') == '0':\n"
+                "        raise RuntimeError('session validation boom')\n"
+            ),
+            "pkg/test_combo.py": (
+                "import os\n"
+                "def test_a(): pass\n"
+                "def test_b():\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') != '0'\n"
+            ),
+        },
+    )
+    plan_1 = _simple_plan({"tests/pkg/test_combo.py": 0}, shards=1, single_job=True)
+    art1 = hook_dir / "artifacts"
+    cov1 = art1 / ".runtime-shard-coverage"
+    r0, rec0 = _run_plugin_pytest(
+        hook_dir, plan_1, ["-v", "pkg"], shard=0, job_id="j0", coverage_dir=cov1, retry=0
+    )
+    assert r0.returncode != 0
+    assert rec0["hook_error"] is True
+    assert rec0["failed"] == ["tests/pkg/test_combo.py::test_b"]
+    assert rec0["passed"] == ["tests/pkg/test_combo.py::test_a"]
+    r1, rec1 = _run_plugin_pytest(
+        hook_dir,
+        plan_1,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="j1",
+        coverage_dir=cov1,
+        retry=1,
+        retry_in=art1,
+    )
+    assert r1.returncode == 0, r1.stdout + r1.stderr
+    assert rec1["mode"] == "full"
+    assert rec1["ran"] == [
+        "tests/pkg/test_combo.py::test_a",
+        "tests/pkg/test_combo.py::test_b",
+    ]
+
+    # Round 9 Finding 2: Multi-shard inventory owner sees collection grow from
+    # [a] on Attempt 0 to [a, b] on Attempt 1 -> promotes to full AND rebuilds
+    # expected inventory so #884 coverage check passes GREEN (no unexpected b)!
+    import runtime_shard_coverage as coverage
+
+    ms_dir = tmp_path / "ms-growth"
+    _make_project(
+        ms_dir,
+        {
+            "pkg/test_s0.py": (
+                "import os, pytest\n"
+                "cases = ['a'] if os.environ.get('BUILDKITE_RETRY_COUNT') == '0' else ['a', 'b']\n"
+                "@pytest.mark.parametrize('x', cases)\n"
+                "def test_s0(x):\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') != '0'\n"
+            ),
+            "pkg/test_s1.py": "def test_s1(): pass\n",
+        },
+    )
+    ms_plan = _simple_plan(
+        {"tests/pkg/test_s0.py": 0, "tests/pkg/test_s1.py": 1},
+        shards=2,
+        single_job=False,
+    )
+    art2 = ms_dir / "artifacts"
+    cov2 = art2 / ".runtime-shard-coverage"
+    # Attempt 0: shard 0 fails test_s0[a] (captures expected=[s0[a], s1]); shard 1 passes test_s1.
+    m0_s0, mrec0_s0 = _run_plugin_pytest(
+        ms_dir, ms_plan, ["-v", "pkg"], shard=0, job_id="m0-s0", coverage_dir=cov2, retry=0
+    )
+    assert m0_s0.returncode != 0
+    assert mrec0_s0["expected"] == [
+        "tests/pkg/test_s0.py::test_s0[a]",
+        "tests/pkg/test_s1.py::test_s1",
+    ]
+    m0_s1, _ = _run_plugin_pytest(
+        ms_dir, ms_plan, ["-v", "pkg"], shard=1, job_id="m0-s1", coverage_dir=cov2, retry=0
+    )
+    assert m0_s1.returncode == 0
+
+    # Attempt 1 on shard 0: collection grows to [s0[a], s0[b]] -> switches to full AND rebuilds expected!
+    m1_s0, mrec1_s0 = _run_plugin_pytest(
+        ms_dir,
+        ms_plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="m1-s0",
+        coverage_dir=cov2,
+        retry=1,
+        retry_in=art2,
+    )
+    assert m1_s0.returncode == 0, m1_s0.stdout + m1_s0.stderr
+    assert mrec1_s0["mode"] == "full"
+    assert mrec1_s0["expected"] == [
+        "tests/pkg/test_s0.py::test_s0[a]",
+        "tests/pkg/test_s0.py::test_s0[b]",
+        "tests/pkg/test_s1.py::test_s1",
+    ]
+    steps = {"k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0, 1]}]}
+    records = pr.read_records(str(art2))
+    [result] = coverage.compare(steps, records, build_id="b1")
+    assert result["unverified"] is None
+    assert result["unexpected"] == []
+    assert result["missed"] == []
+    assert coverage.report([result])[0] == "success"
 
 
 def test_review7_extra_occurrence_of_previously_passed_test_invalidates_skip_before_deselect(

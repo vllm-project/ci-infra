@@ -1195,6 +1195,7 @@ def _normalized(record):
         "build_id": record.get("build_id"),
         "mode": record.get("mode", "full"),
         "has_finish": bool(record.get("has_finish", record["finished"])),
+        "hook_error": bool(record.get("hook_error", False)),
         "exitstatus": record.get("exitstatus"),
         "process_exit": record.get("process_exit"),
         "passed": list(record.get("passed", [])),

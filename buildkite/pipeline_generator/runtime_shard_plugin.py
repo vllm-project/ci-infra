@@ -347,15 +347,10 @@ class ShardPlugin:
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
-        if (
-            self.records_expected
-            and not self.collection_failed
-            and not config.getoption("collectonly")
-        ):
-            self.expected = self._expected_inventory(config)
-        # Before deselecting already-passed tests, check whether this shard
-        # collected any new test or extra duplicate occurrence (even of a
-        # previously passing test) relative to the base full attempt.
+        # Before deciding whether to reuse the expected inventory or deselect
+        # already-passed tests, check whether this shard collected any new test
+        # or extra duplicate occurrence (even of a previously passing test)
+        # relative to the base full attempt.
         if self.mode == "test-retry" and isinstance(self.retry_base_planned, list):
             base_counts = {}
             for nodeid in self.retry_base_planned:
@@ -375,6 +370,18 @@ class ShardPlugin:
                 if not self.retry_skipped_files:
                     self.mode = "full"
                     self.retry_base_planned = None
+                    self.retry_has_expected = False
+                    self.records_expected = (
+                        bool(self.coverage_dir)
+                        and not self.single_job
+                        and self.shard == self.fallback
+                    )
+        if (
+            self.records_expected
+            and not self.collection_failed
+            and not config.getoption("collectonly")
+        ):
+            self.expected = self._expected_inventory(config)
         for item in items:
             file = item.nodeid.split("::")[0]
             self.totals[file] = self.totals.get(file, 0) + 1
@@ -566,7 +573,7 @@ class ShardPlugin:
             planned=self.planned,
         )
 
-    def _finish_record(self, finished, exitstatus=None):
+    def _finish_record(self, finished, exitstatus=None, hook_error=False):
         """Flush any unfinished phase records and append the `finish` trailer."""
         for nodeid in sorted(self._phases):
             pytest_retry.append_jsonl_event(
@@ -586,6 +593,8 @@ class ShardPlugin:
         }
         if exitstatus is not None:
             payload["exitstatus"] = int(exitstatus)
+        if hook_error:
+            payload["hook_error"] = True
         pytest_retry.append_jsonl_event(self.record_path, payload)
 
     def _where(self):
@@ -704,15 +713,24 @@ class ShardPlugin:
             if session.exitstatus == pytest.ExitCode.OK:
                 session.exitstatus = pytest.ExitCode.TESTS_FAILED
         outcome = yield
+        hook_error = outcome.excinfo is not None
         final_status = int(session.exitstatus)
-        if outcome.excinfo is not None and final_status == int(pytest.ExitCode.OK):
+        if hook_error and final_status == int(pytest.ExitCode.OK):
             final_status = int(pytest.ExitCode.INTERNAL_ERROR)
         # -x, --maxfail or a Ctrl-C stopped the run: tests here may not have run.
-        stopped = session.shouldstop or session.shouldfail or final_status in (
-            int(pytest.ExitCode.INTERRUPTED),
-            int(pytest.ExitCode.INTERNAL_ERROR),
+        stopped = (
+            hook_error
+            or session.shouldstop
+            or session.shouldfail
+            or final_status
+            in (
+                int(pytest.ExitCode.INTERRUPTED),
+                int(pytest.ExitCode.INTERNAL_ERROR),
+            )
         )
-        self._finish_record(finished=not stopped, exitstatus=final_status)
+        self._finish_record(
+            finished=not stopped, exitstatus=final_status, hook_error=hook_error
+        )
 
 
 def _classify_phases(phases):
