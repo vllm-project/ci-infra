@@ -19,9 +19,18 @@ permissions:
 
 jobs:
   test:
-    if: github.repository_owner == 'vllm-project'
+    if: >-
+      github.repository_owner == 'vllm-project' &&
+      (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     runs-on: [self-hosted, linux, x64, vllm-runners]
     timeout-minutes: 30
+    # The gate runs ci-select under the Python that made the function record
+    # (selector_gate.record_python): today vLLM CI's 3.14, and 3.12 when a
+    # record does not say. Both have to pass.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
 
     steps:
       - name: Check out repository
@@ -32,7 +41,7 @@ jobs:
       - name: Set up uv and Python
         uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
 
       # Full history, not --depth 1: the suite builds git worktrees and asks for
       # merge bases, so it needs real history. --filter=blob:none keeps that
