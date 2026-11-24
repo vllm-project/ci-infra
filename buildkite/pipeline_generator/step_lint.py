@@ -16,7 +16,12 @@ Besides the load errors (E1-E9, which only report), a step is checked for:
     software fields, then variants.
 
 `--fix` rewrites the yaml text in place, keeping comments with the lines they
-sit above: values are moved as text, not re-emitted. A fix never changes a
+sit above: values are moved as text, not re-emitted. When a value is hoisted
+from several devices, the comments of the copies that are deleted go above
+the moved item, or above the step-level field (a comment above a device field
+the move empties, say); a comment written the same twice is kept once. A
+comment inside a field `same_as` replaces is kept above `same_as`. A fix that
+would still drop a comment is refused. A fix never changes a
 job: every fixed step is compiled before and after, and a step whose jobs
 would differ (a key, say) is left alone and reported. When the fixed order
 would change a default key (a CPU device moved after an NVIDIA one), the old
@@ -28,6 +33,7 @@ from __future__ import annotations
 import copy
 import os
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -505,6 +511,56 @@ def _ensure_newlines(lines: List[str]) -> List[str]:
     return [line if line.endswith("\n") else line + "\n" for line in lines]
 
 
+def _comment_of(line: str) -> Optional[str]:
+    """A line's comment: the whole line's, or a trailing ` # ...` outside
+    quotes; None when it has none."""
+    stripped = line.strip()
+    if stripped.startswith("#"):
+        return stripped
+    quote = None
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = None
+        elif char in "\"'" and (index == 0 or line[index - 1] in " -:,[{"):
+            quote = char
+        elif char == "#" and index > 0 and line[index - 1] in " \t":
+            return line[index:].strip()
+    return None
+
+
+def _comments(lines: Iterable[str]) -> List[str]:
+    """Every comment in some lines, in order."""
+    return [comment for comment in map(_comment_of, lines) if comment]
+
+
+def _comment_lines(
+    comments: Iterable[str], indent: int, have: Iterable[str]
+) -> List[str]:
+    """Comment lines at an indent for the comments not already in `have` (a
+    comment written the same in two devices is kept once)."""
+    seen = set(have)
+    out = []
+    for comment in comments:
+        if comment not in seen:
+            seen.add(comment)
+            out.append(" " * indent + comment + "\n")
+    return out
+
+
+def _minus(comments: List[str], *others: Iterable[str]) -> List[str]:
+    """`comments` less one occurrence of each comment of `others`, in order."""
+    left = Counter(comments)
+    for other in others:
+        left.subtract(other)
+    out = []
+    for comment in comments:
+        if left[comment] > 0:
+            left[comment] -= 1
+            out.append(comment)
+    return out
+
+
 # ---- fixes ---------------------------------------------------------------------
 
 
@@ -594,46 +650,95 @@ def _hoist(step: _Step, raw: Dict[str, Any], found: List[Tuple[str, Any]]) -> No
     whole = [name for name, value in found if value is None]
     moved_items: Dict[str, List[Entry]] = {DEPENDENCIES_FIELD: [], ENV_FIELD: []}
     moved_whole: Dict[str, Entry] = {}
+    # The text of each value is moved from the first device that has it; the
+    # comments of the other devices' copies go with it: those on an item (a
+    # dependency, an env var) above the moved item, the rest (above a field
+    # the move empties, say) above the step-level field.
+    item_notes: Dict[Tuple[str, Any], List[str]] = {}
+    field_notes: Dict[str, List[str]] = {}
+    fields = ([DEPENDENCIES_FIELD] if deps else []) + ([ENV_FIELD] if env else [])
     devices = step.devices()
     for device_entry in devices.entries:
         body = _device_body(device_entry, devices)
         delta = step.indent - body.indent
-        if (
-            deps
-            and body.get(DEPENDENCIES_FIELD)
-            and not moved_items[DEPENDENCIES_FIELD]
-        ):
+        before = {
+            name: body.get(name).text() for name in fields + whole if body.get(name)
+        }
+        moved_here: Dict[str, List[str]] = {}
+        noted_here: Dict[str, List[str]] = {}
+        if deps and body.get(DEPENDENCIES_FIELD):
             _, items, _ = _items(body.get(DEPENDENCIES_FIELD))
-            moved_items[DEPENDENCIES_FIELD] = [
-                Entry("", _shift(item.lead, delta), _shift(item.lines, delta))
-                for item in items
-                if _item_value(item) in deps
-            ]
-        if env and body.get(ENV_FIELD) and not moved_items[ENV_FIELD]:
+            shared = [item for item in items if _item_value(item) in deps]
+            if not moved_items[DEPENDENCIES_FIELD]:
+                moved_items[DEPENDENCIES_FIELD] = [
+                    Entry("", _shift(item.lead, delta), _shift(item.lines, delta))
+                    for item in shared
+                ]
+                moved_here[DEPENDENCIES_FIELD] = [
+                    line for item in shared for line in item.text()
+                ]
+            else:
+                for item in shared:
+                    notes = _comments(item.text())
+                    key = (DEPENDENCIES_FIELD, _item_value(item))
+                    item_notes.setdefault(key, []).extend(notes)
+                    noted_here.setdefault(DEPENDENCIES_FIELD, []).extend(notes)
+        if env and body.get(ENV_FIELD):
             child = child_block(body.get(ENV_FIELD), body.indent + 2)
-            moved_items[ENV_FIELD] = [
-                Entry(e.key, _shift(e.lead, delta), _shift(e.lines, delta))
+            shared = [
+                e
                 for e in child.entries
                 if (e.key, yaml.safe_load("".join(e.lines))[e.key]) in env
             ]
+            if not moved_items[ENV_FIELD]:
+                moved_items[ENV_FIELD] = [
+                    Entry(e.key, _shift(e.lead, delta), _shift(e.lines, delta))
+                    for e in shared
+                ]
+                moved_here[ENV_FIELD] = [line for e in shared for line in e.text()]
+            else:
+                for e in shared:
+                    notes = _comments(e.text())
+                    item_notes.setdefault((ENV_FIELD, e.key), []).extend(notes)
+                    noted_here.setdefault(ENV_FIELD, []).extend(notes)
         for name in whole:
             if name not in moved_whole and body.get(name):
                 entry = body.get(name)
                 moved_whole[name] = Entry(
                     name, _shift(entry.lead, delta), _shift(entry.lines, delta)
                 )
+                moved_here[name] = before[name]
         _remove_from_list(body, DEPENDENCIES_FIELD, deps)
         _remove_from_map(body, ENV_FIELD, [var for var, _ in env])
         body.entries = [e for e in body.entries if e.key not in whole]
+        for name, text in before.items():
+            after = body.get(name).text() if body.get(name) else []
+            # Less what stays, what moved and what is noted on an item.
+            field_notes.setdefault(name, []).extend(
+                _minus(
+                    _comments(text),
+                    _comments(after),
+                    _comments(moved_here.get(name, [])),
+                    noted_here.get(name, []),
+                )
+            )
         device_entry.lines = [device_entry.lines[0]] + (
             body.lines() if body.entries or body.trailing else []
         )
     step.set_devices(devices)
 
+    for (name, value), notes in item_notes.items():
+        for item in moved_items[name]:
+            if (item.key if name == ENV_FIELD else _item_value(item)) == value:
+                indent = next(_indent(line) for line in item.lines if line.strip())
+                item.lead += _comment_lines(notes, indent, _comments(item.text()))
     for name, entry in moved_whole.items():
         step.block.entries.append(entry)
     _add_items(step, DEPENDENCIES_FIELD, moved_items[DEPENDENCIES_FIELD], is_list=True)
     _add_items(step, ENV_FIELD, moved_items[ENV_FIELD], is_list=False)
+    for name, notes in field_notes.items():
+        entry = step.block.get(name)
+        entry.lead += _comment_lines(notes, step.indent, _comments(entry.text()))
 
 
 def _add_items(step: _Step, name: str, items: List[Entry], is_list: bool) -> None:
@@ -661,9 +766,14 @@ def _same_as_fix(step: _Step, target: str, device: str) -> None:
     entry = devices.get(device)
     body = _device_body(entry, devices)
     kept = [e for e in body.entries if e.key in IDENTITY]
-    dropped_comments = [
-        line for e in body.entries if e.key not in IDENTITY for line in e.lead
-    ]
+    # The comments of the fields `same_as` replaces stay above it: those above
+    # a field as written, those inside one as whole lines.
+    dropped_comments: List[str] = []
+    for e in body.entries:
+        if e.key not in IDENTITY:
+            dropped_comments += e.lead + _comment_lines(
+                _comments(e.lines), body.indent, _comments(dropped_comments)
+            )
     line = " " * body.indent + f"{SAME_AS_FIELD}: {target}\n"
     body.entries = [Entry(SAME_AS_FIELD, dropped_comments, [line])] + kept
     entry.lines = [entry.lines[0]] + body.lines()
@@ -738,6 +848,11 @@ def fix_step_lines(
         return lines, [f"the fix would not compile ({error}); fix it by hand"]
     if _normalized(after) != _normalized(before):
         return lines, ["the fix would change a job; fix it by hand"]
+    lost = set(_comments(lines)) - set(_comments(fixed))
+    if lost:
+        return lines, [
+            f"the fix would drop the comment {sorted(lost)[0]!r}; fix it by hand"
+        ]
     return fixed, []
 
 

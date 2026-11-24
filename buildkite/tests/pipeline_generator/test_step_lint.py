@@ -156,6 +156,171 @@ def test_l1_needs_two_devices():
     assert _codes(single) == []
 
 
+def _comment_texts(text):
+    out = []
+    for line in text.splitlines():
+        if "#" in line:
+            out.append(line[line.index("#") :].strip())
+    return sorted(out)
+
+
+def test_l1_fix_keeps_the_comments_of_every_device():
+    text = """\
+- label: T1
+  key: t1
+  devices:
+    h100:
+      timeout_in_minutes: 10
+      # shared deps (nvidia)
+      source_file_dependencies:
+        # the x dir
+        - x/
+      # run it
+      commands:
+        - pytest a
+    mi355_1:
+      timeout_in_minutes: 20
+      # shared deps (amd)
+      source_file_dependencies:
+        # amd x dir
+        - x/  # inline amd
+      # amd run note
+      commands:
+        - pytest a  # amd inline cmd
+"""
+    fixed = _fix(text)
+    assert (
+        fixed
+        == """\
+- label: T1
+  key: t1
+  devices:
+    h100:
+      timeout_in_minutes: 10
+    mi355_1:
+      timeout_in_minutes: 20
+  # shared deps (nvidia)
+  # shared deps (amd)
+  source_file_dependencies:
+    # the x dir
+    # amd x dir
+    # inline amd
+    - x/
+  # run it
+  # amd run note
+  # amd inline cmd
+  commands:
+    - pytest a
+"""
+    )
+    assert _comment_texts(fixed) == _comment_texts(text)
+    assert _compiled(fixed) == _compiled(text)
+    assert _codes(fixed) == []
+
+
+def test_l1_fix_drops_no_comment():
+    """Every comment of a step with comments everywhere a hoist touches (on
+    items, above fields it empties or keeps, after the last item, inside a
+    command) is still there after the fix."""
+    text = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      # h100 env
+      env:
+        # h100 shared
+        SHARED: "1"
+        NV: "1"  # nv only
+      # h100 deps
+      source_file_dependencies:
+        - a/  # h100 a
+        # h100 b
+        - b/
+        # h100 after the list
+      commands:
+        - pytest  # h100 cmd
+    b200:
+      # b200 env
+      env:
+        SHARED: "1"  # b200 shared
+      source_file_dependencies:
+        # b200 a
+        - a/
+        - b/
+      # b200 commands
+      commands:
+        # inside b200 commands
+        - pytest
+    mi355_1:
+      env:
+        # amd shared
+        SHARED: "1"
+        AMD: "1"
+      # amd deps
+      source_file_dependencies:
+        - a/
+        - rocm/  # amd only
+      commands:
+        - pytest
+  # the step label
+"""
+    fixed = _fix(text)
+    assert _comment_texts(fixed) == _comment_texts(text)
+    assert _compiled(fixed) == _compiled(text)
+    assert _codes(fixed) == []
+
+
+def test_l1_fix_keeps_a_comment_written_twice_once():
+    text = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      # the tests
+      commands:
+        - pytest
+    mi355_1:
+      # the tests
+      commands:
+        - pytest
+"""
+    assert (
+        _fix(text)
+        == """\
+- label: T
+  key: t
+  devices:
+    h100:
+    mi355_1:
+  # the tests
+  commands:
+    - pytest
+"""
+    )
+
+
+def test_a_fix_that_would_drop_a_comment_is_refused(monkeypatch):
+    import step_lint
+
+    monkeypatch.setattr(step_lint, "_comment_lines", lambda *args: [])
+    text = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      commands:
+        - pytest
+    mi355_1:
+      # amd only
+      commands:
+        - pytest
+"""
+    fixed, refused = fix_text(HEADER + text, "t.yaml")
+    assert fixed == HEADER + text
+    assert ["drop the comment '# amd only'" in r.message for r in refused] == [True]
+
+
 # ---- L2 same_as ---------------------------------------------------------------------
 
 SAME = """\
@@ -196,6 +361,24 @@ def test_l2_and_its_fix():
 """,
     )
     assert _compiled(fixed) == _compiled(SAME)
+
+
+def test_l2_fix_keeps_the_comments_inside_what_same_as_replaces():
+    text = SAME.replace(
+        "        - pytest amd\n      variants:",
+        "        # the amd suite\n        - pytest amd  # all of it\n      variants:",
+    )
+    fixed = _fix(text)
+    assert (
+        """      # copied from mi355_1
+      # the amd suite
+      # all of it
+      same_as: mi355_1
+"""
+        in fixed
+    )
+    assert _comment_texts(fixed) == _comment_texts(text)
+    assert _compiled(fixed) == _compiled(text)
 
 
 def test_l2_ignores_another_vendor_and_empty_entries():
