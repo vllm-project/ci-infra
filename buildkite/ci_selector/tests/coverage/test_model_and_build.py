@@ -528,6 +528,19 @@ class TestMergeBuild:
 
         assert rows["kernels"].stamp.unfaithful_files == ["vllm/mod.py"]
 
+    def test_an_annotate_python_synthesized_does_not_flag_the_file(
+        self, build: Build, tmp_repo: Repo
+    ):
+        """From 3.14 dataclasses generate `Cls.__annotate__` at runtime: no
+        source holds it, and it says nothing about the recorder's names."""
+        d = build.job("j0", step_key="kernels")
+        process_file(
+            d / "fn.a.txt", [("mod.py", "plain"), ("mod.py", "Holder.__annotate__")]
+        )
+        rows = merge_build(build.finish(), tmp_repo.root)
+
+        assert rows["kernels"].stamp.unfaithful_files == []
+
     def test_a_faithful_file_is_not_flagged(self, build: Build, tmp_repo: Repo):
         d = build.job("j0", step_key="kernels")
         process_file(d / "fn.a.txt", [("mod.py", "plain"), ("mod.py", "Holder.method")])

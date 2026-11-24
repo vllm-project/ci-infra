@@ -26,17 +26,20 @@ the Buildkite API alone: what the selector chose, what today's rules would
 have run, what was scheduled, and which recording it decided from.
 
 Python 3.9: the generator runs on the small CPU queue's python3. The selector
-needs 3.12 and its own dependencies, so it runs through uv from a shallow
-checkout of ci-infra at `VLLM_CI_BRANCH`, as the collect steps do.
+needs 3.12 or later and its own dependencies, so it runs through uv from a
+shallow checkout of ci-infra at `VLLM_CI_BRANCH`, as the collect steps do,
+under the Python that made the function record (`record_python`).
 """
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
 import urllib.request
+import zlib
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Optional
 
 SELECTOR_ENV_VAR = "VLLM_CI_SELECTOR"
@@ -49,6 +52,17 @@ RECORD_URL = (
 # Tells ci-select which function table to download instead of following
 # latest.json itself (ci_selector/scripts/fetch_functions.py reads it).
 FNREC_COMMIT_ENV = "CI_SELECTOR_FUNCTION_RECORD_COMMIT"
+TABLE_URL = "https://vllm-ci-selector.s3.us-west-2.amazonaws.com/ci/fnrec/{commit}/table.json.gz"
+# ci-select reads a function record only under the Python minor that recorded
+# it: names differ across minors (3.14 builds annotations in `__annotate__`
+# functions, PEP 649), so on any other it drops nothing. It runs under the
+# record's own Python, read off the table; this one when the table does not
+# say, which is the oldest ci-select supports.
+DEFAULT_SELECTOR_PYTHON = "3.12"
+# Every row's stamp names its interpreters, and the first row sits a few KB
+# into the table, so the head of the download is enough.
+_INTERPRETER = re.compile(rb'"interpreters":\s*\[\s*"(3\.\d+)\.\d+')
+_TABLE_HEAD_BYTES = 1 << 16
 # The whole selector run, fetches included. Past it the build keeps today's
 # rules rather than wait.
 SELECTOR_TIMEOUT_SECONDS = 20 * 60
@@ -174,6 +188,7 @@ def decide(
     # diagnosed from later, without re-running the selector.
     record["explain"] = result.get("explain")
     record["ci_infra_commit"] = result.get("ci_infra_commit")
+    record["selector_python"] = result.get("python")
     emission = result.get("emission") or {}
     if emission.get("omit", True) or not emission.get("keys"):
         record["fallback"] = "selector declined: " + (
@@ -282,6 +297,37 @@ def _latest(recorder: str) -> Dict[str, Any]:
     return pointer
 
 
+def record_python(commit: str) -> str:
+    """The Python minor that made the function record at `commit`, as
+    `ci-select` must run it: read from the first row of the table, which takes
+    the first few KB of a ~130 MB download. DEFAULT_SELECTOR_PYTHON when the
+    table cannot be read or names a Python ci-select does not support.
+
+    vLLM's CI moved to Python 3.14 (vllm#68457), and the records with it. A
+    gate pinned to 3.12 read every row as another Python's and dropped nothing
+    on coverage evidence: build 105155 (vllm#69001) ran 35 test steps for a
+    GLM5-Next change, 32 of them only through the model registry's imports."""
+    head = b""
+    try:
+        with urllib.request.urlopen(TABLE_URL.format(commit=commit), timeout=30) as r:
+            gz = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            while len(head) < _TABLE_HEAD_BYTES:
+                chunk = r.read(8192)
+                if not chunk:
+                    break
+                head += gz.decompress(chunk)
+    except (OSError, ValueError, zlib.error):
+        return DEFAULT_SELECTOR_PYTHON
+    m = _INTERPRETER.search(head)
+    if not m:
+        return DEFAULT_SELECTOR_PYTHON
+    minor = m.group(1).decode()
+    supported = tuple(int(x) for x in minor.split(".")) >= tuple(
+        int(x) for x in DEFAULT_SELECTOR_PYTHON.split(".")
+    )
+    return minor if supported else DEFAULT_SELECTOR_PYTHON
+
+
 def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, Any]:
     """Run `ci-select --emit-keys` on base...head with the latest published
     recordings; returns the emission, the recordings' metadata and the log.
@@ -312,7 +358,8 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
     ci_infra_commit = _run(["git", "-C", checkout, "rev-parse", "HEAD"]).strip()
     project = os.path.join(checkout, "buildkite", "ci_selector")
     uv = _uv(workdir)
-    run = [uv, "run", "--quiet", "--no-dev", "--python", "3.12", "--project", project]
+    python = record_python(records["fnrec"]["commit"])
+    run = [uv, "run", "--quiet", "--no-dev", "--python", python, "--project", project]
     data = os.path.join(workdir, "data")
     explain_path = os.path.join(workdir, "explain.json")
     _run(
@@ -367,6 +414,7 @@ def run_ci_select(repo: str, base: str, head: str, pipeline: str) -> Dict[str, A
         "records": records,
         "log": out.stderr[-4000:],
         "ci_infra_commit": ci_infra_commit,
+        "python": python,
     }
 
 
