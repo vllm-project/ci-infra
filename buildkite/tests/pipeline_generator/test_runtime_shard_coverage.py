@@ -73,6 +73,83 @@ def test_an_inventory_that_omits_a_reported_test_fails_closed():
     assert "`extra`" in text
 
 
+SCHEMA = "tests/entrypoints/openai/test_openai_schema.py::test_openapi_stateless"
+
+
+def test_sub_tests_of_a_collected_test_count_as_that_test():
+    # schemathesis collects one item and reports one sub-test per API operation
+    # (vllm builds 105254 and 105256: 24 of these failed the check).
+    ran = [SCHEMA, f"{SCHEMA}[GET /ping]", f"{SCHEMA}[POST /v1/completions]"]
+    records = [
+        _record(0, ran, expected=[SCHEMA, "f.py::u"], planned=[SCHEMA]),
+        _record(1, ["f.py::u"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unexpected"] == [] and result["missed"] == []
+    assert result["duplicated"] == {} and result["unverified"] is None
+    assert coverage.report([result])[0] == "success"
+
+
+def test_sub_tests_alone_still_show_their_collected_test_ran():
+    ran = [f"{SCHEMA}[GET /ping]"]
+    records = [_record(0, ran, expected=[SCHEMA], planned=[SCHEMA]), _record(1, [])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["missed"] == [] and result["unexpected"] == []
+    assert result["unverified"] is None
+
+
+def test_a_parametrized_test_with_sub_tests_folds_to_its_own_case():
+    ran = ["f.py::t[a]", "f.py::t[a][GET /ping]"]
+    expected = ["f.py::t[a]"]
+    records = [_record(0, ran, expected=expected, planned=expected), _record(1, [])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unexpected"] == [] and result["unverified"] is None
+
+
+def test_a_sub_test_whose_own_text_has_brackets_still_folds():
+    ran = [f"{SCHEMA}[GET /items[0]]", "f.py::t[a][x[1]]"]
+    expected = [SCHEMA, "f.py::t[a]"]
+    records = [_record(0, ran, expected=expected, planned=expected), _record(1, [])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unexpected"] == [] and result["missed"] == []
+    assert result["unverified"] is None
+
+
+def test_any_expected_id_folds_however_short():
+    records = [
+        _record(0, ["t[GET /ping]"], expected=["t"], planned=["t"]),
+        _record(1, []),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unexpected"] == [] and result["missed"] == []
+
+
+def test_a_bracketed_test_with_no_collected_parent_stays_unexpected():
+    records = [
+        _record(0, ["f.py::t", "f.py::v[1]"], expected=["f.py::t"]),
+        _record(1, []),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["unexpected"] == ["f.py::v[1]"]
+    assert result["unverified"] == "1 tests ran that aren't in the full test list"
+
+
+def test_a_collected_case_is_matched_as_itself_not_folded():
+    expected = ["f.py::t", "f.py::t[1]"]
+    records = [_record(0, ["f.py::t[1]"], expected=expected), _record(1, ["f.py::t"])]
+    [result] = coverage.compare(STEPS, records)
+    assert result["missed"] == [] and result["duplicated"] == {}
+
+
+def test_sub_tests_of_one_test_on_two_shards_are_a_duplicate():
+    records = [
+        _record(0, [f"{SCHEMA}[GET /ping]"], expected=[SCHEMA]),
+        _record(1, [f"{SCHEMA}[GET /health]"]),
+    ]
+    [result] = coverage.compare(STEPS, records)
+    assert result["duplicated"] == {SCHEMA: [0, 1]}
+
+
 def test_retry_advice_omits_deterministic_inventory_errors(monkeypatch):
     records = [_record(0, ["a", "extra"], expected=["a"]), _record(1, [])]
     monkeypatch.setenv(coverage.STEPS_ENV, json.dumps(STEPS))

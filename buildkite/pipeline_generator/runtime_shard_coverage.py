@@ -27,7 +27,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
 ARTIFACTS = ".runtime-shard-coverage/*/*.json"
@@ -70,6 +70,33 @@ def _expected_from_attempts(records, step, position, shard):
     return max(valid or candidates, key=lambda record: (record["retry"], record["finished_at"]))[
         "expected"
     ]
+
+
+def _as_collected(nodeid: str, expected: Set[str]) -> str:
+    """The collected test a reported ID belongs to.
+
+    schemathesis collects one item and reports one sub-test per API operation as
+    `<collected ID>[<operation>]`, and the operation can contain `[` itself. A
+    reported ID that isn't expected counts as the longest expected ID it starts
+    with, followed by `[`. Under pytest 9.2 nothing else in vLLM's test
+    requirements reports an ID it didn't collect: built-in and unittest
+    sub-tests, reruns and hypothesis report the collected ID.
+
+    Args:
+        nodeid: A test ID a shard reported.
+        expected: The command's expected test IDs.
+
+    Returns:
+        The collected test's ID, or `nodeid` itself.
+    """
+    if nodeid in expected or not nodeid.endswith("]"):
+        return nodeid
+    end = nodeid.rfind("[")
+    while end > 0:
+        if nodeid[:end] in expected:
+            return nodeid[:end]
+        end = nodeid.rfind("[", 0, end)
+    return nodeid
 
 
 def compare(
@@ -119,14 +146,21 @@ def compare(
             unfinished_planned = set()
             unknown_unfinished_plan = False
             shards_of = {}  # test ID -> the shards that reported it
+            expected = _expected_from_attempts(
+                records, step_key, position, command["fallback"]
+            )
+            expected_ids = set(expected or [])
             for shard in command["owners"]:
                 record = latest.get((step_key, position, shard))
                 if record is None:
                     missing.append(shard)
                     continue
                 planned = record.get("planned")
-                ran.update(record["ran"])
-                for nodeid in set(record["ran"]):
+                reported = {
+                    _as_collected(nodeid, expected_ids) for nodeid in record["ran"]
+                }
+                ran.update(reported)
+                for nodeid in reported:
                     shards_of.setdefault(nodeid, []).append(shard)
                 if not record["finished"]:
                     unfinished.append(shard)
@@ -137,9 +171,6 @@ def compare(
                         unknown_unfinished_plan = True
                 elif isinstance(planned, list):
                     finished_planned.update(planned)
-            expected = _expected_from_attempts(
-                records, step_key, position, command["fallback"]
-            )
             unexpected = sorted(ran - set(expected)) if expected is not None else []
             result = {
                 "step": step_key,
