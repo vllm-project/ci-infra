@@ -304,6 +304,8 @@ class ShardPlugin:
         self._active_nodeid = None
         self._subtest_failed = set()
         self.record_path = None
+        self._session = None
+        self._recorded_finish = None
 
     def pytest_ignore_collect(self, collection_path, config):
         """A directory-discovered file planned whole for another shard, or
@@ -660,8 +662,9 @@ class ShardPlugin:
             # last file's.
             self._say(f"+++ :test_tube: {self.label}: results")
 
-    @pytest.hookimpl(hookwrapper=True)
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_sessionfinish(self, session, exitstatus):
+        self._session = session
         # Every test of the command went to other shards or already passed on an
         # earlier attempt: nothing to run here is not a failure. A command that
         # collects nothing at all, failed collection, or lost an outstanding
@@ -690,7 +693,25 @@ class ShardPlugin:
             int(pytest.ExitCode.INTERRUPTED),
             int(pytest.ExitCode.INTERNAL_ERROR),
         )
+        self._recorded_finish = (not stopped, final_status)
         self._finish_record(finished=not stopped, exitstatus=final_status)
+
+    def pytest_unconfigure(self, config):
+        # Catch an outer conftest `tryfirst=True` sessionfinish wrapper that
+        # mutates `session.exitstatus` or raises after our wrapper resumed.
+        if self._session is None or self._recorded_finish is None:
+            return
+        final_status = int(self._session.exitstatus)
+        if sys.exc_info()[0] is not None and final_status == int(pytest.ExitCode.OK):
+            final_status = int(pytest.ExitCode.INTERNAL_ERROR)
+        stopped = self._session.shouldstop or self._session.shouldfail or final_status in (
+            int(pytest.ExitCode.INTERRUPTED),
+            int(pytest.ExitCode.INTERNAL_ERROR),
+        )
+        updated = (not stopped, final_status)
+        if updated != self._recorded_finish:
+            self._recorded_finish = updated
+            self._finish_record(finished=not stopped, exitstatus=final_status)
 
 
 def _classify_phases(phases):

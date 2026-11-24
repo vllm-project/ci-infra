@@ -433,12 +433,7 @@ def build_retry_plan(
     #    relative to the base full attempt's `planned` list.
     for index, record in enumerate(chain):
         exitstatus = record.get("exitstatus")
-        if (
-            record.get("finished")
-            and _is_int(exitstatus)
-            and exitstatus != 0
-            and not record.get("failed")
-        ):
+        if _is_int(exitstatus) and exitstatus != 0 and not record.get("failed"):
             return empty
         if index == 0 or record.get("skipped_command"):
             continue

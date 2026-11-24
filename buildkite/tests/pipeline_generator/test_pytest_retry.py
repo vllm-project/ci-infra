@@ -2600,6 +2600,67 @@ def test_review5_sessionfinish_exception_is_recorded_as_failure_and_blocks_skip(
     env1 = {"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-1", "BUILDKITE_RETRY_COUNT": "1"}
     assert pr.maybe_skip_command("k", 0, 0, str(artifacts_root), str(cov_dir), env=env1) is False
 
+    # Executing Attempt 1 MUST also run full (not skip test_passes via Tiers 2/3)!
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-1",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+        extra_env={"RAISE_FINALIZER": "0"},
+    )
+    assert run1.returncode == 0, run1.stdout + run1.stderr
+    assert rec1["mode"] == "full"
+    assert rec1["ran"] == ["tests/pkg/test_ok.py::test_passes"]
+
+
+def test_review6_outer_tryfirst_sessionfinish_wrapper_failure_is_captured(tmp_path):
+    # Round 6 Finding 2: A conftest pytest_sessionfinish hookwrapper with
+    # tryfirst=True resumes AFTER our wrapper. Both mutating session.exitstatus
+    # and raising after yield MUST be recorded and prevent skipping on retry.
+    for mode in ("exitstatus", "raise"):
+        case_dir = tmp_path / mode
+        _make_project(
+            case_dir,
+            {
+                "pkg/conftest.py": (
+                    "import os, pytest\n"
+                    "@pytest.hookimpl(hookwrapper=True, tryfirst=True)\n"
+                    "def pytest_sessionfinish(session, exitstatus):\n"
+                    "    yield\n"
+                    "    fail = os.environ.get('WRAPPER_FAIL')\n"
+                    "    if fail == 'exitstatus':\n"
+                    "        session.exitstatus = 1\n"
+                    "    elif fail == 'raise':\n"
+                    "        raise RuntimeError('outer wrapper boom')\n"
+                ),
+                "pkg/test_ok.py": "def test_passes(): pass\n",
+            },
+        )
+        plan = _simple_plan({"tests/pkg/test_ok.py": 0}, shards=1, single_job=True)
+        artifacts_root = case_dir / "artifacts"
+        cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+        run0, rec0 = _run_plugin_pytest(
+            case_dir,
+            plan,
+            ["-v", "pkg"],
+            shard=0,
+            job_id="job-0",
+            coverage_dir=cov_dir,
+            retry=0,
+            extra_env={"WRAPPER_FAIL": mode},
+        )
+        assert run0.returncode != 0
+        assert rec0["exitstatus"] != 0
+        plan1 = pr.build_retry_plan([rec0], "k", 0, 0, build_id="b1", current_retry=1)
+        assert plan1["active"] is False
+        assert plan1["skip_command"] is False
+        assert plan1["passed"] == set()
+
 
 def test_review5_shrinking_collection_losing_unpassed_test_fails_retry_instead_of_false_green(
     tmp_path,
