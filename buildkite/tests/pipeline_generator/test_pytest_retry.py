@@ -3086,6 +3086,60 @@ def test_review10_outer_pre_yield_raise_unconfigure_with_failed_test_and_tier2_g
     ]
 
 
+def test_review11_collection_crash_after_completed_attempt_is_not_hidden_by_coverage(
+    tmp_path,
+):
+    # Round 11 Finding 2: Attempt 0 completes cleanly; Attempt 1 crashes
+    # (os._exit(137)) DURING module import / collection before pytest_collection_finish.
+    # Because pytest_sessionstart wrote an unfinished header for retry=1,
+    # runtime_shard_coverage MUST select retry=1 and report shard 0 unfinished!
+    import runtime_shard_coverage as coverage
+
+    _make_project(
+        tmp_path,
+        {
+            "pkg/test_imp.py": (
+                "import os\n"
+                "if os.environ.get('BUILDKITE_RETRY_COUNT') == '1':\n"
+                "    os._exit(137)\n"
+                "def test_ok(): pass\n"
+            ),
+            "pkg/test_other.py": "def test_other(): pass\n",
+        },
+    )
+    plan = _simple_plan(
+        {"tests/pkg/test_imp.py": 0, "tests/pkg/test_other.py": 1},
+        shards=2,
+        single_job=False,
+    )
+    art = tmp_path / "artifacts"
+    cov = art / ".runtime-shard-coverage"
+
+    r0_s0, rec0_s0 = _run_plugin_pytest(
+        tmp_path, plan, ["-v", "pkg"], shard=0, job_id="j0-s0", coverage_dir=cov, retry=0
+    )
+    r0_s1, _ = _run_plugin_pytest(
+        tmp_path, plan, ["-v", "pkg"], shard=1, job_id="j0-s1", coverage_dir=cov, retry=0
+    )
+    assert r0_s0.returncode == 0 and r0_s1.returncode == 0
+    assert rec0_s0["finished"] is True
+
+    # Attempt 1 crashes during collection!
+    r1_s0, rec1_s0 = _run_plugin_pytest(
+        tmp_path, plan, ["-v", "pkg"], shard=0, job_id="j1-s0", coverage_dir=cov, retry=1
+    )
+    assert r1_s0.returncode == 137
+    assert rec1_s0 is not None
+    assert rec1_s0["retry"] == 1
+    assert rec1_s0["finished"] is False
+
+    steps = {"k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0, 1]}]}
+    records = pr.read_records(str(art))
+    [result] = coverage.compare(steps, records, build_id="b1")
+    assert result["unfinished"] == [0]
+    assert coverage.report([result])[0] == "error"
+
+
 def test_review7_extra_occurrence_of_previously_passed_test_invalidates_skip_before_deselect(
     tmp_path,
 ):

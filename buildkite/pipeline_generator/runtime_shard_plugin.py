@@ -539,6 +539,13 @@ class ShardPlugin:
         )
         return None
 
+    def pytest_sessionstart(self, session):
+        if session.config.getoption("collectonly"):
+            return
+        # Write an unfinished header before collection so a crash/OOM during
+        # module import still leaves a retry-numbered record for #884 coverage.
+        self._start_record()
+
     def pytest_collection_finish(self, session):
         if session.config.getoption("collectonly"):
             self.coverage_dir = None
