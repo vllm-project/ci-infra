@@ -257,6 +257,12 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 SetupProfile = Literal["nvidia", "amd", "none"]
 
 
+def _get_setup_profile(step: Step) -> SetupProfile:
+    if step.device == DeviceType.INTEL_GPU_K8S:
+        return "none"
+    return "nvidia"
+
+
 def _get_timeout_in_minutes(
     timeout_in_minutes: Optional[int],
 ) -> Optional[int]:
@@ -348,6 +354,7 @@ K8S_PLUGIN_DEVICES = (
     DeviceType.A100.value,
     DeviceType.B200_K8S.value,
     DeviceType.L4.value,
+    DeviceType.INTEL_GPU_K8S.value,
 )
 
 
@@ -363,8 +370,9 @@ def _get_step_plugin(step: Step):
         DeviceType.CPU_MEDIUM,
     )
     use_arm64 = step.device in (DeviceType.DGX_SPARK, DeviceType.GH200)
+    use_xpu = step.device == DeviceType.INTEL_GPU_K8S
     if _uses_k8s_plugin(step):
-        return get_k8s_plugin(step, get_image(use_cpu))
+        return get_k8s_plugin(step, get_image(use_cpu, xpu=use_xpu))
     elif step.device == DeviceType.ARM_CPU:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(True, True))}
     else:
@@ -423,6 +431,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_HPU
     elif step.device == DeviceType.INTEL_GPU:
         return AgentQueue.INTEL_GPU
+    elif step.device == DeviceType.INTEL_GPU_K8S:
+        return AgentQueue.INTEL_GPU_K8S
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
@@ -554,6 +564,8 @@ def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool
             and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
             and step.key not in KERNREC_AMD_SKIP_STEPS
         )
+    elif setup_profile == "none":
+        enabled = False
     else:
         enabled = kernrec_enabled()
     return (
@@ -1486,7 +1498,10 @@ def convert_group_step_to_buildkite_step(
                 continue
 
             # command step
-            step_commands = _prepare_commands(step, variables_to_inject)
+            setup_profile = _get_setup_profile(step)
+            step_commands = _prepare_commands(
+                step, variables_to_inject, setup_profile
+            )
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
@@ -1510,12 +1525,11 @@ def convert_group_step_to_buildkite_step(
                     "VLLM_KERNEL_SYMBOL_MAP": "1",
                 }
             # Each recorder writes under its own <checkout>/.<name>/<job-id>,
-            # which the agent collects from the checkout. _prepare_commands
-            # above used its default profile, so this is the nvidia path.
+            # which the agent collects from the checkout.
             recorder_globs: List[str] = []
-            if _kernrec_applies(step):
+            if _kernrec_applies(step, setup_profile):
                 recorder_globs.append(KERNREC_ARTIFACT_PATH)
-            if _fnrec_applies(step, "nvidia"):
+            if _fnrec_applies(step, setup_profile):
                 recorder_globs.extend(FNREC_ARTIFACT_PATHS)
             if recorder_globs:
                 buildkite_step.artifact_paths = _merge_artifact_paths(
@@ -1556,7 +1570,9 @@ def convert_group_step_to_buildkite_step(
                 )
             elif step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    _recording_timeout(step, step.timeout_in_minutes)
+                    _recording_timeout(
+                        step, step.timeout_in_minutes, setup_profile
+                    )
                 )
 
             buildkite_step.deferred = not _step_should_run(step, list_file_diff)
