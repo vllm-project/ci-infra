@@ -1021,11 +1021,12 @@ def guard(
         ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
     )
     if enable_retry and step_key:
+        fallback = planned.get("fallback", 0)
         command = (
             f'{{ if [ -n "$${{CI_TEST_RETRY_IN:-}}" ]'
             f" && python3 {PLUGIN_DIR}/{RETRY_HELPER_MODULE}.py"
             f' maybe-skip-command {shlex.quote(step_key)} {position}'
-            f' "$${{BUILDKITE_PARALLEL_JOB:-0}}";'
+            f' "$${{BUILDKITE_PARALLEL_JOB:-0}}" {fallback} {shards};'
             f" then :; else {command}; fi; }}"
         )
     if shards <= 1:

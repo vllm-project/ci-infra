@@ -198,9 +198,9 @@ def _rec(retry, mode="full", finished=True, passed=(), ran=None, planned=None, e
 
 def test_active_chain_walks_back_to_newest_full_attempt():
     records = [
-        _rec(0, "full", passed=["a.py::t1"]),
-        _rec(1, "full", passed=["a.py::t2"]),  # /ci retry resets pass history!
-        _rec(2, "test-retry", passed=["a.py::t3"]),
+        _rec(0, "full", passed=["a.py::t1"], planned=["a.py::t1", "a.py::t2", "a.py::t3"]),
+        _rec(1, "full", passed=["a.py::t2"], planned=["a.py::t1", "a.py::t2", "a.py::t3"]),  # /ci retry resets pass history!
+        _rec(2, "test-retry", passed=["a.py::t3"], planned=["a.py::t1", "a.py::t3"]),
     ]
     chain = pr.active_chain(records, "k", 0, 0, build_id="b1", before_retry=3)
     assert [r["retry"] for r in chain] == [1, 2]
@@ -277,12 +277,13 @@ def test_build_retry_plan_unfinished_attempt_skips_completed_files_not_command()
     assert plan["passed"] == {"a.py::t1", "a.py::t2"}
 
 
-def test_build_retry_plan_collection_failed_planned_none_never_skips_command_or_files():
+def test_build_retry_plan_collection_failed_planned_none_falls_back_to_full():
     records = [_rec(0, "full", finished=True, passed=["a.py::t1"], planned=None)]
     plan = pr.build_retry_plan(records, "k", 0, 0, build_id="b1", current_retry=1)
+    assert plan["active"] is False
     assert plan["skip_command"] is False
     assert plan["skip_files"] == set()
-    assert plan["passed"] == {"a.py::t1"}
+    assert plan["passed"] == set()
 
 
 def test_maybe_skip_command_writes_skipped_jsonl_record_with_0777_dirs(tmp_path):
@@ -1460,14 +1461,15 @@ def test_coverage_broken_chain_and_unfinished_test_retry():
     assert res_ou["unfinished"] == [0]
     assert res_ou["not_run"] == ["b"]
 
-    # When full attempt had planned=None and test-retry is unfinished, fallback to record planned.
+    # When full attempt had planned=None (collection failed), chain_passed fails
+    # closed (does not credit Attempt 0) and unfinished retry falls back to record planned.
     no_base_plan_unf = [
         _rec(0, "full", finished=False, passed=["a"], ran=["a"], planned=None, expected=["a", "b", "c"]),
         _rec(1, "test-retry", finished=False, passed=[], ran=[], planned=["b"]),
     ]
     [res_fb_unf] = coverage.compare(steps, no_base_plan_unf, build_id="b1")
     assert res_fb_unf["not_run"] == ["b"]
-    assert res_fb_unf["missed"] == ["c"]
+    assert res_fb_unf["missed"] == ["a", "c"]
 
 
 def test_plugin_classify_phases_and_finish_leftovers_and_retry_log(tmp_path, monkeypatch):
@@ -1664,8 +1666,16 @@ def test_runtime_shard_single_job_plan_guard_and_setup(tmp_path, monkeypatch):
     assert "maybe-skip-command" not in g_off
     assert 'case "$${BUILDKITE_PARALLEL_JOB:-0}" in' in g_off
     g_single = rs.guard("pytest a.py", planned_one, shards=1, step_key="k", enable_retry=True)
-    assert "maybe-skip-command" in g_single
+    assert 'maybe-skip-command k 0 "$${BUILDKITE_PARALLEL_JOB:-0}" 0 1' in g_single
     assert 'case "$${BUILDKITE_PARALLEL_JOB:-0}" in' not in g_single
+    g_fallback = rs.guard(
+        "pytest a.py",
+        {"position": 0, "files": {"a.py": 0}, "split": {}, "fallback": 1},
+        shards=2,
+        step_key="k",
+        enable_retry=True,
+    )
+    assert 'maybe-skip-command k 0 "$${BUILDKITE_PARALLEL_JOB:-0}" 1 2' in g_fallback
 
     # shard_job_setup(enable_retry=True) emits exact prepare command and unpacks both modules.
     setup = rs.shard_job_setup("/checkout", enable_retry=True)
@@ -2177,6 +2187,175 @@ def test_review2_crashed_full_retry_after_completed_test_retry_is_not_hidden():
     assert result["unfinished"] == [0]
     assert result["not_run"] == ["a.py::a", "a.py::b"]
     assert coverage.report([result])[0] == "error"
+
+
+# --- Peer review round 3 regression tests ---
+
+
+def test_review3_collection_failed_base_falls_back_to_full_preserving_duplicate_protection(
+    tmp_path,
+):
+    # Finding 1: If Attempt 0 failed collection (planned=None), Attempt 1 MUST
+    # fall back to mode="full" so its real planned list (including duplicates
+    # under --keep-duplicates) becomes the chain base for Attempt 2.
+    _make_project(
+        tmp_path,
+        {
+            "pkg/test_dup.py": (
+                "import os\n"
+                "seen = 0\n"
+                "def test_x():\n"
+                "    global seen\n"
+                "    seen += 1\n"
+                "    if os.environ.get('CRASH_SECOND') == '1' and seen == 2:\n"
+                "        os._exit(137)\n"
+            )
+        },
+    )
+    args = ["-v", "--keep-duplicates", "pkg/test_dup.py", "pkg/test_dup.py"]
+    plan = _simple_plan({"tests/pkg/test_dup.py": 0}, shards=1, single_job=True)
+    plan["commands"][0]["args"] = args
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    # Attempt 0: collection failure left planned=None.
+    _write_jsonl(
+        artifacts_root,
+        "job-0",
+        0,
+        [_start(retry=0, mode="full", planned=None), _finish(True)],
+    )
+    # Attempt 1: tagged retry falls back to full (planned=None base), passes occ 1, crashes occ 2.
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        args,
+        shard=0,
+        job_id="job-1",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+        extra_env={"CRASH_SECOND": "1"},
+    )
+    assert run1.returncode == 137
+    assert rec1["mode"] == "full"
+    assert rec1["planned"] == ["tests/pkg/test_dup.py::test_x", "tests/pkg/test_dup.py::test_x"]
+
+    # Attempt 2: must NOT deselect test_x because Attempt 1 only passed 1 of 2 occurrences.
+    run2, rec2 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        args,
+        shard=0,
+        job_id="job-2",
+        coverage_dir=cov_dir,
+        retry=2,
+        retry_in=artifacts_root,
+        extra_env={"CRASH_SECOND": "0"},
+    )
+    assert run2.returncode == 0, run2.stdout + run2.stderr
+    assert rec2["mode"] == "test-retry"
+    assert rec2["passed_counts"] == {"tests/pkg/test_dup.py::test_x": 2}
+
+
+def test_review3_tier1_does_not_skip_inventory_owner_when_expected_is_missing(tmp_path):
+    # Finding 2: When the inventory-owning shard (fallback) passed all its tests
+    # on Attempt 0 but failed to capture expected (expected=None), Tier 1 MUST
+    # NOT skip the command on Attempt 1 so pytest can rebuild the inventory
+    # while skipping the already-passed tests.
+    import runtime_shard_coverage as coverage
+
+    _make_project(
+        tmp_path,
+        {
+            "pkg/test_a.py": "def test_a(): pass\n",
+            "pkg/test_b.py": "def test_b(): pass\n",
+        },
+    )
+    plan = _simple_plan(
+        {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 1}, shards=2, single_job=False
+    )
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    # Attempt 0: shard 0 passed test_a but inventory failed (expected=None); shard 1 passed test_b.
+    _write_jsonl(
+        artifacts_root,
+        "job-0-s0",
+        0,
+        [
+            _start(shard=0, retry=0, mode="full", expected=None, planned=["tests/pkg/test_a.py::test_a"]),
+            _test("tests/pkg/test_a.py::test_a", True),
+            _finish(True),
+        ],
+    )
+    _write_jsonl(
+        artifacts_root,
+        "job-0-s1",
+        0,
+        [
+            _start(shard=1, retry=0, mode="full", expected=None, planned=["tests/pkg/test_b.py::test_b"]),
+            _test("tests/pkg/test_b.py::test_b", True),
+            _finish(True),
+        ],
+    )
+
+    env1 = {
+        "BUILDKITE_BUILD_ID": "b1",
+        "BUILDKITE_JOB_ID": "job-1-s0",
+        "BUILDKITE_RETRY_COUNT": "1",
+        pr.RETRY_IN_ENV: str(artifacts_root),
+        "RUNTIME_SHARD_COVERAGE_DIR": str(cov_dir),
+    }
+    # Non-owner shard 1 (fallback=0, shards=2) CAN Tier-1 skip, owner shard 0 CANNOT!
+    assert (
+        pr.maybe_skip_command("k", 0, 1, str(artifacts_root), str(cov_dir), env=env1, needs_expected=False)
+        is True
+    )
+    assert (
+        pr.maybe_skip_command("k", 0, 0, str(artifacts_root), str(cov_dir), env=env1, needs_expected=True)
+        is False
+    )
+    # CLI parses `<step> <pos> <shard> <fallback> <shards>` accurately:
+    cli_owner = subprocess.run(
+        [pr.sys.executable, pr.__file__, "maybe-skip-command", "k", "0", "0", "0", "2"],
+        env={**os.environ, **env1},
+        capture_output=True,
+        text=True,
+    )
+    assert cli_owner.returncode == pr.RUN_COMMAND_EXIT
+    cli_single = subprocess.run(
+        [pr.sys.executable, pr.__file__, "maybe-skip-command", "k", "0", "0", "0", "1"],
+        env={**os.environ, **env1},
+        capture_output=True,
+        text=True,
+    )
+    assert cli_single.returncode == pr.SKIP_COMMAND_EXIT
+
+    # Launching pytest on shard 0 recovers expected without re-running test_a, and #884 goes green!
+    (cov_dir / "job-1-s0" / "0.jsonl").unlink()
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-1-s0",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+    )
+    assert run1.returncode == 0, run1.stdout + run1.stderr
+    assert rec1["mode"] == "test-retry"
+    assert rec1["ran"] == []
+    assert rec1["expected"] == ["tests/pkg/test_a.py::test_a", "tests/pkg/test_b.py::test_b"]
+
+    steps = {"k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0, 1]}]}
+    records = pr.read_records(str(artifacts_root))
+    [result] = coverage.compare(steps, records, build_id="b1")
+    assert result["unverified"] is None
+    assert result["missed"] == []
+    assert coverage.report([result])[0] == "success"
+
 
 
 

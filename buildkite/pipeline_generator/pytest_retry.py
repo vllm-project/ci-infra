@@ -337,11 +337,12 @@ def chain_passed(chain: Sequence[Dict[str, Any]]) -> Set[str]:
     """
     if not chain:
         return set()
-    planned_counts: Dict[str, int] = {}
     base_planned = chain[0].get("planned")
-    if isinstance(base_planned, list):
-        for nodeid in base_planned:
-            planned_counts[nodeid] = planned_counts.get(nodeid, 0) + 1
+    if not isinstance(base_planned, list):
+        return set()
+    planned_counts: Dict[str, int] = {}
+    for nodeid in base_planned:
+        planned_counts[nodeid] = planned_counts.get(nodeid, 0) + 1
 
     passed: Set[str] = set()
     for record in chain:
@@ -365,11 +366,13 @@ def build_retry_plan(
     shard: int,
     build_id: Optional[str],
     current_retry: int,
+    needs_expected: bool = False,
 ) -> Dict[str, Any]:
     """Compute the 3-tier skip plan for a tagged test retry.
 
-    Requires an intact active chain reaching back to a `full` attempt. Any gap
-    or missing full base fails safe by returning an empty plan (full rerun).
+    Requires an intact active chain reaching back to a `full` attempt with a
+    valid `planned` list. Any gap, missing full base, or failed base
+    collection fails safe by returning an empty plan (full rerun).
 
     Args:
         records: Parsed prior-attempt records.
@@ -378,6 +381,9 @@ def build_retry_plan(
         shard: Parallel shard index.
         build_id: Current Buildkite build ID, or None locally.
         current_retry: Current `BUILDKITE_RETRY_COUNT`.
+        needs_expected: True when this shard owns the command's coverage
+            inventory (`shards >= 2` and `shard == fallback`), so Tier 1 must
+            not skip the command while `has_expected` is still False.
 
     Returns:
         Dict with `active` (whether an intact prior chain was found), `passed`
@@ -405,6 +411,9 @@ def build_retry_plan(
     )
     if not chain or chain[0].get("mode", "full") != "full":
         return empty
+    base_planned = chain[0].get("planned")
+    if not isinstance(base_planned, list):
+        return empty
 
     passed = chain_passed(chain)
     has_expected = False
@@ -413,22 +422,26 @@ def build_retry_plan(
         if isinstance(expected, list) and len(expected) > 0:
             has_expected = True
 
-    base_planned = chain[0].get("planned")
     skip_command = False
     skip_files: Set[str] = set()
 
-    if isinstance(base_planned, list):
-        by_file: Dict[str, List[str]] = {}
-        for nodeid in base_planned:
-            file_path = nodeid.split("::")[0]
-            by_file.setdefault(file_path, []).append(nodeid)
-        for file_path, nodeids in by_file.items():
-            if nodeids and set(nodeids).issubset(passed):
-                skip_files.add(file_path)
-        # Never skip a command whose collection was empty (e.g. exit 5 on a
-        # broken selector); only skip when at least one planned test passed.
-        if base_planned and chain[-1]["finished"] and set(base_planned).issubset(passed):
-            skip_command = True
+    by_file: Dict[str, List[str]] = {}
+    for nodeid in base_planned:
+        file_path = nodeid.split("::")[0]
+        by_file.setdefault(file_path, []).append(nodeid)
+    for file_path, nodeids in by_file.items():
+        if nodeids and set(nodeids).issubset(passed):
+            skip_files.add(file_path)
+    # Never skip a command whose collection was empty (e.g. exit 5 on a
+    # broken selector), or whose inventory-owning shard still lacks a valid
+    # expected list for #884 coverage.
+    if (
+        base_planned
+        and chain[-1]["finished"]
+        and (not needs_expected or has_expected)
+        and set(base_planned).issubset(passed)
+    ):
+        skip_command = True
 
     return {
         "active": True,
@@ -599,6 +612,7 @@ def maybe_skip_command(
     retry_in_dir: str,
     coverage_dir: Optional[str],
     env: Optional[Dict[str, str]] = None,
+    needs_expected: bool = False,
 ) -> bool:
     """Tier 1 check: skip launching pytest when every planned test already passed.
 
@@ -613,6 +627,8 @@ def maybe_skip_command(
         retry_in_dir: Directory containing downloaded prior JSONL records.
         coverage_dir: Output directory for this attempt's JSONL record.
         env: Environment mapping (defaults to `os.environ`).
+        needs_expected: True when this shard owns the command's coverage
+            inventory so Tier 1 waits until a valid inventory exists.
 
     Returns:
         True when the command was skipped and pytest should not be launched.
@@ -633,6 +649,7 @@ def maybe_skip_command(
         shard,
         build_id=env_map.get("BUILDKITE_BUILD_ID"),
         current_retry=current_retry,
+        needs_expected=needs_expected,
     )
     if not plan["skip_command"]:
         return False
@@ -675,9 +692,19 @@ def _main(argv: Sequence[str]) -> int:
         step = argv[2]
         position = int(argv[3])
         shard = int(argv[4])
+        needs_expected = (
+            len(argv) >= 7 and int(argv[6]) >= 2 and shard == int(argv[5])
+        )
         retry_in = os.environ.get(RETRY_IN_ENV, "")
         coverage_dir = os.environ.get("RUNTIME_SHARD_COVERAGE_DIR")
-        skipped = maybe_skip_command(step, position, shard, retry_in, coverage_dir)
+        skipped = maybe_skip_command(
+            step,
+            position,
+            shard,
+            retry_in,
+            coverage_dir,
+            needs_expected=needs_expected,
+        )
         return SKIP_COMMAND_EXIT if skipped else RUN_COMMAND_EXIT
     return 2
 

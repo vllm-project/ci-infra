@@ -303,8 +303,10 @@ class ShardPlugin:
         self.record_path = None
 
     def pytest_ignore_collect(self, collection_path, config):
-        """A file planned whole for another shard, or whose tests all passed
-        earlier in the active retry chain, isn't even imported."""
+        """A directory-discovered file planned whole for another shard, or
+        whose tests all passed earlier in the active retry chain, isn't even
+        imported (explicit file CLI arguments bypass this hook in pytest and
+        are deselected in `pytest_collection_modifyitems`)."""
         relative = os.path.relpath(str(collection_path), str(config.rootpath))
         relative_posix = relative.replace(os.sep, "/")
         if not self.single_job:
