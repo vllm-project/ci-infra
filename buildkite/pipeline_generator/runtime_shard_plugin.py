@@ -528,7 +528,7 @@ class ShardPlugin:
             planned=self.planned,
         )
 
-    def _finish_record(self, finished):
+    def _finish_record(self, finished, exitstatus=None):
         """Flush any unfinished phase records and append the `finish` trailer."""
         for nodeid in sorted(self._phases):
             pytest_retry.append_jsonl_event(
@@ -541,14 +541,14 @@ class ShardPlugin:
                 },
             )
         self._phases.clear()
-        pytest_retry.append_jsonl_event(
-            self.record_path,
-            {
-                "event": "finish",
-                "finished": finished,
-                "finished_at": time.time(),
-            },
-        )
+        payload = {
+            "event": "finish",
+            "finished": finished,
+            "finished_at": time.time(),
+        }
+        if exitstatus is not None:
+            payload["exitstatus"] = int(exitstatus)
+        pytest_retry.append_jsonl_event(self.record_path, payload)
 
     def _where(self):
         """Which of the command's tests run here, and where the rest run, so
@@ -644,6 +644,7 @@ class ShardPlugin:
             # last file's.
             self._say(f"+++ :test_tube: {self.label}: results")
 
+    @pytest.hookimpl(hookwrapper=True)
     def pytest_sessionfinish(self, session, exitstatus):
         # Every test of the command went to other shards or already passed on an
         # earlier attempt: nothing to run here is not a failure. A command that
@@ -654,12 +655,14 @@ class ShardPlugin:
             and not self.collection_failed
         ):
             session.exitstatus = pytest.ExitCode.OK
+        yield
+        final_status = int(session.exitstatus)
         # -x, --maxfail or a Ctrl-C stopped the run: tests here may not have run.
-        stopped = session.shouldstop or session.shouldfail or exitstatus in (
-            pytest.ExitCode.INTERRUPTED,
-            pytest.ExitCode.INTERNAL_ERROR,
+        stopped = session.shouldstop or session.shouldfail or final_status in (
+            int(pytest.ExitCode.INTERRUPTED),
+            int(pytest.ExitCode.INTERNAL_ERROR),
         )
-        self._finish_record(finished=not stopped)
+        self._finish_record(finished=not stopped, exitstatus=final_status)
 
 
 def _classify_phases(phases):

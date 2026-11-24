@@ -91,6 +91,7 @@ def _parse_legacy_json(data: Any) -> Optional[Dict[str, Any]]:
         "mode": mode,
         "finished": data["finished"],
         "finished_at": float(data["finished_at"]),
+        "exitstatus": data.get("exitstatus") if _is_int(data.get("exitstatus")) else None,
         "expected": data.get("expected"),
         "planned": data.get("planned"),
         "ran": sorted(set(data["ran"])),
@@ -146,6 +147,7 @@ def _parse_record_with_reason(path: str) -> tuple:
     failed: Set[str] = set()
     finished = False
     finished_at = 0.0
+    exitstatus: Optional[int] = None
 
     for index, line in enumerate(lines[1:], start=1):
         if not line.strip():
@@ -182,8 +184,12 @@ def _parse_record_with_reason(path: str) -> tuple:
                 event.get("finished_at")
             ):
                 return None, None
+            raw_exit = event.get("exitstatus")
+            if raw_exit is not None and not _is_int(raw_exit):
+                return None, None
             finished = event["finished"]
             finished_at = float(event["finished_at"])
+            exitstatus = raw_exit
 
     return (
         {
@@ -195,6 +201,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             "mode": header["mode"],
             "finished": finished,
             "finished_at": finished_at,
+            "exitstatus": exitstatus,
             "expected": header.get("expected"),
             "planned": header.get("planned"),
             "ran": sorted(ran),
@@ -414,6 +421,38 @@ def build_retry_plan(
     base_planned = chain[0].get("planned")
     if not isinstance(base_planned, list):
         return empty
+
+    base_counts: Dict[str, int] = {}
+    for nodeid in base_planned:
+        base_counts[nodeid] = base_counts.get(nodeid, 0) + 1
+
+    # Fail safe to a full rerun when any attempt in the chain:
+    # 1. exited non-zero without a recorded failed/errored test (e.g. a
+    #    session-finalization hook failure), or
+    # 2. collected new tests, extra duplicate occurrences, or failed collection
+    #    relative to the base full attempt's `planned` list.
+    for index, record in enumerate(chain):
+        exitstatus = record.get("exitstatus")
+        if (
+            record.get("finished")
+            and _is_int(exitstatus)
+            and exitstatus != 0
+            and not record.get("failed")
+        ):
+            return empty
+        if index == 0 or record.get("skipped_command"):
+            continue
+        rec_planned = record.get("planned")
+        if not isinstance(rec_planned, list):
+            return empty
+        rec_counts: Dict[str, int] = {}
+        for nodeid in rec_planned:
+            rec_counts[nodeid] = rec_counts.get(nodeid, 0) + 1
+            if rec_counts[nodeid] > base_counts.get(nodeid, 0):
+                return empty
+        for nodeid in record.get("ran") or ():
+            if nodeid not in base_counts:
+                return empty
 
     passed = chain_passed(chain)
     has_expected = False
@@ -671,7 +710,12 @@ def maybe_skip_command(
         )
         append_jsonl_event(
             path,
-            {"event": "finish", "finished": True, "finished_at": time.time()},
+            {
+                "event": "finish",
+                "finished": True,
+                "finished_at": time.time(),
+                "exitstatus": 0,
+            },
         )
     count = len(plan["base_planned"] or [])
     print(

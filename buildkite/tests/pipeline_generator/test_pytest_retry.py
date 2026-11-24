@@ -84,6 +84,7 @@ def test_parse_jsonl_complete_record(tmp_path):
         "mode": "full",
         "finished": True,
         "finished_at": 123.5,
+        "exitstatus": None,
         "expected": ["a.py::t1", "a.py::t2"],
         "planned": ["a.py::t1", "a.py::t2"],
         "ran": ["a.py::t1", "a.py::t2"],
@@ -310,6 +311,7 @@ def test_maybe_skip_command_writes_skipped_jsonl_record_with_0777_dirs(tmp_path)
     assert rec["mode"] == "test-retry"
     assert rec["retry"] == 1
     assert rec["finished"] is True
+    assert rec["exitstatus"] == 0
     assert rec["skipped_command"] is True
     assert rec["planned"] == ["a.py::t1"]
 
@@ -2355,6 +2357,206 @@ def test_review3_tier1_does_not_skip_inventory_owner_when_expected_is_missing(tm
     assert result["unverified"] is None
     assert result["missed"] == []
     assert coverage.report([result])[0] == "success"
+
+
+# --- Peer review round 4 regression tests ---
+
+
+def test_review4_later_attempt_introducing_new_tests_or_extra_duplicates_invalidates_plan(
+    tmp_path,
+):
+    # Finding 1: Attempt 0 collects [A] and fails; Attempt 1 collects [A, B],
+    # passes A and fails B. Attempt 2 MUST NOT skip the command or file; it
+    # must invalidate the chain and run a fresh full attempt covering A and B.
+    _make_project(
+        tmp_path,
+        {
+            "pkg/test_dyn.py": (
+                "import os, pytest\n"
+                "params = ['a'] if os.environ.get('BUILDKITE_RETRY_COUNT') == '0' else ['a', 'b']\n"
+                "@pytest.mark.parametrize('x', params)\n"
+                "def test_dyn(x):\n"
+                "    retry = os.environ.get('BUILDKITE_RETRY_COUNT')\n"
+                "    if retry == '0':\n"
+                "        assert False\n"
+                "    if retry == '1' and x == 'b':\n"
+                "        assert False\n"
+            )
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_dyn.py": 0}, shards=1, single_job=True)
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path, plan, ["-v", "pkg"], shard=0, job_id="job-0", coverage_dir=cov_dir, retry=0
+    )
+    assert run0.returncode != 0
+    assert rec0["planned"] == ["tests/pkg/test_dyn.py::test_dyn[a]"]
+
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-1",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+    )
+    assert run1.returncode != 0
+    assert rec1["passed"] == ["tests/pkg/test_dyn.py::test_dyn[a]"]
+    assert rec1["failed"] == ["tests/pkg/test_dyn.py::test_dyn[b]"]
+
+    # Attempt 2: Tier 1 must NOT skip; plugin invalidates chain and runs full!
+    env2 = {"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-2", "BUILDKITE_RETRY_COUNT": "2"}
+    assert pr.maybe_skip_command("k", 0, 0, str(artifacts_root), str(cov_dir), env=env2) is False
+    run2, rec2 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-2",
+        coverage_dir=cov_dir,
+        retry=2,
+        retry_in=artifacts_root,
+    )
+    assert run2.returncode == 0, run2.stdout + run2.stderr
+    assert rec2["mode"] == "full"
+    assert rec2["ran"] == [
+        "tests/pkg/test_dyn.py::test_dyn[a]",
+        "tests/pkg/test_dyn.py::test_dyn[b]",
+    ]
+
+    # Extra duplicate occurrence or failed collection (planned=None) or unexpected ran in retry also invalidates:
+    dup_extra = [
+        _rec(0, "full", finished=True, passed=[], ran=["a.py::t1"], planned=["a.py::t1"]),
+        _rec(1, "test-retry", finished=False, passed=["a.py::t1"], ran=["a.py::t1"], planned=["a.py::t1", "a.py::t1"]),
+    ]
+    assert pr.build_retry_plan(dup_extra, "k", 0, 0, build_id="b1", current_retry=2)["active"] is False
+    retry_coll_fail = [
+        _rec(0, "full", finished=True, passed=[], ran=["a.py::t1"], planned=["a.py::t1"]),
+        _rec(1, "test-retry", finished=True, passed=[], ran=[], planned=None),
+    ]
+    assert pr.build_retry_plan(retry_coll_fail, "k", 0, 0, build_id="b1", current_retry=2)["active"] is False
+    extra_ran = [
+        _rec(0, "full", finished=True, passed=[], ran=["a.py::t1"], planned=["a.py::t1"]),
+        _rec(1, "test-retry", finished=True, passed=["a.py::t1"], ran=["a.py::t1", "a.py::t2"], planned=["a.py::t1"]),
+    ]
+    assert pr.build_retry_plan(extra_ran, "k", 0, 0, build_id="b1", current_retry=2)["active"] is False
+
+
+def test_review4_session_level_failure_with_passing_tests_forces_full_rerun(tmp_path):
+    # Finding 2: A session-finish hook sets session.exitstatus = 1 after all
+    # tests pass. The plugin records exitstatus=1, and the next retry MUST NOT
+    # skip the command or tests (forces full rerun).
+    _make_project(
+        tmp_path,
+        {
+            "pkg/conftest.py": (
+                "import os\n"
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if os.environ.get('FAIL_SESSION') == '1':\n"
+                "        session.exitstatus = 1\n"
+            ),
+            "pkg/test_ok.py": "def test_passes(): pass\n",
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_ok.py": 0}, shards=1, single_job=True)
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-0",
+        coverage_dir=cov_dir,
+        retry=0,
+        extra_env={"FAIL_SESSION": "1"},
+    )
+    assert run0.returncode == 1
+    assert rec0["finished"] is True
+    assert rec0["exitstatus"] == 1
+    assert rec0["passed"] == ["tests/pkg/test_ok.py::test_passes"]
+    assert rec0["failed"] == []
+
+    # Tier 1 must NOT skip; Attempt 1 runs full and still catches the session failure!
+    env1 = {"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-1", "BUILDKITE_RETRY_COUNT": "1"}
+    assert pr.maybe_skip_command("k", 0, 0, str(artifacts_root), str(cov_dir), env=env1) is False
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-1",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+        extra_env={"FAIL_SESSION": "1"},
+    )
+    assert run1.returncode == 1
+    assert rec1["mode"] == "full"
+    assert rec1["ran"] == ["tests/pkg/test_ok.py::test_passes"]
+
+    # Reject non-int exitstatus in malformed JSONL finish event:
+    bad_finish = _write_jsonl(
+        tmp_path,
+        "bad-exit",
+        0,
+        [_start(), {"event": "finish", "finished": True, "finished_at": 1.0, "exitstatus": "1"}],
+    )
+    assert pr.parse_record_file(str(bad_finish)) is None
+
+    # Legacy JSON exitstatus parsing (int preserved, non-int normalized to None):
+    leg_ok = tmp_path / "leg_ok.json"
+    leg_ok.write_text(
+        json.dumps(
+            {
+                "step": "k",
+                "position": 0,
+                "shard": 0,
+                "retry": 0,
+                "finished": True,
+                "finished_at": 1.0,
+                "exitstatus": 2,
+                "ran": [],
+            }
+        )
+    )
+    assert pr.parse_record_file(str(leg_ok))["exitstatus"] == 2
+    leg_bad = tmp_path / "leg_bad.json"
+    leg_bad.write_text(
+        json.dumps(
+            {
+                "step": "k",
+                "position": 0,
+                "shard": 0,
+                "retry": 0,
+                "finished": True,
+                "finished_at": 1.0,
+                "exitstatus": "bad",
+                "ran": [],
+            }
+        )
+    )
+    assert pr.parse_record_file(str(leg_bad))["exitstatus"] is None
+
+    # Duplicate planned count preserved across retry (2 == 2 stays active) and
+    # skipped_command record in chain stays active even when planned is None:
+    dup_same = [
+        _rec(0, "full", finished=False, passed=[], ran=[], planned=["a.py::t1", "a.py::t1"]),
+        _rec(1, "test-retry", finished=True, passed=["a.py::t1"], ran=["a.py::t1"], planned=["a.py::t1", "a.py::t1"]),
+    ]
+    dup_same[1]["passed_counts"] = {"a.py::t1": 2}
+    assert pr.build_retry_plan(dup_same, "k", 0, 0, build_id="b1", current_retry=2)["skip_command"] is True
+    skipped_mid = [
+        _rec(0, "full", finished=True, passed=["a.py::t1"], ran=["a.py::t1"], planned=["a.py::t1"]),
+        {**_rec(1, "test-retry", finished=True, passed=[], ran=[], planned=None), "skipped_command": True},
+    ]
+    assert pr.build_retry_plan(skipped_mid, "k", 0, 0, build_id="b1", current_retry=2)["skip_command"] is True
+
 
 
 
