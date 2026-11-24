@@ -10,6 +10,8 @@ to attribute it at all would drop steps that run it. Both are checked.
 
 from __future__ import annotations
 
+import sys
+
 from pathlib import Path
 
 import pytest
@@ -266,6 +268,12 @@ class TestLineEndings:
         assert only.status is Attribution.FAILED and only.fail_open
 
 
+# Python 3.14 evaluates annotations lazily, in `__annotate__` code objects
+# (PEP 649), so an annotation change lands on those instead of the body that
+# defines the function.
+LAZY_ANNOTATIONS = sys.version_info >= (3, 14)
+
+
 class TestBehaviourPreserving:
     """Changed lines whose code did not change name nothing, and a file whose
     change preserves behaviour leaves the query as inert."""
@@ -310,7 +318,10 @@ class TestBehaviourPreserving:
         text = self.BASE.replace("def fused(x, y):", "def fused(x, y) -> torch.Tensor:")
         text = text.replace("return x * 2", "return x * 3")
         (only,) = self._build(repo, text).files
-        assert only.function_names == {"other"}, "the annotated function did not change"
+        # Python 3.14 builds annotations in a separate `__annotate__` function
+        # (PEP 649), which only runs when something reads them.
+        changed = {n for n in only.function_names if not n.endswith("__annotate__")}
+        assert changed == {"other"}, "the annotated function did not change"
 
     def test_a_decorated_function_keeps_its_annotation_as_a_change(self, repo: Repo):
         """FastAPI, pydantic and friends read annotations at runtime."""
@@ -320,7 +331,10 @@ class TestBehaviourPreserving:
         q = self._build(
             repo, base.replace("def fused(x, y):", "def fused(x, y) -> torch.Tensor:")
         )
-        assert q.inert == [] and q.files and "<module>" in q.files[0].names
+        # Before 3.14 the module body builds the annotations; from 3.14 its
+        # `__annotate__` does, run when the decorator reads them.
+        expected = "__annotate__" if LAZY_ANNOTATIONS else "<module>"
+        assert q.inert == [] and q.files and expected in q.files[0].names
 
     def test_a_module_registering_a_custom_op_is_never_inert(self, repo: Repo):
         """Custom op registration infers the schema from annotations."""
@@ -342,7 +356,8 @@ class TestBehaviourPreserving:
         repo.write("vllm/mod.py", base)
         repo.commit("model")
         q = self._build(repo, base.replace("x: torch.Tensor", "x: list"))
-        assert q.inert == [] and q.files and "Model.forward" in q.files[0].names
+        expected = "Model.__annotate__" if LAZY_ANNOTATIONS else "Model.forward"
+        assert q.inert == [] and q.files and expected in q.files[0].names
 
     @pytest.mark.parametrize(
         "nested, outer",
@@ -376,7 +391,12 @@ class TestBehaviourPreserving:
         repo.commit("nested")
         q = self._build(repo, base.replace("-> int:", "-> Tensor:"))
         (only,) = q.files
-        assert q.inert == [] and only.function_names == {outer}
+        # From 3.14 the annotations are lazy, in their own `__annotate__`, and the
+        # enclosing function holds that code as a constant, so both count.
+        expected = {outer}
+        if LAZY_ANNOTATIONS:
+            expected.add(f"{outer}.<locals>.__annotate__")
+        assert q.inert == [] and only.function_names == expected
 
     def test_only_import_time_left_but_not_annotations_keeps_every_name(
         self, repo: Repo
@@ -529,14 +549,17 @@ def test_a_new_parameter_leaves_the_module_body_unchanged(tmp_path):
     git("init", "-q")
     git("config", "user.email", "t@example.com")
     git("config", "user.name", "t")
-    src = "import os\n\n\ndef op(x, is_gated: bool = True):\n    return f(x, is_gated)\n"
+    src = (
+        "import os\n\n\ndef op(x, is_gated: bool = True):\n    return f(x, is_gated)\n"
+    )
     (repo / "vllm/ops.py").write_text(src)
     git("add", "-A")
     git("commit", "-q", "-m", "base")
     base = git("rev-parse", "HEAD")
     (repo / "vllm/ops.py").write_text(
-        src.replace("is_gated: bool = True)", "is_gated: bool = True, expert_map=None)")
-        .replace("f(x, is_gated)", "f(x, is_gated, expert_map)")
+        src.replace(
+            "is_gated: bool = True)", "is_gated: bool = True, expert_map=None)"
+        ).replace("f(x, is_gated)", "f(x, is_gated, expert_map)")
     )
     git("commit", "-qam", "param")
     q = build(repo, base, git("rev-parse", "HEAD"))

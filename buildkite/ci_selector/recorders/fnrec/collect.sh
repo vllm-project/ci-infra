@@ -115,18 +115,61 @@ fi
 BUILDER="${CI_INFRA}/buildkite/ci_selector"
 
 # The fold is the ci_selector package, run as the package: through uv, with
-# Python 3.12 and the package's own dependencies. Not the agent's python3,
-# which is 3.9 on the small CPU queue and has none of them: the package
-# imports the pipeline generator (handwritten.py imports amd, which needs
-# pyyaml), and under 3.9 the fold exits 0 with every recorded file marked
-# unfaithful (no code.co_qualname), a table that can drop nothing.
+# the package's own dependencies and the Python that made the recordings. Not
+# the agent's python3, which is 3.9 on the small CPU queue and has none of
+# them: the package imports the pipeline generator (handwritten.py imports
+# amd, which needs pyyaml), and under 3.9 the fold exits 0 with every recorded
+# file marked unfaithful (no code.co_qualname), a table that can drop nothing.
+#
+# The recordings' Python, because the fold compiles the source to check each
+# recorded name and names differ across minors: 3.14 builds annotations in
+# `__annotate__` functions (PEP 649). Folded under 3.12, build 105046's 3.14
+# recordings marked 2599 files unfaithful in nearly every row. Read off the
+# recordings' own `#start ... py=` headers; 3.12 when none says.
+FOLD_PYTHON=$(python3 - <<'FOLD_PY'
+import collections, os, re, tarfile
+
+HEADER = re.compile(rb"^#start\t.*\tpy=(3\.\d+)\.", re.M)
+seen = collections.Counter()
+
+
+def note(head):
+    m = HEADER.search(head)
+    if m:
+        seen[m.group(1).decode()] += 1
+
+
+jobs = sorted(os.listdir(".fnrec")) if os.path.isdir(".fnrec") else []
+for job in jobs[:40]:
+    path = os.path.join(".fnrec", job)
+    try:
+        if job.endswith(".tar.gz"):
+            with tarfile.open(path) as tar:
+                for member in tar:
+                    if member.isfile() and os.path.basename(member.name).startswith("fn."):
+                        note(tar.extractfile(member).read(4096))
+                        break
+        elif os.path.isdir(path):
+            for name in sorted(os.listdir(path)):
+                if name.startswith("fn."):
+                    with open(os.path.join(path, name), "rb") as f:
+                        note(f.read(4096))
+                    break
+    except (OSError, tarfile.TarError):
+        continue
+best = seen.most_common(1)[0][0] if seen else ""
+ok = best and tuple(int(x) for x in best.split(".")) >= (3, 12)
+print(best if ok else "3.12")
+FOLD_PY
+)
+echo "folding under Python ${FOLD_PYTHON:=3.12}, the recordings'"
 if ! command -v uv >/dev/null 2>&1; then
   curl -LsSf --retry 3 https://astral.sh/uv/install.sh \
     | env UV_INSTALL_DIR="${WORK}/bin" UV_NO_MODIFY_PATH=1 sh >/dev/null 2>&1
   export PATH="${WORK}/bin:${PATH}"
 fi
 command -v uv >/dev/null 2>&1 || { echo "cannot install uv" >&2; exit 1; }
-fold() { uv run --quiet --no-dev --python 3.12 --project "${BUILDER}" "$@"; }
+fold() { uv run --quiet --no-dev --python "${FOLD_PYTHON}" --project "${BUILDER}" "$@"; }
 
 echo "--- :table_tennis_paddle_and_ball: Building the coverage table"
 # The count the generator armed, so the fold can refuse a build that lost most
