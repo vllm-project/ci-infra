@@ -39,16 +39,16 @@ MAX_COMMAND_CHARS = 100
 
 
 def latest_records(records: List[Dict[str, Any]]) -> Dict[Tuple, Dict[str, Any]]:
-    """Each shard's record per command: its latest attempt that finished, or
-    its latest attempt when none finished."""
+    """Each shard's record per command: its latest attempt (by retry number),
+    breaking same-retry ties by finished status then timestamp."""
     latest: Dict[Tuple, Dict[str, Any]] = {}
     for record in records:
         where = (record["step"], record["position"], record["shard"])
-        rank = (record["finished"], record["retry"], record["finished_at"])
+        rank = (record["retry"], record["finished"], record["finished_at"])
         best = latest.get(where)
         if best is None or rank > (
-            best["finished"],
             best["retry"],
+            best["finished"],
             best["finished_at"],
         ):
             latest[where] = record
@@ -75,9 +75,7 @@ def _effective_shard_record(
     )
     if not prior or prior[0].get("mode", "full") != "full":
         return set(record["ran"]), record.get("planned")
-    earlier_passed: Set[str] = set()
-    for earlier in prior:
-        earlier_passed.update(earlier.get("passed") or ())
+    earlier_passed = pytest_retry.chain_passed(prior)
     effective_ran = earlier_passed | set(record["ran"])
     base_planned = prior[0].get("planned")
     effective_planned = (
@@ -139,19 +137,6 @@ def compare(
     if build_id is not None:
         records = [record for record in records if record.get("build_id") == build_id]
     latest = latest_records(records)
-    # An interrupted/crashed `test-retry` attempt must not be hidden behind an
-    # earlier finished attempt that had failures: pick the newest attempt when
-    # it is an unfinished test retry.
-    newest: Dict[Tuple, Dict[str, Any]] = {}
-    for record in records:
-        where = (record["step"], record["position"], record["shard"])
-        rank = (record["retry"], record["finished"], record["finished_at"])
-        best = newest.get(where)
-        if best is None or rank > (best["retry"], best["finished"], best["finished_at"]):
-            newest[where] = record
-    for where, record in newest.items():
-        if record.get("mode") == "test-retry" and not record["finished"]:
-            latest[where] = record
     results = []
     for step_key, commands in steps.items():
         for command in commands:
@@ -510,9 +495,10 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
 def main() -> int:
     steps = json.loads(os.environ[STEPS_ENV])
     with tempfile.TemporaryDirectory() as folder:
-        # Every attempt, not only the latest, so latest_records() can pick the
-        # latest that finished. An env var, not the flag: an agent too old for
-        # it ignores the variable, where an unknown flag fails the download.
+        # Every attempt, not only the latest, so active retry chains and
+        # earlier owner inventories are available. An env var, not the flag:
+        # an agent too old for it ignores the variable, where an unknown flag
+        # fails the download.
         download_error = _download_records(folder)
         records = _read_records(folder)
     if download_error:

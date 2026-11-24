@@ -268,7 +268,6 @@ class ShardPlugin:
             and self.step_key
             and self.position is not None
         ):
-            self.mode = "test-retry"
             prior_records = pytest_retry.read_records(retry_in)
             retry_plan = pytest_retry.build_retry_plan(
                 prior_records,
@@ -278,9 +277,11 @@ class ShardPlugin:
                 build_id=os.environ.get("BUILDKITE_BUILD_ID"),
                 current_retry=self.retry_count,
             )
-            self.retry_passed = retry_plan["passed"]
-            self.retry_skip_files = retry_plan["skip_files"]
-            self.retry_has_expected = retry_plan["has_expected"]
+            if retry_plan["active"]:
+                self.mode = "test-retry"
+                self.retry_passed = retry_plan["passed"]
+                self.retry_skip_files = retry_plan["skip_files"]
+                self.retry_has_expected = retry_plan["has_expected"]
         # The least-loaded owner that runs the command says what the command
         # should run: listed by a separate pytest it starts
         # (_expected_inventory), on the job's hardware, at the job's commit.

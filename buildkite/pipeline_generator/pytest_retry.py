@@ -81,6 +81,7 @@ def _parse_legacy_json(data: Any) -> Optional[Dict[str, Any]]:
     failed = data.get("failed")
     if failed is not None and not _is_str_list(failed):
         return None
+    passed_sorted = sorted(set(passed)) if passed is not None else []
     return {
         "step": data["step"],
         "position": data["position"],
@@ -94,7 +95,8 @@ def _parse_legacy_json(data: Any) -> Optional[Dict[str, Any]]:
         "planned": data.get("planned"),
         "ran": sorted(set(data["ran"])),
         # Legacy #884 JSON records did not prove 3-phase pass, so default empty.
-        "passed": sorted(set(passed)) if passed is not None else [],
+        "passed": passed_sorted,
+        "passed_counts": {nodeid: 1 for nodeid in passed_sorted},
         "failed": sorted(set(failed)) if failed is not None else [],
         "skipped_command": bool(data.get("skipped_command", False)),
     }
@@ -139,6 +141,7 @@ def _parse_record_with_reason(path: str) -> tuple:
 
     ran: Set[str] = set()
     passed: Set[str] = set()
+    passed_counts: Dict[str, int] = {}
     not_passed: Set[str] = set()
     failed: Set[str] = set()
     finished = False
@@ -167,9 +170,11 @@ def _parse_record_with_reason(path: str) -> tuple:
             if is_passed:
                 if nodeid not in not_passed:
                     passed.add(nodeid)
+                    passed_counts[nodeid] = passed_counts.get(nodeid, 0) + 1
             else:
                 not_passed.add(nodeid)
                 passed.discard(nodeid)
+                passed_counts.pop(nodeid, None)
                 if event.get("outcome") in ("failed", "error"):
                     failed.add(nodeid)
         elif kind == "finish":
@@ -194,6 +199,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             "planned": header.get("planned"),
             "ran": sorted(ran),
             "passed": sorted(passed),
+            "passed_counts": passed_counts,
             "failed": sorted(failed),
             "skipped_command": bool(header.get("skipped_command", False)),
         },
@@ -315,6 +321,43 @@ def active_chain(
     return reversed_chain
 
 
+def chain_passed(chain: Sequence[Dict[str, Any]]) -> Set[str]:
+    """Return node IDs proven passed across an intact active retry chain.
+
+    For a node ID appearing multiple times in the chain's base `planned` list
+    (e.g. `pytest --keep-duplicates`), every planned occurrence must have
+    passed within a single attempt without any non-pass outcome; partial passes
+    before a crash never count and never add up across attempts.
+
+    Args:
+        chain: Chronological records starting at a `full` attempt.
+
+    Returns:
+        Set of node IDs safe to treat as passed.
+    """
+    if not chain:
+        return set()
+    planned_counts: Dict[str, int] = {}
+    base_planned = chain[0].get("planned")
+    if isinstance(base_planned, list):
+        for nodeid in base_planned:
+            planned_counts[nodeid] = planned_counts.get(nodeid, 0) + 1
+
+    passed: Set[str] = set()
+    for record in chain:
+        record_counts = record.get("passed_counts")
+        for nodeid in record.get("passed") or ():
+            required = planned_counts.get(nodeid, 1)
+            if required > 1:
+                if (
+                    not isinstance(record_counts, dict)
+                    or record_counts.get(nodeid, 0) < required
+                ):
+                    continue
+            passed.add(nodeid)
+    return passed
+
+
 def build_retry_plan(
     records: Sequence[Dict[str, Any]],
     step: str,
@@ -337,13 +380,15 @@ def build_retry_plan(
         current_retry: Current `BUILDKITE_RETRY_COUNT`.
 
     Returns:
-        Dict with `passed` (set of node IDs), `skip_command` (Tier 1 bool),
-        `skip_files` (Tier 2 set of rootpath-relative file paths),
-        `has_expected` (whether an earlier attempt already captured a valid
-        non-empty inventory), and `base_planned` (list of node IDs from the
-        chain's full attempt, or None).
+        Dict with `active` (whether an intact prior chain was found), `passed`
+        (set of node IDs), `skip_command` (Tier 1 bool), `skip_files` (Tier 2
+        set of rootpath-relative file paths), `has_expected` (whether an
+        earlier attempt already captured a valid non-empty inventory), and
+        `base_planned` (list of node IDs from the chain's full attempt, or
+        None).
     """
     empty = {
+        "active": False,
         "passed": set(),
         "skip_command": False,
         "skip_files": set(),
@@ -361,10 +406,9 @@ def build_retry_plan(
     if not chain or chain[0].get("mode", "full") != "full":
         return empty
 
-    passed: Set[str] = set()
+    passed = chain_passed(chain)
     has_expected = False
     for record in chain:
-        passed.update(record.get("passed") or ())
         expected = record.get("expected")
         if isinstance(expected, list) and len(expected) > 0:
             has_expected = True
@@ -387,6 +431,7 @@ def build_retry_plan(
             skip_command = True
 
     return {
+        "active": True,
         "passed": passed,
         "skip_command": skip_command,
         "skip_files": skip_files,

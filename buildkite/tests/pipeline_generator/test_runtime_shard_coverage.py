@@ -380,15 +380,21 @@ def test_an_unfinished_shards_reported_outcome_counts_towards_a_duplicate():
     assert coverage.compare(STEPS, records)[0]["duplicated"] == {"b": [0, 1]}
 
 
-def test_latest_finished_attempt_wins_over_an_earlier_and_a_later_unfinished_one():
-    records = [
+def test_latest_attempt_wins_even_when_unfinished():
+    finished_retry = [
         _record(0, ["a"], expected=["a", "b"]),
         _record(1, [], retry=0),  # finished, ran nothing it should have
-        _record(1, ["b"], retry=1),  # the retry that counts
-        _record(1, [], retry=2, finished=False),  # died, so doesn't count
+        _record(1, ["b"], retry=1),  # the latest attempt, which counts
     ]
-    [result] = coverage.compare(STEPS, records)
+    [result] = coverage.compare(STEPS, finished_retry)
     assert result["missed"] == [] and result["unfinished"] == []
+
+    # A later attempt that dies mid-run must not be hidden by retry 1.
+    crashed_retry = finished_retry + [
+        _record(1, [], retry=2, finished=False, planned=["b"])
+    ]
+    [result] = coverage.compare(STEPS, crashed_retry)
+    assert result["unfinished"] == [1] and result["not_run"] == ["b"]
 
 
 def test_an_earlier_attempt_does_not_cover_a_later_finished_one():
@@ -1189,6 +1195,7 @@ def _normalized(record):
         "build_id": record.get("build_id"),
         "mode": record.get("mode", "full"),
         "passed": list(record.get("passed", [])),
+        "passed_counts": {nodeid: 1 for nodeid in record.get("passed", [])},
         "failed": list(record.get("failed", [])),
         "skipped_command": bool(record.get("skipped_command", False)),
     }
