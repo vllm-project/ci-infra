@@ -22,67 +22,8 @@ permissions:
 
 jobs:
   test:
-    runs-on: [self-hosted, linux, x64, vllm-runners]
-    timeout-minutes: 30
-    # The gate runs ci-select under the Python that made the function record
-    # (selector_gate.record_python): today vLLM CI's 3.14, and 3.12 when a
-    # record does not say. Both have to pass.
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.12", "3.14"]
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-
-      - name: Set up uv and Python
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
-        with:
-          python-version: ${{ matrix.python }}
-
-      # Full history, not --depth 1: the suite builds git worktrees and asks for
-      # merge bases, so it needs real history. --filter=blob:none keeps that
-      # while skipping file contents until something reads them.
-      - name: Check out the vLLM to test against
-        env:
-          VLLM_REMOTE: ${{ inputs.vllm_remote }}
-          VLLM_REF: ${{ inputs.vllm_ref }}
-          VLLM_CHECKOUT: ${{ runner.temp }}/vllm
-        run: |
-          remote="${VLLM_REMOTE:-https://github.com/vllm-project/vllm}"
-          ref="${VLLM_REF:-$(cat buildkite/ci_selector/VLLM_PIN)}"
-          rm -rf "$VLLM_CHECKOUT"
-          git clone --filter=blob:none -- "$remote" "$VLLM_CHECKOUT"
-          git -C "$VLLM_CHECKOUT" checkout "$ref"
-          echo "Testing against $remote at $(git -C "$VLLM_CHECKOUT" rev-parse HEAD)"
-
-      - name: Install dependencies
-        working-directory: buildkite/ci_selector
-        run: uv sync --locked
-
-      # --durations keeps the runner's cold graph build on record (the setup
-      # row for test_cold_build_within_budget), which COLD_BUILD_BUDGET_S in
-      # tests/test_imports.py is sized against.
-      - name: Run tests
-        working-directory: buildkite/ci_selector
-        env:
-          VLLM_REPO: ${{ runner.temp }}/vllm
-        run: uv run pytest tests -q --durations=10
-
-      # The kernel recorder's setup is sourced by whatever shell runs the CI
-      # job: /bin/sh (dash) in NVIDIA docker jobs, bash on AMD. The script runs
-      # every case under both, so a bash-only construct fails here.
-      - name: Kernel recorder setup under bash and sh
-        working-directory: buildkite/ci_selector
-        run: KERNREC_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" bash recorders/kernrec/test_ci_setup.sh
-
-      # The collect steps' publishing and failure rules, with buildkite-agent
-      # and aws stubbed: a build that lost a recorder's output must fail.
-      - name: Collect steps' publishing rules
-        working-directory: buildkite/ci_selector
-        run: |
-          KERNREC_PYTHON="$(uv run python -c 'import sys; print(sys.executable)')" bash recorders/kernrec/test_collect.sh
-          bash recorders/fnrec/test_collect.sh
+    if: github.repository_owner == 'vllm-project'
+    uses: vllm-project/ci-infra/.github/workflows/_reusable-ci-selector-tests.yml@main
+    with:
+      vllm_remote: ${{ inputs.vllm_remote || '' }}
+      vllm_ref: ${{ inputs.vllm_ref || '' }}
