@@ -1826,17 +1826,15 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     # AMD is not selected by ci-selector yet: a file that runs everything on
     # AMD may be narrowed on CUDA (csrc/, which ROCm compiles through HIPify).
-    amd_run_all = global_config.get("amd_run_all")
-    if amd_run_all and step.amd_run_all_exclude_patterns:
-        # The step's own excludes add to the pipeline's.
-        amd_run_all = _matches_run_all_patterns(
+    if global_config.get("amd_run_all") and is_amd_device(step.device):
+        # A step's own excludes add to the pipeline's.
+        excludes = step.amd_run_all_exclude_patterns
+        if not excludes or _matches_run_all_patterns(
             list_file_diff,
             global_config.get("amd_run_all_patterns"),
-            (global_config.get("amd_run_all_exclude_patterns") or [])
-            + step.amd_run_all_exclude_patterns,
-        )
-    if amd_run_all and is_amd_device(step.device):
-        return True
+            (global_config.get("amd_run_all_exclude_patterns") or []) + excludes,
+        ):
+            return True
     if is_amd_device(step.device):
         return _source_file_dependencies_match(
             amd_dependencies(step, list_file_diff), list_file_diff
