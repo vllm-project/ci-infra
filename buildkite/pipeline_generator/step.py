@@ -13,6 +13,7 @@ from step_vendors import (
     MIRROR_HARDWARE,
     DeviceStepError,
     check_block_style,
+    check_job_file,
     check_written_step,
     compile_device_step,
     is_device_step,
@@ -166,6 +167,7 @@ def read_steps_from_file(yaml_path: str, github_repo_name: str) -> List["Step"]:
         text = f.read()
     data = yaml.safe_load(text)
     source_file = os.path.relpath(yaml_path)
+    check_job_file(data, source_file)
     if any(is_device_step(raw) for raw in data.get("steps") or []):
         check_block_style(text, source_file)
     return steps_from_document(data, source_file, github_repo_name)

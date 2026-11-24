@@ -19,6 +19,7 @@ import sys
 from typing import Any, Dict, List
 
 import click
+import yaml
 
 from amd import (
     get_amd_label,
@@ -204,7 +205,7 @@ def explain(target: str, job_dirs, fmt: str, repo: str):
             rows = file_rows(target, repo)
         else:
             rows = _rows_for_key(target, job_dirs, repo)
-    except (DeviceStepError, ValueError) as error:
+    except (DeviceStepError, ValueError, yaml.YAMLError) as error:
         raise click.ClickException(str(error))
     if not rows:
         raise click.ClickException(f"no job file or job key {target!r}")

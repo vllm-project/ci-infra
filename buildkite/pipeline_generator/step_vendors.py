@@ -276,6 +276,28 @@ def check_written_step(raw: Any) -> None:
         )
 
 
+def check_job_file(doc: Any, where: str) -> None:
+    """E2 for a job file the generator cannot read: it is a map (`group:`,
+    `depends_on:`, `steps:`), and its `steps` a list of step maps."""
+    if not isinstance(doc, dict):
+        hint = (
+            ": put the list under `steps:`, with `group:` above it"
+            if isinstance(doc, list)
+            else ""
+        )
+        raise DeviceStepError(
+            "E2", where, "a job file is a map with `group:` and `steps:`" + hint
+        )
+    steps = doc.get("steps", [])
+    if not isinstance(steps, list):
+        raise DeviceStepError("E2", where, "`steps` must be a list of steps")
+    for index, raw in enumerate(steps):
+        if not isinstance(raw, dict):
+            raise DeviceStepError(
+                "E2", where, f"step {index + 1} of `steps` is not a map of fields"
+            )
+
+
 def expand_steps(
     raw_steps: List[Any], group_depends_on: Optional[List[str]] = None
 ) -> List[Any]:

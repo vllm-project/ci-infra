@@ -1681,3 +1681,20 @@ def test_an_exact_mirror_takes_every_field_it_carries_from_its_block():
     # Never read for an AMD job, so never the NVIDIA job's.
     assert parent.retry is None
     assert parent.mount_buildkite_agent is False
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        ("- label: T\n  key: t\n  devices:\n    h100:\n", "under `steps:`"),
+        ("", "a job file is a map"),
+        ("group: G\nsteps:\n  label: T\n", "`steps` must be a list"),
+    ],
+)
+def test_loading_a_file_that_is_not_a_job_file_is_an_e2(
+    tmp_path, monkeypatch, text, message
+):
+    with pytest.raises(DeviceStepError, match=message) as error:
+        _load(tmp_path, monkeypatch, text, header="")
+    assert error.value.code == "E2"
+    assert error.value.where.endswith("attention.yaml")

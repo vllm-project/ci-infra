@@ -3,6 +3,7 @@
 
 import json
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -682,3 +683,49 @@ def test_the_generator_command_still_takes_its_options():
     result = CliRunner().invoke(main_module.main, ["--help"])
     assert result.exit_code == 0
     assert "--pipeline_config_path" in result.output
+
+
+BARE_LIST = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      bogus: 5
+  commands:
+    - x
+"""
+
+
+@pytest.mark.parametrize(
+    "text, message",
+    [
+        (BARE_LIST, "put the list under `steps:`"),
+        ("", "a job file is a map"),
+        ("group: G\nsteps:\n  label: T\n", "`steps` must be a list"),
+        ("group: G\nsteps:\n  - T\n", "step 1 of `steps` is not a map"),
+    ],
+)
+def test_a_file_that_is_not_a_job_file_fails_lint_and_explain(
+    tmp_path, monkeypatch, text, message
+):
+    path = tmp_path / "t.yaml"
+    path.write_text(text)
+    findings = lint_paths([str(path)])
+    assert [(f.code, f.line) for f in findings] == [("E2", 1)]
+    assert message in findings[0].message
+    runner = CliRunner()
+    result = runner.invoke(main_module.main, ["lint", str(path)])
+    assert result.exit_code == 1 and message in result.output
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(main_module.main, ["explain", "t.yaml"])
+    assert result.exit_code == 1, result.output
+    assert message in result.output
+    assert not isinstance(result.exception, (AttributeError, TypeError))
+
+
+def test_explain_reports_yaml_that_does_not_parse(tmp_path, monkeypatch):
+    (tmp_path / "t.yaml").write_text("steps:\n  - label: [\n")
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main_module.main, ["explain", "t.yaml"])
+    assert result.exit_code == 1
+    assert "Error:" in result.output

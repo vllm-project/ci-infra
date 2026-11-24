@@ -60,6 +60,7 @@ from step_vendors import (
     VARIANTS_FIELD,
     VENDOR_ORDER,
     DeviceStepError,
+    check_job_file,
     compile_device_step,
     default_keys,
     expand_steps,
@@ -97,9 +98,11 @@ def lint_text(text: str, path: str = "<yaml>") -> List[Finding]:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as error:
         return [Finding(path, 1, "E2", f"not valid yaml: {error}")]
-    steps = doc.get("steps") if isinstance(doc, dict) else None
-    if not isinstance(steps, list):
-        return findings
+    try:
+        check_job_file(doc, path)
+    except DeviceStepError as error:
+        return [Finding(path, 1, error.code, error.detail)]
+    steps = doc.get("steps") or []
     lines = _step_lines(text)
     for line, where in flow_style_nodes(text):
         findings.append(
