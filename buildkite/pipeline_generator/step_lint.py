@@ -39,6 +39,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
+from step import compile_device_jobs
 from step_vendors import (
     DEPENDENCIES_FIELD,
     DEVICE_ORDER,
@@ -115,7 +116,8 @@ def lint_text(text: str, path: str = "<yaml>") -> List[Finding]:
                 findings.append(Finding(path, line, error.code, _message(error)))
             continue
         try:
-            resolve_step(raw, group_depends_on)
+            # As the loader does: every job checked by the Step model too.
+            compile_device_jobs(raw, group_depends_on)
         except DeviceStepError as error:
             findings.append(Finding(path, line, error.code, _message(error)))
             continue

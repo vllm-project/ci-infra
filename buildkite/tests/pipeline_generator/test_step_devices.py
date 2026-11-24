@@ -921,6 +921,70 @@ def test_a_devices_job_key_may_not_repeat_another_jobs(tmp_path, monkeypatch):
     check_device_step_keys(_load(tmp_path / "ok", monkeypatch, SPEC))
 
 
+CONCURRENCY_ALONE = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      timeout_in_minutes: 10
+    mi300_1:
+      concurrency: 2
+    mi355_1:
+      concurrency: 2
+  commands:
+    - pytest
+"""
+
+
+@pytest.mark.parametrize("amd_device", ["mi300_1", "mi355_1"])
+def test_every_amd_job_is_checked_by_the_step_model(tmp_path, monkeypatch, amd_device):
+    # mi300_1 compiles to the step's exact mirror block, mi355_1 to a step of
+    # its own: both fail the same way (the model's concurrency rule).
+    other = "mi355_1" if amd_device == "mi300_1" else "mi300_1"
+    text = CONCURRENCY_ALONE.replace(
+        f"    {other}:\n      concurrency: 2\n",
+        f"    {other}:\n      soft_fail: true\n",
+    )
+    expected_key = "amd-t" if amd_device == "mi300_1" else "amd-t-mi355"
+    with pytest.raises(
+        DeviceStepError,
+        match=rf"E2 step t, job {expected_key}: 'concurrency' and "
+        "'concurrency_group' must be defined together",
+    ):
+        _load(tmp_path, monkeypatch, text)
+    # Written together, both load.
+    fixed = text.replace(
+        "      concurrency: 2\n",
+        "      concurrency: 2\n      concurrency_group: rocm\n",
+    )
+    steps = _load(tmp_path / "ok", monkeypatch, fixed)
+    assert {step.key for step in steps} == {"t", "amd-t-mi355"}
+
+
+def test_a_field_the_step_model_rejects_names_the_job(tmp_path, monkeypatch):
+    # NVIDIA's num_nodes needs num_devices (Step.validate_multi_node).
+    text = CONCURRENCY_ALONE.replace(
+        "      timeout_in_minutes: 10\n", "      num_nodes: 2\n"
+    ).replace("      concurrency: 2\n", "      soft_fail: true\n")
+    with pytest.raises(DeviceStepError, match="E2 step t, job t: 'num_devices'"):
+        _load(tmp_path, monkeypatch, text)
+
+
+@pytest.mark.parametrize("value", [123, "", True, "amd v1"])
+@pytest.mark.parametrize("where", ["device", "variant", "step"])
+def test_a_key_that_is_not_a_key_string_is_a_schema_error(value, where):
+    raw = _spec()
+    if where == "device":
+        raw["devices"]["mi300_1"]["key"] = value
+    elif where == "variant":
+        raw["devices"]["h100"]["variants"]["eager"]["key"] = value
+    else:
+        raw["key"] = value
+    # E2, never a pydantic error or a duplicate-key (E8) one.
+    message = _raises("E2", "key", raw)
+    assert "[a-zA-Z0-9_-]+" in message
+
+
 # ---- rendering: the same jobs as the legacy form ------------------------------------
 #
 # Real steps of vLLM's test_areas (Nov 2026), in both forms.

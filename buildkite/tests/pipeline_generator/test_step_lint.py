@@ -509,6 +509,18 @@ def test_flow_style_is_e9():
     assert fix_text(HEADER + text)[0] == HEADER + text
 
 
+def test_lint_checks_every_job_against_the_step_model_as_loading_does():
+    # The AMD job that becomes the exact mirror block, too.
+    text = CLEAN.replace(
+        "      timeout_in_minutes: 50\n",
+        "      timeout_in_minutes: 50\n      concurrency: 2\n",
+    )
+    findings = lint_text(HEADER + text, "t.yaml")
+    assert [f.code for f in findings] == ["E2"]
+    assert "job amd-v1-spec-decode" in findings[0].message
+    assert "must be defined together" in findings[0].message
+
+
 def test_legacy_steps_are_only_checked_for_what_cannot_load():
     legacy = '- {label: ":nvidia: (H100) T", key: t, device: h100}\n'
     assert _codes(legacy) == []

@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
-from pydantic import PrivateAttr, model_validator
+from pydantic import PrivateAttr, ValidationError, model_validator
 from typing_extensions import Self
 from collections import defaultdict
 from global_config import get_global_config
@@ -94,8 +94,7 @@ def parse_steps_from_yaml(yaml_data: dict):
     steps = []
     for origin, raw in enumerate(yaml_steps):
         if is_device_step(raw):
-            for compiled in compile_device_step(raw, yaml_data.get("depends_on")):
-                step = Step.from_yaml(compiled)
+            for step in compile_device_jobs(raw, yaml_data.get("depends_on")):
                 step._from_devices = True
                 step._origin = origin
                 steps.append(step)
@@ -108,6 +107,42 @@ def parse_steps_from_yaml(yaml_data: dict):
         for step in steps:
             step.group = group
     return steps
+
+
+def compile_device_jobs(
+    raw: Dict[str, Any], group_depends_on: Optional[List[str]] = None
+) -> List[Step]:
+    """A `devices:` step's compiled steps, each job checked by the Step model
+    the way a written step is: its AMD mirror too, which the generator never
+    builds a Step from (it reads the block), so every AMD device fails or
+    passes alike, whichever one is the mirror."""
+    steps = []
+    for compiled in compile_device_step(raw, group_depends_on):
+        step = _validated(compiled, raw)
+        exact = exact_mirror(step)
+        if exact is not None:
+            job = {name: value for name, value in exact.items() if name != EXACT_MIRROR}
+            _validated({**job, "key": f"amd-{step.key}"}, raw)
+        steps.append(step)
+    return steps
+
+
+def _validated(job: Dict[str, Any], raw: Dict[str, Any]) -> Step:
+    try:
+        return Step.model_validate(job)
+    except ValidationError as error:
+        problems = "; ".join(
+            (
+                ".".join(str(part) for part in problem["loc"]) + ": "
+                if problem["loc"]
+                else ""
+            )
+            + problem["msg"].replace("Value error, ", "")
+            for problem in error.errors()
+        )
+        raise DeviceStepError(
+            "E2", f"step {raw.get('key')}, job {job.get('key')}", problems
+        ) from None
 
 
 def read_steps_from_job_dir(job_dir: str):
