@@ -81,74 +81,124 @@ repositories:
   premerge: "vllm-ci-test-repo"     # Used for PR/pre-merge builds
 ```
 
-## Steps for several vendors and devices
+## Steps that name their devices (`devices:`)
 
-A step in a `job_dirs` file can describe one test for every vendor and device
-it runs on, instead of a `device` plus a `mirror.amd` copy:
+A step in a `job_dirs` file names its hardware only as the keys of
+`devices:`. Each key is one job on that device; more jobs on the same device
+are that device's `variants:`. A step without `devices:` (the older `device`
+plus `mirror.amd` form) loads as before, so a file can mix both while it is
+migrated.
 
 ```yaml
-- key: v1-attention
-  label: V1 Attention
-  timeout_in_minutes: 40
-  source_file_dependencies:
-    - vllm/v1/attention/
-    - tests/v1/attention
-  vendors:
-    nvidia:
-      devices:
-        h100:
-          label: ":nvidia: (H100) V1 Attention"
-          commands:
-            - pytest -v -s v1/attention
-    amd:
-      env:
-        VLLM_ROCM_USE_AITER: "1"
+- label: V1 Attention                 # the bare title
+  key: v1-attention
+  devices:
+    h100:
+      timeout_in_minutes: 85
+      commands:
+        - pytest -v -s v1/attention
+      variants:
+        eager:                         # another H100 job: the H100 one, plus this
+          env:
+            VLLM_ENFORCE_EAGER: "1"
+    b200-k8s:
+      same_as: h100                    # the H100 entry, but for what it writes
+      timeout_in_minutes: 30
+    mi300_1:
+      timeout_in_minutes: 125
       source_file_dependencies:
-        - vllm/v1/attention/ops/rocm_aiter_mla_sparse.py
+        - vllm/platforms/rocm.py       # added to the shared list
       commands:
         - pytest -v -s v1/attention --ignore=v1/attention/test_mla_backends.py
-      devices:
-        mi300_dpx:
-          timeout_in_minutes: 50
-        mi355_dpx:
-          key: amd-v1-attention-mi355
+  automatic_shard: true
+  source_file_dependencies:            # every job's
+    - vllm/v1/attention/
+    - tests/v1/attention
 ```
 
-* Every device is one job. Its definition is the test's fields, then its
-  vendor's defaults, then its vendor's, then its device's (the map key is the
-  device). A more specific value replaces a scalar (`label`,
-  `timeout_in_minutes`, `num_devices`, `optional`, `depends_on`, ...).
-  `source_file_dependencies` and `commands` are concatenated in that order,
-  duplicate dependencies dropped, and `env` is merged. A `!` exclusion
-  applies to the jobs whose list it ends up in. A null value counts as unset.
-* One vendor's fields never reach another vendor's job: a dependency or env
-  var set under `nvidia` is not the AMD jobs', unlike a `mirror.amd` block,
-  which takes the step's.
-* Keys: the first non-AMD job is `<key>`, the first AMD job `amd-<key>`. Any
-  other device in a vendor needs its own `key`. A `key` set on a device beats
-  one set on its vendor. The AMD job is the other job's AMD mirror only while
-  its key is `amd-` plus that job's key; with an explicit key on either, it is
-  a step of its own (and listed under "AMD - Other" in **Run more jobs**).
-* Vendors: `nvidia` (no `devices` means one job on the default GPU queue),
-  `amd` and `cpu`. An AMD job gets `depends_on: [image-build-amd]`, a label in
-  the `:amd: (<device>) <title>` form, and no dind (`dind: true` opts in;
-  a `mirror.amd` block or a plain AMD step is dind unless it opts out).
-  Vendor defaults beat the test level: a `depends_on` or `dind` set on the
-  test is the other vendors', and only `amd` or its devices replace the AMD
-  ones. Other vendors are added in `step_vendors.py`.
-* Rejected: an unknown vendor, a device of another vendor, `device`, `gpu` or
-  `mirror` beside `vendors`, an unknown field at any level (the test level
-  also takes `num_gpus`, `autorun_on_main`, `if` and
-  `allow_dependency_failure`, which only the vendor-neutral tools read),
-  `retry` or `mount_buildkite_agent` under `amd` (AMD jobs ignore them), a
-  second device without a `key`, a key a `vendors:` job shares with any
-  other job, and `_exact` written by hand in a `mirror.amd` block.
+This is four jobs: `v1-attention` (`:nvidia: (H100) V1 Attention`),
+`v1-attention-eager` (`:nvidia: (H100) V1 Attention [eager]`),
+`v1-attention-b200` and `amd-v1-attention` (`:amd: (MI300) V1 Attention`).
 
-The yaml is compiled when it is loaded (`step_vendors.py`): the first non-AMD
-job becomes the step, the first AMD job its `mirror.amd`, marked `_exact` so
-it takes nothing from the step, and every other job a step of its own.
-ci_selector reads the yaml through the same code. Steps with `device` and
-`mirror` work as before.
+**Fields.** Each has one place:
+
+* step only: `label`, `key`, `depends_on` (other steps; never an image step),
+  `if`, `autorun_on_main`, `allow_dependency_failure`;
+* software, at the step level (every job's) or on a device or variant (that
+  job's): `commands`, `source_file_dependencies`, `env`, `working_dir`,
+  `automatic_shard`, `mount_buildkite_agent`, `no_plugin`;
+* machine, only on a device or variant: `timeout_in_minutes`, `optional`,
+  `soft_fail`, `parallelism`, `num_devices` (NVIDIA only: an AMD pool has its
+  own count), `num_nodes`, `agent_tags`, `retry`, `concurrency`,
+  `concurrency_group`, `no_gpu`, `dind` (only `true`);
+* on a device or variant: `key` (the full key, verbatim) and `label` (the
+  title only); on a device: `same_as` and `variants`.
+
+**Resolving a job.** Nothing is ever shadowed:
+
+* step and device: a device adds `source_file_dependencies` entries and `env`
+  vars (repeating one of the step's is an error); every other software field
+  is set at the step level or on the device, never both;
+* `same_as: <device>` starts from an earlier device of the same vendor that
+  has no `same_as` itself, minus its key, label and variants. What it writes
+  replaces the copied value, except that dependencies add and `env` merges
+  var by var. Variants are never copied;
+* a variant starts from its device's resolved job, minus key and label.
+  Dependencies add; anything else it writes replaces, including a step-level
+  `commands` (the only override there is, and it is written under the device
+  it runs on). It must change something;
+* the device registry adds the rest, and a step never writes it: the image
+  step (AMD `image-build-amd`, CPU `image-build-cpu`, NVIDIA the file's
+  `depends_on`, `dgx-spark` `arm64-image-build`; a CPU job in a file whose
+  `depends_on` is `[]` gets none), the step's own `depends_on` after it, and
+  for AMD no dind, the ROCm wrapper and the pool's GPU count.
+
+**Labels** are `<icon> (<TAG>) [Nightly ]<title>`, the icon and tag from the
+device (`:nvidia: (H200 MIG 35GB)`, `:amd: (MI355 DPX)`, `:computer: (CPU)`),
+`[Nightly]` when the job is `optional: true`. A variant's title is its
+device's plus ` [<name>]`, unless it sets `label:`.
+
+**Keys**, with K the step's `key`, in map order: the first non-AMD device is
+K and any other `K-<key_tag>`; the first AMD device is `amd-K` and any other
+`amd-K-<key_tag>`; a variant is `<its device job's key>-<name>`. A `key:` is
+used verbatim, and a pinned device's variants derive from it. Two devices of
+one key tag (`mi355_1` and `mi355_4`) need a pin on one of them, and every
+key must be unique across the pipeline.
+
+**Errors** (when the yaml is loaded):
+
+| Code | What |
+|---|---|
+| E1 | a device not in the registry (the message lists them), a variant name not `[a-z0-9-]+` |
+| E2 | a removed field (`device`, `gpu`, `mirror`, `vendors`, `target`, `run_on`, `num_gpus`, `dind: false`, an image step in `depends_on`, a label starting with an icon, `(HW)` or `[Nightly]`) or an unknown one; the message says where the concept lives |
+| E3 | a device shadowing the step (a repeated dependency or env var, a field set at both levels) |
+| E4 | a machine field at the step level |
+| E5 | a bad `same_as`: another vendor, a later device, a chain, a variant |
+| E6 | an empty variant, or a no-op override (`same_as` or variant) |
+| E7 | `num_devices` on an AMD (or CPU) device |
+| E8 | a duplicate key, or two devices of one key tag without a pin |
+| E9 | a flow-style list or map (`[a, b]`, `{a: b}`) in a `devices:` step |
+
+**How it compiles.** The rest of the generator, and ci_selector, read the
+older shape, so a `devices:` step is compiled when the yaml is loaded
+(`step_vendors.py`): the non-AMD device job keyed K (else the first non-AMD
+device's) is the step, the AMD job keyed `amd-` plus that step's key is its
+`mirror.amd`, marked `_exact` (the whole job: nothing is taken from the
+step), and every other job (more devices, variants, AMD-only tests, pinned
+keys that break the pair) is a step of its own. ci_selector reads the yaml
+through the same code.
+
+**Adding hardware** is one registry entry; a step can then name the device.
+An NVIDIA or CPU device needs its `DeviceType`, its `AgentQueue`, a branch in
+`buildkite_step.get_agent_queue()` and an entry in
+`constants.NON_AMD_DEVICES` (vendor, label tag, key tag, queue; `image` if it
+runs in another image). An AMD device needs its `DeviceType`, its
+`AgentQueue` and an entry in `amd.AMD_DEVICE_CONFIGS` (queue, GPU count, arch,
+label tag, key tag). For example, a Radeon R9700 pool would be
+`DeviceType.AMD_R9700_1 = "r9700_1"`, `AgentQueue.AMD_R9700_1 =
+"amd_r9700_1"` (the queue its agents serve) and
+`_pool(AgentQueue.AMD_R9700_1, 1, "gfx1201", "r9700")`, after which
+`r9700_1:` (plus `same_as: mi355_1`) adds it to a test.
 
 ## Jobs that are not selected
 

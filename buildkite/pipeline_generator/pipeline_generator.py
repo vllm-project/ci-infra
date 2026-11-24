@@ -42,7 +42,7 @@ import selector_gate
 from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
 from step import (
     Step,
-    check_vendor_step_keys,
+    check_device_step_keys,
     group_steps,
     read_steps_from_job_dir,
 )
@@ -174,7 +174,7 @@ class PipelineGenerator:
         for job_dir in global_config["job_dirs"]:
             steps.extend(read_steps_from_job_dir(job_dir))
         try:
-            check_vendor_step_keys(steps)
+            check_device_step_keys(steps)
         except ValueError as error:
             _fail_generation(str(error))
         if aiter_nightly:

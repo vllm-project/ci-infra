@@ -34,7 +34,7 @@ import tomllib
 from pathlib import Path
 
 import yaml
-from step_vendors import expand_vendor_document
+from step_vendors import expand_document
 
 from ..gitdiff import diff_files
 from ..handwritten import (
@@ -1958,14 +1958,14 @@ def _changed_steps(state: RepoState, path: str, ctx, defining: set[str]):
     added ones), or None to keep every step the file defines."""
     if ctx is None or ctx.status.get(path) != "M":
         return None
-    # `vendors:` steps compiled into the step and `mirror.amd` entries the
+    # `devices:` steps compiled into the step and `mirror.amd` entries the
     # generator reads, so an edit lands on the jobs it changes.
     try:
         parsed = changed_step_entries(
-            expand_vendor_document(_yaml_at(state, path, ctx.base)),
-            expand_vendor_document(_yaml_at(state, path, ctx.head)),
+            expand_document(_yaml_at(state, path, ctx.base)),
+            expand_document(_yaml_at(state, path, ctx.head)),
         )
-    except ValueError:  # a `vendors:` step that does not compile
+    except ValueError:  # a `devices:` step that does not compile
         return None
     if parsed is None:
         return None

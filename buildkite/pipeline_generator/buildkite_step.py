@@ -1655,7 +1655,7 @@ def convert_group_step_to_buildkite_step(
             ):
                 amd = step.mirror["amd"]
                 # What the mirror falls back to: the step, or for a
-                # `vendors:` step's AMD job, nothing but the job itself.
+                # `devices:` step's AMD job, nothing but the job itself.
                 parent = _mirror_parent(step, amd)
                 amd_no_plugin = amd.get("no_plugin", False)
                 amd_no_gpu = amd.get("no_gpu", parent.no_gpu or False)
@@ -1841,7 +1841,7 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
 
 
 def _mirror_parent(step: Step, amd: Dict[str, Any]) -> Step:
-    """What a mirror inherits from: its step, unless a `vendors:` step
+    """What a mirror inherits from: its step, unless a `devices:` step
     compiled it (step_vendors.py). Then the block is the whole AMD job, so this
     is the step with every field the block can set taken from it, and only
     the step's key, label, group and yaml file kept."""
@@ -1903,7 +1903,7 @@ def amd_mirror_step(step: Step) -> Optional[Step]:
     """The step's AMD mirror as the generator decides whether to run it, or
     None without one. For run decisions and key classification only: a
     legacy mirror keeps the step's depends_on, not its own (an exact one,
-    from a `vendors:` step, has its own), and its dind ignores
+    from a `devices:` step, has its own), and its dind ignores
     rocm_build_layout()."""
     amd = (step.mirror or {}).get("amd")
     return _get_amd_mirror_effective_step(step, amd) if amd else None

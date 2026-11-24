@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from step_vendors import EXACT_MIRROR, expand_vendor_steps
+from step_vendors import EXACT_MIRROR, expand_steps
 
 from ...handwritten import (
     KNOWN_STEP_FIELDS,
@@ -83,9 +83,9 @@ def _parse_job_file(
     group_active = bool(group_depends_raw)
     group_depends = _as_list(group_depends_raw)
     steps: list[Step] = []
-    # `vendors:` steps, compiled by the generator's own code into the step
+    # `devices:` steps, compiled by the generator's own code into the step
     # and `mirror.amd` dicts read below.
-    for raw in expand_vendor_steps(data["steps"]):
+    for raw in expand_steps(data["steps"], group_depends_raw):
         step = _parse_step(
             raw, path, repo, pipeline, group, group_depends, group_active, report
         )
@@ -175,7 +175,7 @@ def _expand_mirror(
     first, commands and working_dir override only when the mirror brings its own
     commands, and the rest falls back to the parent.
 
-    A block a `vendors:` step compiled (`_exact`) is the whole job instead and
+    A block a `devices:` step compiled (`_exact`) is the whole job instead and
     falls back to nothing; like a step, it gets the file's self-dependency and
     working-dir default when the file's depends_on is set."""
     if overrides.get(EXACT_MIRROR):

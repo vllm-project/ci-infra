@@ -117,16 +117,16 @@ def test_the_image_build_prefix_matches_the_generators_own_test():
 
 @pytest.mark.drift
 def test_the_default_working_dir_matches_the_generators_own():
-    """Upstream sets it inline while reading a job dir, so there is no
+    """Upstream sets it inline while reading a job file, so there is no
     constant to compare; take the assignment."""
     try:
-        upstream = attr_assignment(step_mod.read_steps_from_job_dir, "working_dir")
+        upstream = attr_assignment(step_mod.steps_from_document, "working_dir")
     except LookupError as exc:
         pytest.fail(
             drift_message(
                 f"Cannot find the working-dir default in ci-infra: {exc}",
                 COST,
-                "upstream restructured read_steps_from_job_dir: re-read it and "
+                "upstream restructured steps_from_document: re-read it and "
                 "update the query in tests/generator_source.py",
             )
         )
@@ -213,16 +213,16 @@ def test_every_mirror_key_the_generator_reads_is_modelled():
     )
 
 
-def test_every_key_a_compiled_vendors_mirror_carries_is_modelled():
-    """A `vendors:` step's AMD job becomes a `mirror.amd` block holding any of
+def test_every_key_a_compiled_devices_mirror_carries_is_modelled():
+    """A `devices:` step's AMD job becomes a `mirror.amd` block holding any of
     step_vendors.MIRROR_FIELDS, plus its device and the `_exact` marker."""
     import step_vendors
 
     carried = set(step_vendors.MIRROR_FIELDS) | {"device", step_vendors.EXACT_MIRROR}
     assert not carried - handwritten.MIRROR_OVERRIDABLE, drift_message(
-        "a compiled `vendors:` mirror can carry keys we do not model: "
+        "a compiled `devices:` mirror can carry keys we do not model: "
         f"{sorted(carried - handwritten.MIRROR_OVERRIDABLE)}.",
-        "Preflight would force-select every AMD job of a `vendors:` step.",
+        "Preflight would force-select every AMD job of a `devices:` step.",
         f"add them to MIRROR_OVERRIDABLE in {HW}, and to _exact_mirror in "
         "ci_selector/codemap/pipeline/buildkite.py if they change what runs",
     )

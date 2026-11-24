@@ -729,15 +729,15 @@ def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]
     block (only that for a mirror-only change). None if the edit can't be
     pinned to steps.
 
-    `vendors:` steps are compared compiled (step_vendors.py), job by job: their
+    `devices:` steps are compared compiled (step_vendors.py), job by job: their
     AMD job is a whole job of its own, so it changes only if its own fields
     do."""
     # Not at the top: step_vendors imports this module.
-    from step_vendors import expand_vendor_document
+    from step_vendors import expand_document
 
-    head = expand_vendor_document(yaml.safe_load(head_text))
+    head = expand_document(yaml.safe_load(head_text))
     try:
-        base = expand_vendor_document(yaml.safe_load(base_text))
+        base = expand_document(yaml.safe_load(base_text))
     except (yaml.YAMLError, ValueError):
         # Main's copy is broken: don't fail the PR that fixes it.
         return None

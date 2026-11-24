@@ -10,10 +10,11 @@ import yaml
 from step_vendors import (
     EXACT_MIRROR,
     MIRROR_HARDWARE,
-    VendorStepError,
+    DeviceStepError,
+    check_block_style,
     check_written_step,
-    compile_vendor_step,
-    has_vendors,
+    compile_device_step,
+    is_device_step,
 )
 
 
@@ -49,10 +50,10 @@ class Step(BaseModel):
     # lists that file itself.
     source_file: Optional[str] = Field(default=None, exclude=True)
     source_file_declared: bool = Field(default=False, exclude=True)
-    # The same for a `vendors:` step's AMD mirror, which lists its own.
+    # The same for a `devices:` step's AMD mirror, which lists its own.
     mirror_source_file_declared: bool = Field(default=False, exclude=True)
-    # Whether a `vendors:` step compiled to this one (check_vendor_step_keys).
-    _from_vendors: bool = PrivateAttr(default=False)
+    # Whether a `devices:` step compiled to this one (check_device_step_keys).
+    _from_devices: bool = PrivateAttr(default=False)
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
@@ -90,14 +91,15 @@ def parse_steps_from_yaml(yaml_data: dict):
     yaml_steps = yaml_data.get("steps", [])
     steps = []
     for raw in yaml_steps:
-        if has_vendors(raw):
-            for compiled in compile_vendor_step(raw):
+        if is_device_step(raw):
+            for compiled in compile_device_step(raw, yaml_data.get("depends_on")):
                 step = Step.from_yaml(compiled)
-                step._from_vendors = True
+                step._from_devices = True
                 steps.append(step)
         else:
             check_written_step(raw)
-            steps.append(Step.from_yaml(raw))
+            step = Step.from_yaml(raw)
+            steps.append(step)
     if group:
         for step in steps:
             step.group = group
@@ -112,56 +114,70 @@ def read_steps_from_job_dir(job_dir: str):
             if not file.endswith(".yaml"):
                 continue
             yaml_path = os.path.join(root, file)
-            with open(yaml_path, "r") as f:
-                data = yaml.safe_load(f)
-            group_depends_on = data.get("depends_on")
-            file_steps = parse_steps_from_yaml(data)
-            source_file = os.path.relpath(yaml_path)
-            for step in file_steps:
-                step.source_file = source_file
-                step.source_file_declared = source_file in (
-                    step.source_file_dependencies or []
-                )
-                exact = exact_mirror(step)
-                if exact is not None:
-                    step.mirror_source_file_declared = source_file in (
-                        exact.get("source_file_dependencies") or []
-                    )
-            if group_depends_on:
-                for step in file_steps:
-                    # A `vendors:` step's AMD job gets what its step gets
-                    # here, except depends_on, which an AMD job always sets.
-                    exact = exact_mirror(step)
-                    if exact is not None:
-                        if (
-                            not exact.get("working_dir")
-                            and global_config["github_repo_name"] == "vllm-project/vllm"
-                        ):
-                            exact["working_dir"] = "/vllm-workspace/tests"
-                        exact["source_file_dependencies"] = list(
-                            exact.get("source_file_dependencies") or []
-                        ) + [source_file]
-                    if not step.depends_on:
-                        step.depends_on = group_depends_on
-                    if (
-                        not step.working_dir
-                        and global_config["github_repo_name"] == "vllm-project/vllm"
-                    ):
-                        step.working_dir = "/vllm-workspace/tests"
-                    step.source_file_dependencies = getattr(
-                        step, "source_file_dependencies", []
-                    )
-                    if not step.source_file_dependencies:
-                        step.source_file_dependencies = []
-                    step.source_file_dependencies.append(source_file)
-            steps.extend(file_steps)
+            steps.extend(
+                read_steps_from_file(yaml_path, global_config["github_repo_name"])
+            )
     return steps
 
 
-def check_vendor_step_keys(steps: List[Step]) -> None:
-    """Fail on a key that a `vendors:` step's job shares with any other job,
-    in any file: Buildkite rejects the upload. Keys only legacy steps share
-    are left alone, as before."""
+def read_steps_from_file(yaml_path: str, github_repo_name: str) -> List["Step"]:
+    """One job file's steps, as the generator reads them."""
+    with open(yaml_path, "r") as f:
+        text = f.read()
+    data = yaml.safe_load(text)
+    source_file = os.path.relpath(yaml_path)
+    if any(is_device_step(raw) for raw in data.get("steps") or []):
+        check_block_style(text, source_file)
+    return steps_from_document(data, source_file, github_repo_name)
+
+
+def steps_from_document(
+    data: dict, source_file: str, github_repo_name: str
+) -> List["Step"]:
+    """A parsed job file's steps, with what its file-level `depends_on` adds
+    (the depends_on itself, the working-dir default and the file as a
+    dependency)."""
+    group_depends_on = data.get("depends_on")
+    file_steps = parse_steps_from_yaml(data)
+    for step in file_steps:
+        step.source_file = source_file
+        step.source_file_declared = source_file in (step.source_file_dependencies or [])
+        exact = exact_mirror(step)
+        if exact is not None:
+            step.mirror_source_file_declared = source_file in (
+                exact.get("source_file_dependencies") or []
+            )
+    if group_depends_on:
+        for step in file_steps:
+            # A `devices:` step's AMD job gets what its step gets here, except
+            # depends_on, which an AMD job always sets.
+            exact = exact_mirror(step)
+            if exact is not None:
+                if (
+                    not exact.get("working_dir")
+                    and github_repo_name == "vllm-project/vllm"
+                ):
+                    exact["working_dir"] = "/vllm-workspace/tests"
+                exact["source_file_dependencies"] = list(
+                    exact.get("source_file_dependencies") or []
+                ) + [source_file]
+            if not step.depends_on:
+                step.depends_on = group_depends_on
+            if not step.working_dir and github_repo_name == "vllm-project/vllm":
+                step.working_dir = "/vllm-workspace/tests"
+            step.source_file_dependencies = getattr(
+                step, "source_file_dependencies", []
+            )
+            if not step.source_file_dependencies:
+                step.source_file_dependencies = []
+            step.source_file_dependencies.append(source_file)
+    return file_steps
+
+
+def check_device_step_keys(steps: List[Step]) -> None:
+    """E8: fail on a key that a `devices:` step's job shares with any other
+    job, in any file: Buildkite rejects the upload. Keys only legacy steps
+    share are left alone, as before."""
     owners: Dict[str, List[Step]] = defaultdict(list)
     for step in steps:
         if step.key:
@@ -169,16 +185,18 @@ def check_vendor_step_keys(steps: List[Step]) -> None:
         if step.key and (step.mirror or {}).get(MIRROR_HARDWARE):
             owners[f"amd-{step.key}"].append(step)
     for key, keyed in owners.items():
-        if len(keyed) > 1 and any(step._from_vendors for step in keyed):
+        if len(keyed) > 1 and any(step._from_devices for step in keyed):
             files = sorted({step.source_file or "?" for step in keyed})
-            raise VendorStepError(
-                f"Duplicate CI step key {key} (a `vendors:` step's job), in "
-                + ", ".join(files)
+            raise DeviceStepError(
+                "E8",
+                ", ".join(files),
+                f"duplicate CI step key {key} (a `devices:` step's job); pin "
+                "a different `key:` on it",
             )
 
 
 def exact_mirror(step: Step) -> Optional[Dict[str, Any]]:
-    """The step's `mirror.amd` when a `vendors:` step compiled it: a whole
+    """The step's `mirror.amd` when a `devices:` step compiled it: a whole
     AMD job, which inherits nothing from the step."""
     amd = (step.mirror or {}).get(MIRROR_HARDWARE)
     return amd if amd and amd.get(EXACT_MIRROR) else None
