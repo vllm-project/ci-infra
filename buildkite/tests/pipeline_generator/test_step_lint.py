@@ -1,0 +1,475 @@
+"""The lint of `devices:` steps (step_lint.py) with `--fix`, and the
+`pipeline-generator explain|lint` commands (steps_cli.py)."""
+
+import json
+
+import yaml
+from click.testing import CliRunner
+
+import main as main_module
+from step_lint import fix_text, lint_paths, lint_text
+from step_vendors import compile_device_step
+
+HEADER = "group: Spec Decode\ndepends_on:\n  - image-build\nsteps:\n"
+
+
+def _codes(text):
+    return sorted({finding.code for finding in lint_text(HEADER + text, "t.yaml")})
+
+
+def _fix(text):
+    fixed, refused = fix_text(HEADER + text, "t.yaml")
+    assert not refused, [str(r) for r in refused]
+    assert fixed.startswith(HEADER)
+    return fixed[len(HEADER) :]
+
+
+def _compiled(text):
+    doc = yaml.safe_load(HEADER + text)
+    out = []
+    for raw in doc["steps"]:
+        for step in compile_device_step(raw, doc["depends_on"]):
+            for block in (step, step.get("mirror", {}).get("amd", {})):
+                if "source_file_dependencies" in block:
+                    block["source_file_dependencies"] = sorted(
+                        block["source_file_dependencies"]
+                    )
+            out.append(step)
+    return sorted(out, key=lambda step: step["key"])
+
+
+CLEAN = """\
+- label: V1 Spec Decode
+  key: v1-spec-decode
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 40
+    mi300_dpx:
+      timeout_in_minutes: 50
+  automatic_shard: true
+  source_file_dependencies:
+    - vllm/v1/
+  commands:
+    - pytest -v -s v1/spec_decode
+"""
+
+
+def test_a_clean_step_has_no_findings():
+    assert _codes(CLEAN) == []
+    assert _fix(CLEAN) == CLEAN
+
+
+# ---- L1 hoist ---------------------------------------------------------------------
+
+HOIST = """\
+- label: V1 Spec Decode
+  key: v1-spec-decode
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 40
+      env:
+        SHARED: "1"
+        NV: "x"
+      source_file_dependencies:
+        # the core
+        - vllm/v1/
+        - vllm/nvidia/
+      # the same everywhere
+      commands:
+        - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+        - >-
+          pytest -v -s
+          v1/spec_decode
+    mi300_dpx:
+      timeout_in_minutes: 50
+      env:
+        SHARED: "1"
+      source_file_dependencies:
+        - vllm/v1/
+        - vllm/platforms/rocm.py
+      commands:
+        - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+        - pytest -v -s v1/spec_decode
+    mi355_dpx:
+      same_as: mi300_dpx
+      timeout_in_minutes: 70
+  automatic_shard: true
+  source_file_dependencies:
+    - tests/v1/spec_decode
+"""
+HOISTED = """\
+- label: V1 Spec Decode
+  key: v1-spec-decode
+  devices:
+    h200_35gb:
+      timeout_in_minutes: 40
+      env:
+        NV: "x"
+      source_file_dependencies:
+        - vllm/nvidia/
+    mi300_dpx:
+      timeout_in_minutes: 50
+      source_file_dependencies:
+        - vllm/platforms/rocm.py
+    mi355_dpx:
+      same_as: mi300_dpx
+      timeout_in_minutes: 70
+  automatic_shard: true
+  env:
+    SHARED: "1"
+  source_file_dependencies:
+    - tests/v1/spec_decode
+    # the core
+    - vllm/v1/
+  # the same everywhere
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - >-
+      pytest -v -s
+      v1/spec_decode
+"""
+
+
+def test_l1_finds_what_every_device_has():
+    messages = [f.message for f in lint_text(HEADER + HOIST, "t.yaml")]
+    assert any("`source_file_dependencies` 'vllm/v1/'" in m for m in messages)
+    assert any("`env` ('SHARED', '1')" in m for m in messages)
+    assert any("every device has `commands`" in m for m in messages)
+    assert _codes(HOIST) == ["L1"]
+
+
+def test_l1_fix_moves_the_text_with_its_comments():
+    assert _fix(HOIST) == HOISTED
+    assert _compiled(HOISTED) == _compiled(HOIST)
+    assert _codes(HOISTED) == []
+
+
+def test_l1_needs_two_devices():
+    single = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      commands:
+        - pytest
+"""
+    assert _codes(single) == []
+
+
+# ---- L2 same_as ---------------------------------------------------------------------
+
+SAME = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      timeout_in_minutes: 30
+      commands:
+        - pytest nvidia
+    mi355_1:
+      timeout_in_minutes: 60
+      commands:
+        - pytest amd
+    mi300_1:
+      # copied from mi355_1
+      timeout_in_minutes: 60
+      commands:
+        - pytest amd
+      variants:
+        aiter:
+          env:
+            AITER: "1"
+"""
+
+
+def test_l2_and_its_fix():
+    assert _codes(SAME) == ["L2"]
+    fixed = _fix(SAME)
+    assert fixed == SAME.replace(
+        """      # copied from mi355_1
+      timeout_in_minutes: 60
+      commands:
+        - pytest amd
+""",
+        """      # copied from mi355_1
+      same_as: mi355_1
+""",
+    )
+    assert _compiled(fixed) == _compiled(SAME)
+
+
+def test_l2_ignores_another_vendor_and_empty_entries():
+    text = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      timeout_in_minutes: 30
+    mi355_1:
+      timeout_in_minutes: 30
+  commands:
+    - pytest
+"""
+    assert _codes(text) == []
+    empty = text.replace("      timeout_in_minutes: 30\n", "")
+    assert _codes(empty) == []
+
+
+# ---- L3 ----------------------------------------------------------------------------
+
+
+def test_l3_warns_about_covered_dependencies_and_is_not_fixed():
+    text = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      source_file_dependencies:
+        - vllm/models/x/
+        - "!vllm/models/x/skip.py"
+    mi355_1:
+      source_file_dependencies:
+        - csrc/
+        - csrc/rocm/
+  source_file_dependencies:
+    - vllm/
+    - vllm/config.py
+  commands:
+    - pytest
+"""
+    findings = lint_text(HEADER + text, "t.yaml")
+    messages = sorted(f.message for f in findings if f.code == "L3")
+    assert messages == [
+        "step t: `vllm/config.py` is already covered by `vllm/`",
+        "step t: device h100: `vllm/models/x/` is already covered by `vllm/`",
+        "step t: device mi355_1: `csrc/rocm/` is already covered by `csrc/`",
+    ]
+    assert not any(f.is_error for f in findings)
+    assert _fix(text) == text
+
+
+# ---- L4 order ---------------------------------------------------------------------
+
+UNORDERED = """\
+- label: T
+  # the commands
+  commands:
+    - pytest
+  devices:
+    # CPU first
+    cpu-small:
+      env:
+        CPU: "1"
+    mi355_1:
+      env:
+        AMD: "1"
+      timeout_in_minutes: 60
+    h100:
+      variants:
+        eager:
+          env:
+            EAGER: "1"
+          optional: true
+      timeout_in_minutes: 30
+  key: t
+"""
+ORDERED = """\
+- label: T
+  key: t
+  devices:
+    h100:
+      key: t-h100
+      timeout_in_minutes: 30
+      variants:
+        eager:
+          optional: true
+          env:
+            EAGER: "1"
+    mi355_1:
+      timeout_in_minutes: 60
+      env:
+        AMD: "1"
+    # CPU first
+    cpu-small:
+      key: t
+      env:
+        CPU: "1"
+  # the commands
+  commands:
+    - pytest
+"""
+
+
+def test_l4_and_its_fix_keep_every_key():
+    assert _codes(UNORDERED) == ["L4"]
+    fixed = _fix(UNORDERED)
+    assert fixed == ORDERED
+    # The CPU device keeps `t` (and the mirror), the NVIDIA one `t-h100`.
+    assert _compiled(fixed) == _compiled(UNORDERED)
+    assert _codes(fixed) == []
+
+
+def test_errors_are_reported_and_never_fixed():
+    text = CLEAN.replace("mi300_dpx", "mi999_dpx")
+    findings = lint_text(HEADER + text, "t.yaml")
+    assert [(f.code, f.line) for f in findings] == [("E1", 5)]
+    assert "mi999_dpx" in findings[0].message
+    assert _fix(text) == text
+
+
+def test_flow_style_is_e9():
+    text = CLEAN.replace(
+        "  source_file_dependencies:\n    - vllm/v1/\n",
+        "  source_file_dependencies: [vllm/v1/]\n",
+    )
+    assert _codes(text) == ["E9"]
+    assert fix_text(HEADER + text)[0] == HEADER + text
+
+
+def test_legacy_steps_are_only_checked_for_what_cannot_load():
+    legacy = '- {label: ":nvidia: (H100) T", key: t, device: h100}\n'
+    assert _codes(legacy) == []
+    assert _codes("- label: T\n  key: t\n  vendors:\n    nvidia:\n") == ["E2"]
+
+
+# ---- files and the CLI --------------------------------------------------------------
+
+
+def _write(tmp_path, name, text):
+    path = tmp_path / name
+    path.write_text(HEADER + text)
+    return path
+
+
+def test_duplicate_keys_across_files_are_e8(tmp_path):
+    _write(tmp_path, "a.yaml", CLEAN)
+    _write(
+        tmp_path,
+        "b.yaml",
+        '- label: ":amd: (MI300) Other"\n  key: amd-v1-spec-decode\n  device: mi300_1\n',
+    )
+    findings = lint_paths([str(tmp_path)])
+    assert [f.code for f in findings] == ["E8"]
+    assert "amd-v1-spec-decode" in findings[0].message
+
+
+def test_lint_command_exits_1_until_fixed(tmp_path):
+    path = _write(tmp_path, "a.yaml", HOIST)
+    runner = CliRunner()
+    result = runner.invoke(main_module.main, ["lint", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "L1" in result.output and "lint --fix" in result.output
+    result = runner.invoke(main_module.main, ["lint", "--fix", str(path)])
+    assert result.exit_code == 0, result.output
+    assert path.read_text() == HEADER + HOISTED
+    result = runner.invoke(main_module.main, ["lint", str(path)])
+    assert result.exit_code == 0 and result.output == ""
+
+
+def test_explain_prints_every_job_of_a_file(tmp_path, monkeypatch):
+    path = _write(tmp_path, "spec.yaml", HOISTED)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main_module.main, ["explain", "spec.yaml"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert lines[0] == (
+        "| Key | Device | Label | Timeout | Optional | Commands | Dependencies "
+        "| Depends on |"
+    )
+    keys = [line.split(" | ")[0][2:] for line in lines[2:]]
+    assert keys == [
+        "v1-spec-decode",
+        "amd-v1-spec-decode",
+        "amd-v1-spec-decode-mi355-dpx",
+    ]
+    assert (
+        "| h200_35gb | :nvidia: (H200 MIG 35GB) V1 Spec Decode | 40 | no |" in lines[2]
+    )
+    assert "`image-build-amd`" in lines[3]
+    assert "`vllm/platforms/rocm.py`" in lines[4]
+    del path
+
+
+def test_explain_by_key_prints_its_steps_jobs_as_json(tmp_path, monkeypatch):
+    (tmp_path / "areas").mkdir()
+    _write(
+        tmp_path / "areas",
+        "spec.yaml",
+        HOISTED + CLEAN.replace("v1-spec-decode", "other"),
+    )
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        main_module.main,
+        ["explain", "amd-v1-spec-decode", "--job-dir", "areas", "--format", "json"],
+    )
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)
+    assert [row["key"] for row in rows] == [
+        "v1-spec-decode",
+        "amd-v1-spec-decode",
+        "amd-v1-spec-decode-mi355-dpx",
+    ]
+    mi355 = rows[2]
+    assert mi355["device"] == "mi355_dpx"
+    assert mi355["timeout_in_minutes"] == 70
+    assert mi355["env"] == {"SHARED": "1"}
+    assert mi355["dind"] is False
+    assert mi355["working_dir"] == "/vllm-workspace/tests"
+    assert sorted(mi355["source_file_dependencies"]) == sorted(
+        [
+            "tests/v1/spec_decode",
+            "vllm/v1/",
+            "vllm/platforms/rocm.py",
+            "areas/spec.yaml",
+        ]
+    )
+    result = CliRunner().invoke(
+        main_module.main, ["explain", "nope", "--job-dir", "areas"]
+    )
+    assert result.exit_code == 1
+    assert "no job file or job key 'nope'" in result.output
+
+
+def test_explain_shows_a_legacy_mirror_as_the_generator_resolves_it(
+    tmp_path, monkeypatch
+):
+    legacy = """\
+- label: ":nvidia: (H100) T"
+  key: t
+  device: h100
+  optional: true
+  env:
+    A: "1"
+  source_file_dependencies:
+    - shared/
+  commands:
+    - pytest
+  mirror:
+    amd:
+      device: mi300_1
+      env:
+        B: "1"
+      source_file_dependencies:
+        - rocm/
+"""
+    _write(tmp_path, "t.yaml", legacy)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(
+        main_module.main, ["explain", "t.yaml", "--format", "json"]
+    )
+    nvidia, amd_job = json.loads(result.output)
+    assert amd_job["key"] == "amd-t"
+    assert amd_job["label"] == ":amd: (MI300) T"
+    assert amd_job["optional"] is True
+    assert amd_job["commands"] == ["pytest"]
+    assert amd_job["env"] == {"A": "1", "B": "1"}
+    assert amd_job["timeout_in_minutes"] == 180
+    assert amd_job["dind"] is True
+    assert sorted(amd_job["source_file_dependencies"]) == ["rocm/", "shared/", "t.yaml"]
+    assert nvidia["source_file_dependencies"] == ["shared/", "t.yaml"]
+
+
+def test_the_generator_command_still_takes_its_options():
+    result = CliRunner().invoke(main_module.main, ["--help"])
+    assert result.exit_code == 0
+    assert "--pipeline_config_path" in result.output

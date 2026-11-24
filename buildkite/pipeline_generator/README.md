@@ -27,6 +27,9 @@ pipeline-generator --pipeline_config_path <config.yaml> --output_file_path <outp
 pipeline-generator --pipeline_config_path pipeline_config.yaml --output_file_path pipeline.yaml
 ```
 
+`pipeline-generator explain` and `pipeline-generator lint` are tools for the
+`job_dirs` yaml (see "Steps that name their devices" below).
+
 ## Configuration File Format
 
 The configuration file is a YAML file that defines how the pipeline should be generated.
@@ -199,6 +202,45 @@ label tag, key tag). For example, a Radeon R9700 pool would be
 "amd_r9700_1"` (the queue its agents serve) and
 `_pool(AgentQueue.AMD_R9700_1, 1, "gfx1201", "r9700")`, after which
 `r9700_1:` (plus `same_as: mi355_1`) adds it to a test.
+
+### `pipeline-generator explain` and `lint`
+
+```bash
+pipeline-generator explain .buildkite/test_areas/attention.yaml
+pipeline-generator explain amd-v1-attention [--job-dir .buildkite/test_areas] [--format json]
+pipeline-generator lint .buildkite/test_areas [--fix]
+```
+
+`explain` reads a job file (or the file holding a key) as the generator does,
+in either form, and prints one row per job: key, device, label, timeout,
+optional, commands, dependencies and depends_on (`--format json` adds every
+resolved field, to compare two versions of a file job by job). An AMD job's
+label, timeout and depends_on are shown as rendered (3-hour default timeout).
+
+`lint` reports the errors above and these, and `--fix` rewrites the yaml text
+in place, moving lines with the comments above them:
+
+* L1: with two or more devices, a software value every device has (a
+  dependency, an env var, the same commands, `working_dir`, ...) belongs at
+  the step level;
+* L2: a device written the same as an earlier device of its vendor is
+  `same_as: <that device>`;
+* L3 (a warning, never fixed): a dependency covered by a broader one at the
+  same or a shared scope (`vllm/models/x/` under a step-level `vllm/`);
+* L4: the order: label, key, devices, software fields, the other step
+  fields; devices NVIDIA, AMD, then CPU (each vendor in its written order); a
+  device's same_as, key, label, machine fields, software fields, variants.
+  Where the new order would change a default key (a CPU device moved after an
+  NVIDIA one), the fix pins the old key.
+
+A fix never changes a job: each fixed step is compiled before and after, and
+one whose jobs would differ is left alone and reported. `lint` exits 1 on an
+error or an unfixed L1, L2 or L4 finding.
+
+Follow-ups, not part of this change: a CI job that posts the `explain` table
+on PRs touching `test_areas`, a check that fails when a key compiled on main
+disappears while its step remains (a reordered device or a renamed step
+needs `key:` pinned), and `explain --diff-triggers`.
 
 ## Jobs that are not selected
 

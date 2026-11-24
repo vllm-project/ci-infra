@@ -54,6 +54,8 @@ class Step(BaseModel):
     mirror_source_file_declared: bool = Field(default=False, exclude=True)
     # Whether a `devices:` step compiled to this one (check_device_step_keys).
     _from_devices: bool = PrivateAttr(default=False)
+    # The index of the yaml step it comes from, in its file.
+    _origin: int = PrivateAttr(default=-1)
 
     def otel_tracing_enabled(self) -> bool:
         config = get_global_config()
@@ -90,15 +92,17 @@ def parse_steps_from_yaml(yaml_data: dict):
     group = yaml_data.get("group", None)
     yaml_steps = yaml_data.get("steps", [])
     steps = []
-    for raw in yaml_steps:
+    for origin, raw in enumerate(yaml_steps):
         if is_device_step(raw):
             for compiled in compile_device_step(raw, yaml_data.get("depends_on")):
                 step = Step.from_yaml(compiled)
                 step._from_devices = True
+                step._origin = origin
                 steps.append(step)
         else:
             check_written_step(raw)
             step = Step.from_yaml(raw)
+            step._origin = origin
             steps.append(step)
     if group:
         for step in steps:
