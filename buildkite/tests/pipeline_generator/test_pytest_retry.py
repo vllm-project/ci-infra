@@ -1808,6 +1808,151 @@ def test_generator_coverage_skips_single_job_and_keeps_k8s_and_amd_clean(
     assert rs.PLAN_ENV not in (off_groups[0].steps[0].env or {})
 
 
+# --- Peer review round 1 regression tests ---
+
+
+def test_review_empty_collection_never_skips_command_on_retry(tmp_path):
+    # Finding 1: a 1-job command that collects 0 tests (exit 5) records
+    # planned=[] and finished=True; retry must NOT skip it and turn it green.
+    records = [
+        _rec(0, "full", finished=True, passed=[], ran=[], planned=[]),
+    ]
+    plan = pr.build_retry_plan(records, "k", 0, 0, build_id="b1", current_retry=1)
+    assert plan["skip_command"] is False
+
+    _make_project(tmp_path, {"pkg/test_a.py": "def test_ok(): pass\n"})
+    p = _simple_plan({"tests/pkg/test_a.py": 0}, shards=1, single_job=True)
+    p["commands"][0]["args"] = ["-v", "pkg", "-k", "does_not_exist"]
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path,
+        p,
+        ["-v", "pkg", "-k", "does_not_exist"],
+        shard=0,
+        job_id="job-0",
+        coverage_dir=cov_dir,
+        retry=0,
+    )
+    assert run0.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
+    assert rec0["planned"] == []
+    assert (
+        pr.maybe_skip_command(
+            "k",
+            0,
+            0,
+            str(artifacts_root),
+            str(cov_dir),
+            env={"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-1", "BUILDKITE_RETRY_COUNT": "1"},
+        )
+        is False
+    )
+
+
+def test_review_duplicate_nodeid_pass_then_fail_is_not_skippable(tmp_path):
+    # Finding 2: if a node ID executes twice and fails once (in either order),
+    # it must NOT be recorded in `passed` and must NOT trigger skip_command.
+    p = _write_jsonl(
+        tmp_path,
+        "job-0",
+        0,
+        [
+            _start(planned=["a.py::t1", "a.py::t2"]),
+            _test("a.py::t1", True, "passed"),
+            _test("a.py::t1", False, "failed"),
+            _test("a.py::t2", False, "failed"),
+            _test("a.py::t2", True, "passed"),
+            _finish(True),
+        ],
+    )
+    rec = pr.parse_record_file(str(p))
+    assert rec["passed"] == []
+    assert rec["failed"] == ["a.py::t1", "a.py::t2"]
+    plan = pr.build_retry_plan([rec], "k", 0, 0, build_id="b1", current_retry=1)
+    assert plan["passed"] == set()
+    assert plan["skip_command"] is False
+
+
+def test_review_crashed_test_retry_is_not_hidden_by_earlier_finished_attempt():
+    # Finding 3: Attempt 0 finished (a passed, b failed); Attempt 1 test-retry
+    # crashed before running b -> coverage MUST flag shard 0 unfinished + b not_run.
+    import runtime_shard_coverage as coverage
+
+    steps = {"k": [{"position": 0, "label": "Command (1/1)", "fallback": 0, "owners": [0]}]}
+    records = [
+        _rec(
+            0,
+            "full",
+            finished=True,
+            passed=["a.py::a"],
+            ran=["a.py::a", "a.py::b"],
+            planned=["a.py::a", "a.py::b"],
+            expected=["a.py::a", "a.py::b"],
+        ),
+        _rec(1, "test-retry", finished=False, passed=[], ran=[], planned=["a.py::b"]),
+    ]
+    [result] = coverage.compare(steps, records, build_id="b1")
+    assert result["unfinished"] == [0]
+    assert result["not_run"] == ["a.py::b"]
+    assert coverage.report([result])[0] == "error"
+
+
+def test_review_prepare_clears_stale_tag_on_every_early_exit(tmp_path):
+    # Finding 4: stale dest_dir/.tag from an earlier job must be removed on
+    # Attempt 0, missing agent, untagged retry, and metadata timeout.
+    cases = [
+        ({"BUILDKITE_RETRY_COUNT": "0", "BUILDKITE_JOB_ID": "j0"}, None, lambda _: "/bin/bk"),
+        ({"BUILDKITE_RETRY_COUNT": "1", "BUILDKITE_JOB_ID": "j1"}, None, lambda _: None),
+        (
+            {"BUILDKITE_RETRY_COUNT": "1", "BUILDKITE_JOB_ID": "j1"},
+            lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""),
+            lambda _: "/bin/bk",
+        ),
+        (
+            {"BUILDKITE_RETRY_COUNT": "1", "BUILDKITE_JOB_ID": "j1"},
+            lambda cmd, **kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd, 15)),
+            lambda _: "/bin/bk",
+        ),
+    ]
+    for idx, (env, run_cmd, which) in enumerate(cases):
+        dest = tmp_path / f"stale-{idx}"
+        dest.mkdir()
+        (dest / pr.TAG_FILE).write_text("stale-tag\n")
+        ok = pr.prepare_retry_dir(
+            str(dest),
+            env=env,
+            run_cmd=run_cmd or subprocess.run,
+            which=which,
+        )
+        assert ok is False
+        assert not dest.exists(), f"stale dir survived case {idx}"
+
+
+def test_review_reasonless_xfail_xpass_is_not_marked_passed(tmp_path):
+    # Finding 5: bare `@pytest.mark.xfail` sets report.wasxfail = "" (falsy);
+    # hasattr(report, "wasxfail") ensures XPASS is NOT recorded as passed.
+    _make_project(
+        tmp_path,
+        {
+            "pkg/test_xf.py": (
+                "import pytest\n"
+                "@pytest.mark.xfail\n"
+                "def test_reasonless_xpass():\n"
+                "    assert True\n"
+            )
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_xf.py": 0}, shards=1, single_job=True)
+    cov_dir = tmp_path / "artifacts" / ".runtime-shard-coverage"
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path, plan, ["-v", "pkg"], shard=0, job_id="job-0", coverage_dir=cov_dir, retry=0
+    )
+    assert run0.returncode == 0
+    assert rec0["ran"] == ["tests/pkg/test_xf.py::test_reasonless_xpass"]
+    assert rec0["passed"] == []
+
+
+
 
 
 

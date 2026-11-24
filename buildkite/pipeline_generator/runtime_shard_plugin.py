@@ -607,7 +607,7 @@ class ShardPlugin:
             phases = self._phases.setdefault(report.nodeid, {})
             phases[report.when] = (
                 report.outcome,
-                bool(getattr(report, "wasxfail", False)),
+                hasattr(report, "wasxfail"),
             )
             if report.when == "teardown":
                 passed, outcome = _classify_phases(phases)

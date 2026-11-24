@@ -139,6 +139,19 @@ def compare(
     if build_id is not None:
         records = [record for record in records if record.get("build_id") == build_id]
     latest = latest_records(records)
+    # An interrupted/crashed `test-retry` attempt must not be hidden behind an
+    # earlier finished attempt that had failures: pick the newest attempt when
+    # it is an unfinished test retry.
+    newest: Dict[Tuple, Dict[str, Any]] = {}
+    for record in records:
+        where = (record["step"], record["position"], record["shard"])
+        rank = (record["retry"], record["finished"], record["finished_at"])
+        best = newest.get(where)
+        if best is None or rank > (best["retry"], best["finished"], best["finished_at"]):
+            newest[where] = record
+    for where, record in newest.items():
+        if record.get("mode") == "test-retry" and not record["finished"]:
+            latest[where] = record
     results = []
     for step_key, commands in steps.items():
         for command in commands:

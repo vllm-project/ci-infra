@@ -139,6 +139,7 @@ def _parse_record_with_reason(path: str) -> tuple:
 
     ran: Set[str] = set()
     passed: Set[str] = set()
+    not_passed: Set[str] = set()
     failed: Set[str] = set()
     finished = False
     finished_at = 0.0
@@ -164,10 +165,13 @@ def _parse_record_with_reason(path: str) -> tuple:
                 return None, None
             ran.add(nodeid)
             if is_passed:
-                passed.add(nodeid)
-                failed.discard(nodeid)
-            elif event.get("outcome") in ("failed", "error"):
-                failed.add(nodeid)
+                if nodeid not in not_passed:
+                    passed.add(nodeid)
+            else:
+                not_passed.add(nodeid)
+                passed.discard(nodeid)
+                if event.get("outcome") in ("failed", "error"):
+                    failed.add(nodeid)
         elif kind == "finish":
             if not isinstance(event.get("finished"), bool) or not _is_number(
                 event.get("finished_at")
@@ -377,7 +381,9 @@ def build_retry_plan(
         for file_path, nodeids in by_file.items():
             if nodeids and set(nodeids).issubset(passed):
                 skip_files.add(file_path)
-        if chain[-1]["finished"] and set(base_planned).issubset(passed):
+        # Never skip a command whose collection was empty (e.g. exit 5 on a
+        # broken selector); only skip when at least one planned test passed.
+        if base_planned and chain[-1]["finished"] and set(base_planned).issubset(passed):
             skip_command = True
 
     return {
@@ -478,16 +484,22 @@ def prepare_retry_dir(
         True when this attempt is a verified test retry with a ready directory.
     """
     env_map = os.environ if env is None else env
+    existing = env_map.get(RETRY_IN_ENV)
     try:
         retry_count = int(env_map.get("BUILDKITE_RETRY_COUNT") or 0)
     except ValueError:
-        return False
+        retry_count = 0
+
+    if retry_count > 0 and existing and os.path.isfile(os.path.join(existing, TAG_FILE)):
+        return True
+
+    # Always clear stale state from dest_dir before any early return so an
+    # untagged retry or Attempt 0 can never inherit an old `.tag`.
+    if os.path.exists(dest_dir):
+        shutil.rmtree(dest_dir, ignore_errors=True)
+
     if retry_count <= 0:
         return False
-
-    existing = env_map.get(RETRY_IN_ENV)
-    if existing and os.path.isfile(os.path.join(existing, TAG_FILE)):
-        return True
 
     job_id = env_map.get("BUILDKITE_JOB_ID")
     if not job_id or not which("buildkite-agent"):
@@ -508,8 +520,6 @@ def prepare_retry_dir(
     if not tag:
         return False
 
-    if os.path.exists(dest_dir):
-        shutil.rmtree(dest_dir, ignore_errors=True)
     os.makedirs(dest_dir, exist_ok=True)
 
     dl_env = dict(env_map)
