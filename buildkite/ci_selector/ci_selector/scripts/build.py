@@ -65,6 +65,16 @@ WORLD_ENV = (
 JOB_STATE_PASSED = "passed"
 
 
+# Functions Python makes at runtime, not from source, so no source can produce
+# their names and no diff can name them. From 3.14 `dataclasses` and pydantic
+# generate a class's `__annotate__` (PEP 649) where the class body has none: a
+# 3.14 recording of vllm/config/*.py holds `CacheConfig.__annotate__`, and
+# reading that as an unfaithful recorder marked 2,599 files in build 105046.
+# A real recorder fault still shows on every other name.
+def _synthesized(name: str) -> bool:
+    return name.rsplit(".", 1)[-1] == "__annotate__"
+
+
 def read_world(build_dir: Path, index: dict) -> tuple[str, str, dict[str, str], bool]:
     """The build's identity: which pipeline, triggered how, under what env.
 
@@ -411,7 +421,7 @@ def merge_build(
                     stamp.dropped_absent_files += 1
                     continue
                 stamp.unfaithful_files.append(path)
-            elif not names <= compiled:
+            elif not {n for n in names if not _synthesized(n)} <= compiled:
                 stamp.unfaithful_files.append(path)
             functions[path] = frozenset(names)
             # Reuses the source the faithfulness check just compiled, so this

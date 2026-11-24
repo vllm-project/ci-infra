@@ -1,6 +1,7 @@
 """The selector gate: when the test selector may choose a PR build's steps,
 what it records, and that it never makes a build fail."""
 
+import gzip
 import json
 import os
 import subprocess
@@ -522,10 +523,11 @@ def test_a_step_without_a_key_is_not_classified():
 
 
 class _Response:
-    """What `urllib.request.urlopen` returns, enough for `_latest`."""
+    """What `urllib.request.urlopen` returns, enough for `_latest` and
+    `record_python`."""
 
     def __init__(self, body):
-        self.body = body
+        self.body = body if isinstance(body, bytes) else body.encode()
 
     def __enter__(self):
         return self
@@ -533,8 +535,23 @@ class _Response:
     def __exit__(self, *exc):
         return False
 
-    def read(self):
-        return self.body.encode()
+    def read(self, size=-1):
+        if size < 0:
+            out, self.body = self.body, b""
+        else:
+            out, self.body = self.body[:size], self.body[size:]
+        return out
+
+
+def _table(python="3.14.10"):
+    """The head of a published table.json.gz, as `record_python` reads it."""
+    stamp = {"jobs": ["j"], "interpreters": [python] if python else []}
+    table = {
+        "version": 8,
+        "source": {"commit": "f" * 40},
+        "rows": {"a-step": {"keyed": True, "stamp": stamp, "functions": {}}},
+    }
+    return gzip.compress(json.dumps(table, indent=1).encode())
 
 
 class _Publishing:
@@ -549,6 +566,8 @@ class _Publishing:
         return {"build": build, "commit": f"{recorder}-{build}".ljust(40, "0")}
 
     def urlopen(self, url, timeout=None):
+        if url.endswith("/table.json.gz"):
+            return _Response(_table())
         recorder = url.split("/ci/")[1].split("/")[0]
         self.reads[recorder] += 1
         return _Response(
@@ -598,6 +617,65 @@ def test_a_publish_mid_run_cannot_change_which_recordings_are_recorded(monkeypat
     assert "--table" not in select, "ci-select downloads the table itself"
     assert select_kw["env"][selector_gate.FNREC_COMMIT_ENV] == first["fnrec"]["commit"]
     assert selector_gate.FNREC_COMMIT_ENV not in os.environ, "set on ci-select only"
+
+
+def test_ci_select_runs_under_the_python_that_made_the_record(monkeypatch):
+    """vLLM's CI moved to 3.14 and its records with it; ci-select under 3.12
+    read every row as another Python's and dropped nothing."""
+    calls = _fake_selector_run(monkeypatch, _Publishing())
+
+    result = selector_gate.run_ci_select("/vllm", "a" * 40, "b" * 40, "vllm_ci")
+
+    uv_runs = [cmd for cmd, _ in calls if cmd[:2] == ["/bin/uv", "run"]]
+    assert uv_runs and all(c[c.index("--python") + 1] == "3.14" for c in uv_runs)
+    assert result["python"] == "3.14"
+
+
+@pytest.mark.parametrize(
+    "body, python",
+    [
+        (_table("3.14.10"), "3.14"),
+        (_table("3.13.2"), "3.13"),
+        # older than ci-select supports, or no interpreter on record
+        (_table("3.11.9"), selector_gate.DEFAULT_SELECTOR_PYTHON),
+        (_table(None), selector_gate.DEFAULT_SELECTOR_PYTHON),
+        (b"not gzip", selector_gate.DEFAULT_SELECTOR_PYTHON),
+        (OSError("S3 unreachable"), selector_gate.DEFAULT_SELECTOR_PYTHON),
+    ],
+    ids=["3.14", "3.13", "too-old", "unstamped", "corrupt", "unreachable"],
+)
+def test_the_record_python_is_read_off_the_table_head(monkeypatch, body, python):
+    """A table the gate cannot read leaves ci-select on its oldest Python,
+    where a record made by another one only adds steps: never a failed build."""
+    seen = []
+
+    def urlopen(url, timeout=None):
+        seen.append(url)
+        if isinstance(body, Exception):
+            raise body
+        return _Response(body)
+
+    monkeypatch.setattr(selector_gate.urllib.request, "urlopen", urlopen)
+    assert selector_gate.record_python("c" * 40) == python
+    assert seen == [selector_gate.TABLE_URL.format(commit="c" * 40)]
+
+
+def test_the_table_url_is_the_one_ci_select_downloads():
+    """The gate reads the head of the very table ci-select fetches for the
+    pinned commit (scripts/fetch_functions.py: DEFAULT_URL/<commit>/TABLE_NAME)."""
+    selector = os.path.join(
+        os.path.dirname(selector_gate.__file__),
+        "..",
+        "ci_selector",
+        "ci_selector",
+        "scripts",
+        "fetch_functions.py",
+    )
+    with open(selector) as f:
+        text = f.read()
+    base = selector_gate.TABLE_URL.split("/{commit}/")[0]
+    assert f'DEFAULT_URL = "{base}"' in text
+    assert selector_gate.TABLE_URL.endswith("/table.json.gz")
 
 
 @pytest.mark.parametrize(
