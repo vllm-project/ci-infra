@@ -21,6 +21,14 @@
 #      whole (nothing delivered, too few jobs, no valid pair) fails the step
 #      and is not published, while a whole one still publishes; every run
 #      leaves kernrec_collect_summary.json
+#  11. a backend armed with nothing delivered while the other delivered
+#      -> verdict short, not "no valid table/map pair", the other backend
+#      still publishes, exit 1
+#  12. counts but no share (SHARE=) -> the share gate is skipped, saying so
+#  13. a job with no recordings but a successful empty-job probe counts as
+#      delivered, and its row stays usable -> publishes
+#  14. the same probe on a job with a collection error is not delivered ->
+#      short, exit 1
 #
 # Real Python is used for kernel_table.py; only network/cloud commands are
 # faked. Set KERNREC_PYTHON to the project's virtual-environment interpreter.
@@ -43,6 +51,11 @@ run_case() { # name expect_exit expect_latest(yes|no) expect_commit_upload(yes|n
   [[ "$mode" == "no-rows" ]] && echo '{"step_key":"","exit_status":0}' > "$T/build/.kernrec/job-a/kernrec.json"
   [[ "$mode" == "unusable-rerun" ]] && echo '{"step_key":"step-x","exit_status":1}' > "$T/build/.kernrec/job-a/kernrec.json"
   [[ "$mode" == "empty" ]] && rm -rf "$T/build/.kernrec/job-a"
+  if [[ "$mode" == empty-probe* ]]; then
+    local error=null; [[ "$mode" == empty-probe-error ]] && error='"setup incomplete"'
+    mkdir -p "$T/build/.kernrec/job-b"
+    echo '{"step_key":"step-x","exit_status":0,"backend":"cuda","collection_available":true,"collection_error":'"$error"',"recordings":[],"empty_probe":{"ok":true,"recording":"# kernrec v1 backend=cuda recorder=cupti activity=1 sync=1 pid=3 ppid=1 exe=python\n# end records=0 unique=0 dropped=0 errors=0 unresolved=0\n"}}' > "$T/build/.kernrec/job-b/kernrec.json"
+  fi
   # a usable symbol map unless the case says otherwise
   if [[ "$mode" != "no-map" ]]; then
     "$KERNREC_PYTHON" - "$T/build/kernel_symbol_map.json.gz" <<'PY'
@@ -50,7 +63,7 @@ import gzip, json, sys
 json.dump({"version": 1, "commit": "abc", "objects": [{"source": "csrc/a.cu", "target": "_C", "object": "o", "device": True, "symbols": ["kernA"], "deps": ["csrc/a.cu"]}], "stats": {}}, gzip.open(sys.argv[1], "wt"))
 PY
   fi
-  if [[ "$mode" == rocm-* || "$mode" == both* ]]; then
+  if [[ "$mode" == rocm-* || "$mode" == both* || "$mode" == lost-rocm ]]; then
     mkdir -p "$T/build/.kernrec/job-amd"
     printf '# kernrec v1 backend=rocm recorder=rocprofiler-sdk pid=2\nkernAMD\n# end records=1 unique=1 dropped=0 errors=0 unresolved=0\n' > "$T/build/.kernrec/job-amd/kern.2.txt"
     echo '{"step_key":"amd-step-x","exit_status":0,"backend":"rocm"}' > "$T/build/.kernrec/job-amd/kernrec.json"
@@ -65,6 +78,8 @@ PY
   if [[ "$mode" == rocm-* ]]; then
     rm -rf "$T/build/.kernrec/job-a" "$T/build/kernel_symbol_map.json.gz"
   fi
+  # The ROCm image build uploaded its map; no ROCm job had uploaded yet.
+  [[ "$mode" == lost-rocm ]] && rm -rf "$T/build/.kernrec/job-amd"
   if [[ "$mode" == both-bad-rocm ]]; then
     printf 'invalid map' > "$T/build/kernel_symbol_map.rocm.json.gz"
   fi
@@ -117,7 +132,9 @@ EOF
 
   local branch=main
   [[ "$mode" == "fork-branch" ]] && branch="khluu:some-branch"
-  local extra=(${CASE_ENV:-})
+  # The share the generator passes; SHARE= runs without one.
+  local share=${SHARE-0.8}
+  local extra=(${share:+CI_SELECTOR_MIN_DELIVERED_SHARE=$share} ${CASE_ENV:-})
   [[ "$mode" == "other-build" ]] && extra=(KERNREC_SOURCE_BUILD_ID=src-uuid KERNREC_SOURCE_BUILD_NUMBER=41 KERNREC_SOURCE_JOBS=job-a)
   ( cd "$T" && PATH="$T/bin:$PATH" BUILDKITE_COMMIT=abc BUILDKITE_BUILD_NUMBER=42 BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       env ${extra[@]+"${extra[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
@@ -154,6 +171,22 @@ PY
     "$KERNREC_PYTHON" -c 'import gzip,json,sys; t=json.load(gzip.open(sys.argv[1],"rt")); sys.exit(0 if t["source"]["build"] == 41 else 1)' "$T/artifacts/kernel_table.json.gz" \
       || { verdict=FAIL; fail=1; echo "      table not stamped with build 41"; }
   fi
+  if [[ "$mode" == lost-rocm ]]; then
+    "$KERNREC_PYTHON" -c 'import json, sys; b = json.load(open(sys.argv[1]))["backends"]; print(b); sys.exit(0 if b["rocm"]["verdict"] == "short: 0 of 3 jobs delivered" and b["cuda"]["verdict"] == "ok" else 1)' \
+      "$T/artifacts/kernrec_collect_summary.json" | sed 's/^/      /' \
+      || { verdict=FAIL; fail=1; echo "      verdicts are not rocm short / cuda ok"; }
+    grep -q "rocm not published (short: 0 of 3 jobs delivered)" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      the log does not say rocm was short"; }
+  fi
+  if [[ "$mode" == empty-probe* ]]; then
+    local want_delivered=2; [[ "$mode" == empty-probe-error ]] && want_delivered=1
+    grep -q "^cuda: ${want_delivered} jobs delivered" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      cuda did not count ${want_delivered} delivered jobs"; }
+  fi
+  if [[ -z "$share" && -n "${CASE_ENV:-}" ]]; then
+    grep -q "no delivery share" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      skipped the share gate without saying so"; }
+  fi
   printf '%-4s %-18s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)  s3_untouched=%s\n' "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit" "$want_commit" "$untouched"
   [[ "$verdict" == FAIL ]] && sed 's/^/      /' "$T/log" | tail -12
   rm -rf "$T"
@@ -178,4 +211,8 @@ CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case ar
 CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1" run_case armed-empty       1 no  no  empty
 CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=5" run_case armed-short       1 no  no  normal
 CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=1" run_case armed-broken-cuda 1 yes yes both-bad-cuda no yes
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=1 KERNREC_EXPECTED_JOBS_ROCM=3" run_case armed-rocm-lost   1 yes yes lost-rocm
+SHARE= CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=5" run_case no-share          0 yes yes normal
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=2" run_case armed-empty-probed 0 yes yes empty-probed
+CASE_ENV="KERNREC_EXPECTED_JOBS_CUDA=2" run_case armed-empty-probe-error 1 no no empty-probe-error
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" || { echo "collect.sh publishing rules: FAIL"; exit 1; }

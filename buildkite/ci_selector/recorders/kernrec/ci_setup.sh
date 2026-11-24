@@ -57,10 +57,109 @@ data = {
                         if key in names or key.startswith("VLLM_ROCM_USE_AITER")},
     },
 }
+path = Path(env["KERNREC_DIR"]) / "kernrec.json"
+
+# Initializes the GPU like a workload process would, so the recorder loads.
+PROBE = r"""
+import ctypes
+import sys
+library = ctypes.CDLL(sys.argv[2])
+status = getattr(library, "cuInit" if sys.argv[1] == "cuda" else "hipInit")(0)
+if status:
+    sys.exit("GPU init returned %d" % status)
+"""
+
+
+def hip_library():
+    """The HIP runtime torch's HIP library resolves here, else the system one."""
+    import glob
+    import importlib.util
+    import re
+    import subprocess
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        spec = None
+    if spec and spec.origin:
+        lib = Path(spec.origin).parent / "lib"
+        try:
+            linked = subprocess.run(["ldd", str(lib / "libtorch_hip.so")], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10).stdout
+            match = re.search(r"libamdhip64\.so\S* => (/\S+)", linked)
+            if match:
+                return match.group(1)
+        except (OSError, subprocess.SubprocessError):
+            pass
+        bundled = sorted(glob.glob(str(lib / "libamdhip64.so*")))
+        if bundled:
+            return bundled[0]
+    system = Path(env.get("ROCM_PATH", "/opt/rocm")) / "lib" / "libamdhip64.so"
+    return str(system) if system.exists() else "libamdhip64.so"
+
+
+# An armed job that passed and left no recording either ran no GPU process or
+# lost its recorder. Show the recorder loads here, writing outside the upload.
+# Whether the recording proves it is kernel_table's call (_empty_probe_ok).
+def empty_probe():
+    import resource
+    import shutil
+    import signal
+    import subprocess
+    import tempfile
+    scratch = tempfile.mkdtemp(prefix="kernrec-probe-")
+    try:
+        library = "libcuda.so.1" if backend == "cuda" else hip_library()
+        process = subprocess.Popen(
+            [sys.executable, "-S", "-c", PROBE, backend, library], cwd=scratch,
+            env=dict(env, KERNREC_DIR=scratch), stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
+            preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_CORE, (0, 0)))
+        try:
+            _, stderr = process.communicate(timeout=float(env.get("KERNREC_PROBE_TIMEOUT") or 60))
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                # Stuck in the driver: leave it rather than hold the job.
+                return {"ok": False, "detail": "GPU init probe hung in " + library}
+            return {"ok": False, "detail": "GPU init probe timed out in " + library}
+        if process.returncode:
+            status = process.returncode
+            detail = ("probe killed by signal %d" % -status if status < 0
+                      else "probe exited %d" % status)
+            lines = [line for line in stderr.decode(errors="replace").splitlines()
+                     if line.strip() and not line.startswith("***")]
+            return {"ok": False, "detail": (detail + (": " + lines[-1] if lines else ""))[:400]}
+        files = sorted(Path(scratch).iterdir())
+        if len(files) != 1 or not files[0].name.startswith("kern."):
+            return {"ok": False, "detail": "probe wrote %d files with %s, expected one recording"
+                    % (len(files), library)}
+        return {"ok": True, "detail": "recorder loaded with " + library,
+                "recording": files[0].read_text(errors="replace")[:4096]}
+    except Exception as error:
+        return {"ok": False, "detail": ("probe failed: %r" % error)[:300]}
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 if data["exit_status"] is not None:
     # Inventory at finish, so the collector can tell a partial download apart.
     data["recordings"] = sorted(p.name for p in Path(env["KERNREC_DIR"]).glob("kern.*.txt"))
-path = Path(env["KERNREC_DIR"]) / "kernrec.json"
+    try:
+        previous = json.loads(path.read_text())
+    except (OSError, ValueError):
+        previous = None
+    # The setup sidecar must still be there: a wiped job directory is not empty.
+    if (data["exit_status"] == 0 and data["collection_available"]
+            and not data["collection_error"] and not data["recordings"]
+            and backend in ("cuda", "rocm") and isinstance(previous, dict)
+            and previous.get("collection_available") is True):
+        # kernrec_finish can run twice (generator command, then EXIT trap).
+        if previous.get("recordings") == [] and isinstance(previous.get("empty_probe"), dict):
+            data["empty_probe"] = previous["empty_probe"]
+        else:
+            data["empty_probe"] = empty_probe()
 temporary = path.with_suffix(".json.tmp")
 temporary.write_text(json.dumps(data, indent=2) + "\n")
 temporary.chmod(0o666)
@@ -84,16 +183,18 @@ kernrec_finish() {
   fi
 }
 
-# CUPTI has one activity client per process. kernrec_torch.py makes the
-# recorder step aside when a CUDA torch.profiler starts; without it that
-# profiler records nothing. Best effort: on failure the step still records.
+# Installs a startup hook module ($3) next to a .pth in site-packages.
+# CUDA: kernrec_torch.py makes CUPTI's single activity client step aside when a
+# torch.profiler starts. ROCm: kernrec_rocm_kineto.py puts libtorch_cpu.so in the
+# global scope before torch import, so Kineto registers with the SDK alongside
+# the recorder. Best effort: on failure the step still records.
 kernrec_install_torch_hook() {
-  local dir="$1" base="$2"
-  if [ ! -s "$dir/kernrec_torch.py" ]; then
-    curl -sSfL --retry 3 --max-time 60 -o "$dir/kernrec_torch.py.tmp" "$base/kernrec_torch.py" \
-      && mv "$dir/kernrec_torch.py.tmp" "$dir/kernrec_torch.py" || return 1
+  local dir="$1" base="$2" module="$3"
+  if [ ! -s "$dir/$module.py" ]; then
+    curl -sSfL --retry 3 --max-time 60 -o "$dir/$module.py.tmp" "$base/$module.py" \
+      && mv "$dir/$module.py.tmp" "$dir/$module.py" || return 1
   fi
-  KERNREC_TORCH_HOOK="$dir/kernrec_torch.py" "${KERNREC_PYTHON:-python3}" - <<'PY'
+  KERNREC_TORCH_HOOK="$dir/$module.py" KERNREC_TORCH_MODULE="$module" "${KERNREC_PYTHON:-python3}" - <<'PY'
 import os
 import shutil
 import site
@@ -104,9 +205,10 @@ target = os.environ.get("KERNREC_SITE_DIR") or next(
 )
 if not target:
     sys.exit(1)
-shutil.copyfile(os.environ["KERNREC_TORCH_HOOK"], os.path.join(target, "kernrec_torch.py"))
-with open(os.path.join(target, "kernrec_torch.pth"), "w") as pth:
-    pth.write("import kernrec_torch\n")
+module = os.environ["KERNREC_TORCH_MODULE"]
+shutil.copyfile(os.environ["KERNREC_TORCH_HOOK"], os.path.join(target, module + ".py"))
+with open(os.path.join(target, module + ".pth"), "w") as pth:
+    pth.write(f"import {module}\n")
 PY
 }
 
@@ -160,7 +262,7 @@ PY
       fi
       export CUDA_INJECTION64_PATH="$dir/libkernrec.so"
       export VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS="${VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS:-30}"
-      kernrec_install_torch_hook "$dir" "$base" \
+      kernrec_install_torch_hook "$dir" "$base" kernrec_torch \
         || echo "kernrec: torch.profiler hand-off not installed; a CUDA profiler in this step will see no GPU activity" >&2
       ;;
     rocm)
@@ -213,6 +315,8 @@ PY
         *":$sdk_lib/librocprofiler-sdk.so:"*) ;;
         *) export LD_PRELOAD="$sdk_lib/librocprofiler-sdk.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
       esac
+      kernrec_install_torch_hook "$dir" "$base" kernrec_rocm_kineto \
+        || echo "kernrec: Kineto hook not installed; torch.profiler in this step may see no GPU activity" >&2
       ;;
     *) KERNREC_COLLECTION_ERROR="unsupported recorder backend: $KERNREC_BACKEND"; return 1 ;;
   esac

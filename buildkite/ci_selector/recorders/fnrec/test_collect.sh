@@ -11,6 +11,11 @@
 #   6. a branch that is not main    -> artifacts only, exit 0, S3 untouched
 #   7. fewer jobs delivered than the generator armed -> exit 1, S3 untouched
 #   8. folding another build, per job -> its recordings, number and count
+#  10. recordings made by Python 3.14 -> folded under 3.14, not 3.12
+#   9. delivered under the share of armed (CI_SELECTOR_MIN_DELIVERED_SHARE)
+#      -> refused before the fold: verdict short, exit 1, S3 untouched. At the
+#      share it publishes. Without a share the gate is skipped and only the
+#      builder's own floor applies
 #
 # Real python3 and the real fold, so what is under test is what runs in CI.
 # The fold runs through uv exactly as collect.sh runs it in CI, so these cover
@@ -43,11 +48,11 @@ make_vllm_repo() { # dir [marker] -> prints the commit
 }
 
 # One job's recording, in the shape the recorder writes.
-write_job() { # dir step_key
-  local d=$1 key=$2
+write_job() { # dir step_key [python]
+  local d=$1 key=$2 py=${3:-3.12.13}
   mkdir -p "$d"
-  printf '#start\tpid=1\troot=vllm/\tpy=3.12.13\tBUILDKITE_JOB_ID=%s\tBUILDKITE_STEP_KEY=%s\n#root\tvllm/\tt=1\nvllm/mod.py\tplain\t1\n#end\troot=1\tother=0\terrors=0\tlast_error=\tt=2\n' \
-    "$(basename "$d")" "$key" > "$d/fn.a.txt"
+  printf '#start\tpid=1\troot=vllm/\tpy=%s\tBUILDKITE_JOB_ID=%s\tBUILDKITE_STEP_KEY=%s\n#root\tvllm/\tt=1\nvllm/mod.py\tplain\t1\n#end\troot=1\tother=0\terrors=0\tlast_error=\tt=2\n' \
+    "$py" "$(basename "$d")" "$key" > "$d/fn.a.txt"
   printf '{"event":"collected","selected":3,"deselected":0}\n{"event":"session","passed":3,"failed":0,"errors":0,"skipped":0,"selected":3,"testsfailed":0,"exitstatus":0}\n' \
     > "$d/pytest.1.jsonl"
   : > "$d/pytest.installed"
@@ -65,6 +70,10 @@ run_case() { # name expect_exit expect_latest expect_commit mode [s3_untouched]
     # it, so the job contributes no row and the table comes out empty.
     unreadable) mkdir -p "$T/build/.fnrec/job-a"
              printf '#start\tpid=1\troot=\tpy=3.12.13\n' > "$T/build/.fnrec/job-a/fn.a.txt" ;;
+    short|no-share) for j in a b c; do write_job "$T/build/.fnrec/job-$j" "step-$j"; done ;;
+    at-share) for j in a b c d; do write_job "$T/build/.fnrec/job-$j" "step-$j"; done ;;
+    # Recorded by vLLM CI's Python 3.14: the fold must run under it.
+    py314) write_job "$T/build/.fnrec/job-a" step-x 3.14.10 ;;
     *) write_job "$T/build/.fnrec/job-a" step-x ;;
   esac
 
@@ -77,6 +86,11 @@ run_case() { # name expect_exit expect_latest expect_commit mode [s3_untouched]
   local expected=1
   [[ "$mode" == "below-floor" ]] && expected=10
   [[ "$mode" == "no-recordings-unarmed" ]] && expected=""
+  [[ "$mode" == short || "$mode" == at-share || "$mode" == no-share ]] && expected=5
+  # The share the generator passes. no-share and below-floor run without one,
+  # below-floor to reach the builder's own floor.
+  local share=0.8
+  [[ "$mode" == no-share || "$mode" == below-floor ]] && share=""
   # Folding another build: this build's own count is wrong for the source, so
   # the case passes only if the source's is the one the fold uses. The stand-in
   # agent serves nothing unless asked for the source build.
@@ -117,7 +131,7 @@ EOF
       BUILDKITE_PIPELINE_SLUG=ci CI_SELECTOR_BUCKET=bkt BUILDKITE_BRANCH="$branch" \
       FNREC_CI_INFRA="$REPO" FNREC_VLLM_REPO="$vllm" \
       FNREC_EXPECTED_JOBS="$expected" \
-      env ${source_env[@]+"${source_env[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
+      env ${share:+CI_SELECTOR_MIN_DELIVERED_SHARE="$share"} ${source_env[@]+"${source_env[@]}"} bash "$HERE/collect.sh" >"$T/log" 2>&1 ); rc=$?
 
   local latest=no commit_up=no untouched=no
   [[ -f "$T/s3/bkt/ci/fnrec/latest.json" ]] && latest=yes
@@ -143,6 +157,21 @@ EOF
     grep -q "REFUSING" "$T/log" \
       || { verdict=FAIL; fail=1; echo "      refused, but not by the delivery check"; }
   fi
+  if [[ "$mode" == short ]]; then
+    grep -q '"verdict": "short: 3 of 5 jobs delivered"' "$T/artifacts/fnrec_collect_summary.json" 2>/dev/null \
+      || { verdict=FAIL; fail=1; echo "      verdict is not short: 3 of 5"; }
+    ! grep -q "Building the coverage table" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      refused after the fold, not before it"; }
+  fi
+  if [[ "$mode" == py314 || "$mode" == happy ]]; then
+    local want_py=3.12; [[ "$mode" == py314 ]] && want_py=3.14
+    grep -q "folding under Python ${want_py}," "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      not folded under the recordings' Python ${want_py}"; }
+  fi
+  if [[ "$mode" == no-share ]]; then
+    grep -q "no delivery share" "$T/log" \
+      || { verdict=FAIL; fail=1; echo "      skipped the share gate without saying so"; }
+  fi
   printf '%-4s %-14s exit=%s (want %s)  latest=%s (want %s)  commit_upload=%s (want %s)  s3_untouched=%s\n' \
     "$verdict" "$name" "$rc" "$want_rc" "$latest" "$want_latest" "$commit_up" "$want_commit" "$untouched"
   [[ "$verdict" == FAIL ]] && sed 's/^/      /' "$T/log" | tail -14
@@ -158,5 +187,9 @@ run_case no-identity    0 no  no  no-identity
 run_case fork-branch    0 no  no  fork-branch  yes
 run_case below-floor    1 no  no  below-floor  yes
 run_case another-build  0 yes yes another-build
+run_case short          1 no  no  short        yes
+run_case at-share       0 yes yes at-share
+run_case no-share       0 yes yes no-share
+run_case py314          0 yes yes py314
 echo; [[ $fail == 0 ]] && echo "collect.sh publishing rules: PASS" \
   || { echo "collect.sh publishing rules: FAIL"; exit 1; }

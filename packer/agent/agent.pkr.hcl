@@ -23,11 +23,20 @@ source "amazon-ebs" "agent" {
   ssh_interface               = "private_ip"
   ssh_username                = "ec2-user"
   ssh_timeout                 = "15m"
+
+  # packer_build_queue may stop and terminate only instances with this tag
+  # (packer-ami-builder-policy in ci-infra-private).
+  run_tags = {
+    vllm-packer = "true"
+  }
 }
 build {
   sources = ["source.amazon-ebs.agent"]
   provisioner "shell" {
     script = "install-agent.sh"
+    environment_vars = [
+      "REQUIRE_EXACT_AGENT_VERSION=true"
+    ]
   }
   post-processor "manifest" {
     output     = "manifest-${var.architecture}.json"

@@ -9,6 +9,7 @@
 
 using Symbol = rocprofiler_callback_tracing_code_object_kernel_symbol_register_data_t;
 using Dispatch = rocprofiler_buffer_tracing_kernel_dispatch_record_t;
+using Enqueue = rocprofiler_callback_tracing_kernel_dispatch_data_t;
 
 void symbol(uint64_t id, const char* name,
             rocprofiler_callback_phase_t phase = ROCPROFILER_CALLBACK_PHASE_LOAD) {
@@ -36,18 +37,121 @@ void dispatch(uint64_t id, uint64_t dropped = 0) {
   dispatch_callback({}, {}, &ptr, 1, nullptr, dropped);
 }
 
+void enqueue(uint64_t id,
+             rocprofiler_callback_phase_t phase = ROCPROFILER_CALLBACK_PHASE_ENTER) {
+  Enqueue data{};
+  data.size = sizeof(data);
+  data.dispatch_info.kernel_id = id;
+  rocprofiler_callback_tracing_record_t record{};
+  record.kind = ROCPROFILER_CALLBACK_TRACING_KERNEL_DISPATCH;
+  record.operation = ROCPROFILER_KERNEL_DISPATCH_ENQUEUE;
+  record.phase = phase;
+  record.payload = &data;
+  enqueue_callback(record, nullptr, nullptr);
+}
+
 std::string contents(pid_t pid) {
   std::ifstream input(std::string(state->dir) + "/kern." + std::to_string(pid) + ".txt");
   return std::string(std::istreambuf_iterator<char>(input), {});
 }
 
+size_t count(const std::string& text, const std::string& needle) {
+  size_t n = 0;
+  for (size_t at = text.find(needle); at != std::string::npos;
+       at = text.find(needle, at + 1))
+    ++n;
+  return n;
+}
+
+// Launch-time names: the enqueue callback writes each name before its packet
+// is queued, so a SIGKILLed process leaves a complete file. Buffered records
+// cross-check it.
+void check_sync(const std::string& root) {
+  unsetenv("KERNREC_SYNC");
+  rocprofiler_client_id_t client{};
+
+  pid_t child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    setenv("KERNREC_DIR", (root + "/sync-killed").c_str(), 1);
+    if (!rocprofiler_configure(ROCPROFILER_SDK_VERSION, "", 0, &client)) _exit(2);
+    symbol(1, "_Z4usedv.kd");
+    symbol(2, "_Z6unusedv.kd");
+    enqueue(1);
+    enqueue(1);
+    enqueue(1, ROCPROFILER_CALLBACK_PHASE_EXIT);
+    raise(SIGKILL);  // no buffer flush, no footer
+    _exit(3);
+  }
+  int status = 0;
+  assert(waitpid(child, &status, 0) == child && WIFSIGNALED(status) &&
+         WTERMSIG(status) == SIGKILL);
+  std::ifstream input(root + "/sync-killed/kern." + std::to_string(child) + ".txt");
+  std::string killed(std::istreambuf_iterator<char>(input), {});
+  assert(killed.find(" activity=1 sync=1 pid=") != std::string::npos);
+  assert(killed.find("# gpu_active\n_Z4usedv\n") != std::string::npos);
+  assert(count(killed, "_Z4usedv") == 1);
+  assert(killed.find("unused") == std::string::npos);
+  assert(killed.find("# error") == std::string::npos);
+  assert(killed.find("# end") == std::string::npos);
+  assert(killed.back() == '\n');
+
+  child = fork();
+  assert(child >= 0);
+  if (child == 0) {
+    setenv("KERNREC_DIR", (root + "/sync").c_str(), 1);
+    assert(rocprofiler_configure(ROCPROFILER_SDK_VERSION, "", 0, &client));
+    symbol(1, "_Z4usedv.kd");
+    symbol(2, "_Z6otherv.kd");
+    symbol(4, "_Z5aliasv.kd");
+    enqueue(1);
+    dispatch(1);  // already named at enqueue: no error
+    enqueue(4);
+    symbol(5, "_Z5aliasv.kd");  // same name, new id (code object reloaded)
+    enqueue(5);
+    dispatch(2);  // ran but never enqueued through the callback
+    enqueue(99);  // no symbol: cannot vouch for this launch
+    enqueue(98);
+    enqueue(99);
+    enqueue(1);
+    // A fork child launching a kernel its parent loaded never loads GPU code
+    // itself; the enqueue callback still marks its trace incomplete.
+    pid_t grandchild = fork();
+    assert(grandchild >= 0);
+    if (grandchild == 0) {
+      enqueue(1);
+      _exit(0);
+    }
+    int child_status = 0;
+    assert(waitpid(grandchild, &child_status, 0) == grandchild && child_status == 0);
+    auto forked = contents(grandchild);
+    assert(forked.find("forked=1\n# error=gpu_use_after_fork\n") != std::string::npos);
+    assert(forked.find("_Z4usedv") == std::string::npos);
+    finish_output();
+    auto text = contents(getpid());
+    assert(count(text, "\n_Z4usedv\n") == 1);
+    assert(count(text, "_Z5aliasv") == 1);
+    assert(text.find("# error=callback-missed _Z6otherv\n_Z6otherv\n") != std::string::npos);
+    assert(count(text, "# error=callback-unresolved\n") == 1);
+    assert(text.find("# end records=2 unique=3 dropped=0 errors=2 unresolved=0\n") !=
+           std::string::npos);
+    _exit(0);
+  }
+  assert(waitpid(child, &status, 0) == child && WIFEXITED(status) &&
+         WEXITSTATUS(status) == 0);
+}
+
 int main(int argc, char** argv) {
   assert(argc == 2);
+  check_sync(argv[1]);
+  // The rest checks the footer contract, which KERNREC_SYNC=0 restores.
+  setenv("KERNREC_SYNC", "0", 1);
   setenv("KERNREC_DIR", argv[1], 1);
   rocprofiler_client_id_t client{};
   assert(rocprofiler_configure(ROCPROFILER_SDK_VERSION, "", 0, &client));
   assert(contents(getpid()).find("backend=rocm recorder=rocprofiler-sdk activity=1 ") !=
          std::string::npos);
+  assert(contents(getpid()).find("sync=1") == std::string::npos);
   assert(contents(getpid()).find("# gpu_active") == std::string::npos);
 
   // Only dispatched symbols belong in the output; unload cannot invalidate names.

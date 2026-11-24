@@ -155,7 +155,7 @@ Inside csrc the kernel record decides per kernel where it can and per file where
 
 The pipeline generator calls the tool from its bootstrap step (`buildkite/pipeline_generator/selector_gate.py`). It runs `ci-select --emit-keys` from a shallow ci-infra checkout with the latest published records, and the keys it gets back decide which steps run. The generator walks each named step's `depends_on` chain for everything else: the tool names test steps only, and image builds and other prerequisites follow. Every step it does not name stays in the pipeline as deferred, so the build's **Run more jobs** input step can still add it.
 
-Main builds are selected against their parent commit. Release branches, nightly and run-all builds (the scheduled full CI runs among them), and builds that already name their steps through `VLLM_CI_ONLY_STEP_KEYS` are left to the generator's own rules. Each decision is uploaded as `.buildkite/ci_selector_decision.json`, with today's rules' answer beside it and, per step, why it ran.
+Main builds are selected against their parent commit. Release branches, nightly, AITER nightly and run-all builds (the scheduled full CI runs among them), and builds that already name their steps through `VLLM_CI_ONLY_STEP_KEYS` are left to the generator's own rules. Each decision is uploaded as `.buildkite/ci_selector_decision.json`, with today's rules' answer beside it and, per step, why it ran.
 
 Emission is the one place where a bug makes CI run less rather than more. Three failure modes resolve to omitting the key list, and an omitted list means the generator applies its own rules: when the answer is "run everything", when a selected step cannot be named, and when the key set is empty, since an empty list would mean "run nothing". The same holds a level up: a crash, a timeout, a key the generator does not know, or a dependency it cannot resolve all leave today's rules in place, and the decision file says which. Optional steps the tool names are left optional, as today's rules leave them.
 
@@ -181,7 +181,7 @@ vLLM keeps changing underneath the tool, so the checks are part of it rather tha
 
 **Detection floors.** Every check asks whether anything unknown is present, and that question reports green when the detector has stopped detecting, because zero findings and zero capability look identical from outside. So checks assert their own output volume. The comparison against the generator fails if it verified fewer than a thousand cases, so a parser that stops finding things fails loudly rather than reporting a clean repository.
 
-**Preflight, on every selection.** Nine derived tables are checked for emptiness, an unknown yaml field on a step force-selects that step, an unreadable command force-selects, and a device outside the known hardware taxonomy switches off the rules that depend on it.
+**Preflight, on every selection.** Nine derived tables are checked for emptiness, an unknown yaml field on a step force-selects that step, an unreadable command force-selects, and a device outside the known hardware taxonomy keeps its own steps through every family narrowing, since they could belong to any family, and switches off the rule that runs nothing when a family has no steps.
 
 **Crosscheck.** Given real pull request numbers, it rebuilds the tool's state at each base, runs both inputs and a replica of today's generator, and compares all three against the jobs Buildkite ran and which of those failed.
 

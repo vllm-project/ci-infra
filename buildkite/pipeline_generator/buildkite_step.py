@@ -1,9 +1,9 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from typing import Dict, List, Optional, Any, Literal, Tuple
 from copy import deepcopy
+import json
 import math
 import os
-import time
 import re
 import shlex
 
@@ -11,7 +11,9 @@ from amd import (
     AMD_ALWAYS_RUN_STEP_KEYS,
     AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES,
     AMD_ROCM_BASE_REFRESH_STEP_KEY,
-    _amd_mirror_should_run,
+    AMD_ROCM_STACK_FILES,
+    amd_dependencies,
+    amd_step_redefined,
     build_amd_step_options,
     ensure_amd_stack_error_retry,
     get_amd_agent_queue,
@@ -38,6 +40,7 @@ from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
 from recorder_switches import fnrec_enabled, kernrec_amd_enabled, kernrec_enabled
 import runtime_shard
+from unblock_jobs import plain_label
 
 # Key for the dedicated pre-commit step. Test steps that depend on an image
 # build also depend on this so pre-commit and image build can run in parallel.
@@ -46,15 +49,30 @@ PRECOMMIT_GROUP = "GitHub pre-commit check"
 # The CUDA image build. Every PR test step waits on it.
 CUDA_IMAGE_BUILD_STEP_KEY = "image-build"
 AMD_GROUP = "Hardware-AMD Tests"
-PRECOMMIT_MAX_WAIT = 3600  # 30 minutes
+PRECOMMIT_MAX_WAIT = 3600  # 1 hour
 PRECOMMIT_WAIT_INTERVAL = 60
 
 SKIP_TIMEOUT_ENV_VAR = "SKIP_TIMEOUT"
+# A job that hits its timeout also reports -1, with signal_reason "cancel",
+# and this rule retries it once. It gets no rule of its own: Buildkite counts
+# each rule's limit separately, so a second -1 rule would give a job that lost
+# its agent and then timed out a third run. Count timeouts by signal_reason.
 EXIT_STATUS_NEGATIVE_ONE_RETRY = {"exit_status": -1, "limit": 1}
-# The self-hosted GPU agent hooks exit 255 on provider/infrastructure failures
-# (ECR login, secret-store fetch, docker pull). The agent preserves a hook's
-# exit code as the job's exit status, so retry 255 like agent-lost.
+# 255 is the agent being terminated, and what the self-hosted GPU agent hooks
+# exited with on any provider failure before they had codes of their own.
 EXIT_STATUS_255_RETRY = {"exit_status": 255, "limit": 1}
+# The hooks' own codes for a provider call that failed every in-hook retry,
+# one per call so each failure is told apart in Buildkite: 201 GitHub token
+# (pre-checkout), 202 ECR public login, 203 ECR cache login, 204 GPU discovery,
+# 205 docker pull (environment). No test or agent exits in this range.
+HOOK_FAILURE_EXIT_STATUSES = [201, 202, 203, 204, 205]
+EXIT_STATUS_HOOK_RETRY = {"exit_status": HOOK_FAILURE_EXIT_STATUSES, "limit": 1}
+# The agent's own "checkout timed out waiting for a Git mirrors lock", raised
+# before the step's command runs, so a retry can't hide a test failure. Of 8
+# such failures in two days, 7 passed when retried by hand. Crash statuses
+# (134, 139) are deliberately not here: they were mostly one real,
+# recurring crash that a retry would only repeat.
+EXIT_STATUS_94_RETRY = {"exit_status": 94, "limit": 1}
 
 # Pod-level failures on EKS surface as agent stops / lost pods rather than
 # clean non-zero exits, which exit-code-only retries would miss.
@@ -105,10 +123,13 @@ def _otel_setup_command() -> str:
         'ci_otel_run() { shift 2; env "$$@"; return $$?; }; '
         'CI_INFRA_OTEL_DIR="$${CI_INFRA_OTEL_DIR:-'
         # Native AMD pods run from /vllm-workspace, which has no .git; their
-        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The fallback keeps the
+        # checkout is BUILDKITE_BUILD_CHECKOUT_PATH. The CPU test image has no
+        # .git either and the docker plugin passes no checkout path in, so the
+        # last resort is the image's own copy. The fallback keeps the
         # assignment successful under `sh -e`; a missing helper stays fail-open.
         "$$(git rev-parse --show-toplevel 2>/dev/null || "
-        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-}")/'
+        'printf %s "$${BUILDKITE_BUILD_CHECKOUT_PATH:-'
+        f'{runtime_shard.CONTAINER_WORKSPACE}}}")/'
         '.buildkite/scripts/ci-otel}"; export CI_INFRA_OTEL_DIR; '
         'if [ -f "$$CI_INFRA_OTEL_DIR/ci_otel.sh" ] && '
         'sh -n "$$CI_INFRA_OTEL_DIR/ci_otel.sh" && '
@@ -122,20 +143,30 @@ def _otel_setup_command() -> str:
 # carries no shell variables (nothing for `buildkite-agent pipeline upload` to
 # interpolate) and needs no third-party Python packages on the agent.
 _PRECOMMIT_POLL_PROGRAM = """\
-import json, subprocess, time, urllib.request
+import http.client, json, subprocess, time, urllib.error, urllib.request
 commit = "{commit}"
 repo = "{repo}"
 api_url = "https://api.github.com/repos/" + repo + "/commits/" + commit + "/check-runs"
 max_wait = {max_wait}
 wait_interval = {wait_interval}
-elapsed = 0
+# Time from a fixed start, so requests that time out count against max_wait too.
+start = time.monotonic()
 while True:
     request = urllib.request.Request(api_url)
     request.add_header("User-Agent", "vllm-ci-precommit-check")
     request.add_header("Accept", "application/vnd.github+json")
-    with urllib.request.urlopen(request) as response:
-        check_runs = json.load(response).get("check_runs", [])
-    precommit_run = next((run for run in check_runs if run["name"] == "pre-commit"), None)
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            check_runs = json.load(response).get("check_runs", [])
+    except (OSError, http.client.HTTPException) as error:
+        # A GitHub 5xx, timeout or dropped connection (also mid-body, which
+        # raises IncompleteRead) is no answer, so poll again within max_wait;
+        # a 4xx is a real error and still fails.
+        if isinstance(error, urllib.error.HTTPError) and error.code < 500:
+            raise
+        print("GitHub API request failed (" + type(error).__name__ + ": " + str(error) + "); polling again.")
+        check_runs = None
+    precommit_run = next((run for run in check_runs or [] if run["name"] == "pre-commit"), None)
     if precommit_run and precommit_run["status"] == "completed":
         conclusion = precommit_run["conclusion"]
         if conclusion == "success":
@@ -150,16 +181,17 @@ while True:
             raise SystemExit("pre-commit check failed on commit " + commit + " (conclusion: " + str(conclusion) + ").")
         print("pre-commit check did not fail (conclusion: " + str(conclusion) + "); allowing CI to proceed.")
         raise SystemExit(0)
+    elapsed = int(time.monotonic() - start)
     if elapsed >= max_wait:
         # Do not block CI if the check never completes; the pre-commit check on
         # the PR still surfaces a genuine failure independently.
         subprocess.run(["buildkite-agent", "annotate", ":warning: Timed out waiting for the pre-commit check to complete; allowing CI to proceed. See the pre-commit check on the PR for its status.", "--style", "warning"], check=False)
         print("Timed out after " + str(max_wait) + "s waiting for pre-commit check on commit " + commit + "; allowing CI to proceed.")
         raise SystemExit(0)
-    status = precommit_run["status"] if precommit_run else "not found"
+    status = precommit_run["status"] if precommit_run else ("unknown" if check_runs is None else "not found")
     print("pre-commit check is not yet complete (status: " + status + "). Waiting " + str(wait_interval) + "s... (" + str(elapsed) + "/" + str(max_wait) + "s)")
-    time.sleep(wait_interval)
-    elapsed += wait_interval
+    # Never sleep past max_wait, so the gate ends within one request of it.
+    time.sleep(min(wait_interval, max_wait - elapsed))
 """
 
 
@@ -184,6 +216,9 @@ def create_precommit_group_step(repo_name: str, commit: str) -> "BuildkiteGroupS
         depends_on=[],
         agents={"queue": AgentQueue.SMALL_CPU_PREMERGE},
         priority=1000 if os.getenv("PRIORITY", "") == "HIGH" else 0,
+        # A failed gate blocks every test after it, so an infra failure
+        # before its check runs must retry, not fail the build.
+        retry=ensure_infra_failure_retry(None),
     )
     return BuildkiteGroupStep(group=PRECOMMIT_GROUP, steps=[precommit_step])
 
@@ -223,6 +258,12 @@ def _get_step_agents(step: Step) -> Dict[str, str]:
 SetupProfile = Literal["nvidia", "amd", "none"]
 
 
+def _get_setup_profile(step: Step) -> SetupProfile:
+    if step.device == DeviceType.INTEL_GPU_K8S:
+        return "none"
+    return "nvidia"
+
+
 def _get_timeout_in_minutes(
     timeout_in_minutes: Optional[int],
 ) -> Optional[int]:
@@ -230,6 +271,14 @@ def _get_timeout_in_minutes(
     if os.getenv(SKIP_TIMEOUT_ENV_VAR) == "1":
         return None
     return timeout_in_minutes
+
+
+# Each step gets its own GitHub commit status next to the build's. Buildkite
+# posts a step-level status per step, its parallel jobs folded, and the condition
+# keeps it to the final result (passed, failed, or errored as a timeout does): no
+# pending or running updates, so one request per step, and a retry that passes
+# turns a red status green. Soft fails post nothing.
+STEP_STATUS_PREFIX = "ci/step: "
 
 
 class BuildkiteCommandStep(BaseModel):
@@ -253,6 +302,21 @@ class BuildkiteCommandStep(BaseModel):
     # Not selected to run: left out of the pipeline and offered in the
     # "Run more jobs" input step instead (see split_deferred_steps).
     deferred: bool = Field(default=False, exclude=True)
+
+    @computed_field
+    def notify(self) -> List[Dict[str, Any]]:
+        """The step's result status, named by its label as written, so after
+        " Shard %N/%t" is added; GitHub doesn't render Buildkite's emoji."""
+        name = plain_label(self.label)
+        return [
+            {
+                "github_commit_status": {"context": STEP_STATUS_PREFIX + name},
+                "if": (
+                    'step.outcome == "passed" || step.outcome == "hard_failed"'
+                    ' || step.outcome == "errored"'
+                ),
+            }
+        ]
 
     def to_yaml(self):
         return {
@@ -314,6 +378,7 @@ K8S_PLUGIN_DEVICES = (
     DeviceType.A100.value,
     DeviceType.B200_K8S.value,
     DeviceType.L4.value,
+    DeviceType.INTEL_GPU_K8S.value,
 )
 
 
@@ -329,8 +394,11 @@ def _get_step_plugin(step: Step):
         DeviceType.CPU_MEDIUM,
     )
     use_arm64 = step.device in (DeviceType.DGX_SPARK, DeviceType.GH200)
+    use_xpu = step.device == DeviceType.INTEL_GPU_K8S
     if _uses_k8s_plugin(step):
-        return get_k8s_plugin(step, get_image(use_cpu))
+        return get_k8s_plugin(step, get_image(use_cpu, xpu=use_xpu))
+    elif step.device == DeviceType.ARM_CPU:
+        return {"docker#v5.2.0": get_docker_plugin(step, get_image(True, True))}
     else:
         return {"docker#v5.2.0": get_docker_plugin(step, get_image(use_cpu, use_arm64))}
 
@@ -387,6 +455,8 @@ def get_agent_queue(step: Step):
         return AgentQueue.INTEL_HPU
     elif step.device == DeviceType.INTEL_GPU:
         return AgentQueue.INTEL_GPU
+    elif step.device == DeviceType.INTEL_GPU_K8S:
+        return AgentQueue.INTEL_GPU_K8S
     elif step.device == DeviceType.ARM_CPU:
         return AgentQueue.ARM_CPU
     elif amd_gpu_queue := get_amd_agent_queue(step.device):
@@ -479,11 +549,47 @@ KERNREC_SKIP_STEPS = {
     "quantization": "int4 per-token KV cache test fails under CUPTI",
 }
 
+# Key prefixes of steps the ROCm recorder stays off, and why. Applies to the
+# AMD mirror and leaves the CUDA step recording. Matched with startswith, so
+# an entry also covers every key it prefixes.
+KERNREC_AMD_SKIP_STEP_PREFIXES = {
+    # Dispatch tracing swaps each completion signal for a pooled one, and
+    # rocprofiler-sdk 1.3.5 can release it while HIP still uses it:
+    # SIGSEGV in pool<signal_t>::release <- AsyncSignalHandler after the
+    # first mid-serving Triton JIT (vllm/ci #101909, #102057). 2 in ~58
+    # recorded runs, 0 in ~900 unrecorded. Back on once the image's SDK
+    # carries ROCm/rocm-systems#14385.
+    "lm-eval-turboquant-": "rocprofiler-sdk dispatch-signal SIGSEGV",
+}
+
+# Keys of steps the ROCm recorder stays off, matched exactly against the
+# step's own key (the CUDA key for a mirror), so no other step shares an
+# entry. An armed step needs a complete recording from every GPU-active
+# process to give a usable row; these never can, so arming them only pads
+# the ROCm table's denominator with rows that stay unusable. With no row the
+# selector keeps them, as it does any unrecorded step.
+KERNREC_AMD_SKIP_STEPS = {
+    # Launch no kernels, so they upload no recordings (nightly 103780).
+    "torch-stable-abi-audit": "static ELF audit, no GPU work",
+    "pytorch-nightly-dependency-override-check": "dependency pin check, no GPU work",
+    # test_preprocess_error_handling.py patches EngineCore in the parent, so
+    # it needs VLLM_WORKER_MULTIPROC_METHOD=fork and its forked EngineCore
+    # records "# error=gpu_use_after_fork" (nightly 103780, engine-1-gpu).
+    "engine-preprocess-error-handling": "forks after GPU use",
+}
+
 
 def _kernrec_applies(step: Step, setup_profile: SetupProfile = "nvidia") -> bool:
     """Whether the step can load a backend-specific kernel recorder."""
     if setup_profile == "amd":
-        enabled = kernrec_amd_enabled() and not (step.num_nodes and step.num_nodes > 1)
+        enabled = (
+            kernrec_amd_enabled()
+            and not (step.num_nodes and step.num_nodes > 1)
+            and not (step.key or "").startswith(tuple(KERNREC_AMD_SKIP_STEP_PREFIXES))
+            and step.key not in KERNREC_AMD_SKIP_STEPS
+        )
+    elif setup_profile == "none":
+        enabled = False
     else:
         enabled = kernrec_enabled()
     return (
@@ -742,23 +848,30 @@ def _carries(step: "BuildkiteCommandStep", recorder: str) -> bool:
 
 
 # A collect step folds what has been uploaded once every recording step has
-# finished, or this long after the pipeline was generated, whichever is first.
+# finished, or this long after the collect job started, whichever is first.
 # A job still running then is left out of the table, which reads its shard as
-# missing. The full runs finish their recording jobs well inside it; the long
-# tails are blocked or hung jobs.
+# missing. Counted from the job's start, like the step timeout, so the fold
+# keeps about the timeout's last 90 minutes (less up to one 300 s poll), and a
+# retried job gets a fresh cap.
 COLLECT_AFTER_MINUTES = 180
 
+# The share of its armed jobs a recorder (a backend, for kernels) must hear
+# from before it publishes; below it the previous table stays current. Passed
+# to both collect scripts beside the expected counts.
+COLLECT_MIN_DELIVERED_SHARE = 0.8
+
 # Polls each recording step's state through the agent until all have finished
-# or the deadline passes. `$$`: Buildkite would interpolate a bare `$` at
+# or the cap passes. `$$`: Buildkite would interpolate a bare `$` at
 # upload time, in the bootstrap's environment. An unreadable state (an older
-# agent, a step that is not there) reads as unfinished, so the step waits to
-# the deadline rather than collecting early.
+# agent, a missing step, a failed API call) reads as unfinished, so the step
+# waits to the cap rather than collecting early. `|| true` keeps a failed read
+# from ending the step under the agent's `bash -e`.
 COLLECT_WAIT = (
-    'deadline="$$CI_SELECTOR_COLLECT_DEADLINE"; '
+    f"deadline=$$(( $$(date +%s) + {COLLECT_AFTER_MINUTES * 60} )); "
     'while [ "$$(date +%s)" -lt "$$deadline" ]; do '
     'pending=""; '
     "for k in $$CI_SELECTOR_COLLECT_WAIT_FOR; do "
-    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null)"; '
+    's="$$(buildkite-agent step get state --step "$$k" 2>/dev/null || true)"; '
     'case "$$s" in finished|ignored) ;; *) pending="$$k"; break;; esac; '
     "done; "
     '[ -z "$$pending" ] && { echo "every recording step has finished"; break; }; '
@@ -767,6 +880,11 @@ COLLECT_WAIT = (
     "sleep 300; "
     "done"
 )
+
+
+# The job starts after the shards end and runs in about half a minute; its
+# worst case (three 60 s download tries, step reads, annotate) is ~7 min.
+COVERAGE_TIMEOUT_MINUTES = 15
 
 
 def _collect_step(
@@ -791,17 +909,12 @@ def _collect_step(
     # uploads the kernel symbol map), not on the recording steps themselves:
     # one of those cancelled or timed out ended the step waiting_failed, and
     # the full runs of 2026-10-16 to 18 published nothing because of it. The
-    # command waits for them instead (COLLECT_WAIT), up to a deadline.
+    # command waits for them instead (COLLECT_WAIT), up to a cap.
     depends_on = []
     for dep in (d for s in armed for d in (s.depends_on or [])):
         if dep in runnable_keys and dep not in depends_on:
             depends_on.append(dep)
-    env = {
-        "CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed),
-        "CI_SELECTOR_COLLECT_DEADLINE": str(
-            int(time.time()) + COLLECT_AFTER_MINUTES * 60
-        ),
-    }
+    env = {"CI_SELECTOR_COLLECT_WAIT_FOR": " ".join(s.key for s in armed)}
     if count_armed:
         # The fold needs a denominator: its job list holds only what uploaded,
         # so without one a build that lost its recordings looks complete.
@@ -822,6 +935,7 @@ def _collect_step(
                         if _kernrec_backend(s) == backend
                     )
                 )
+        env["CI_SELECTOR_MIN_DELIVERED_SHARE"] = str(COLLECT_MIN_DELIVERED_SHARE)
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
     url = (
         "https://raw.githubusercontent.com/vllm-project/ci-infra/"
@@ -854,6 +968,73 @@ def _collect_step(
         soft_fail=True,
         # the wait, then downloading every job's recordings, which takes a while
         timeout_in_minutes=COLLECT_AFTER_MINUTES + 90,
+        retry=ensure_infra_failure_retry(None),
+    )
+
+
+def shard_coverage_check_step(
+    groups: "List[BuildkiteGroupStep]",
+) -> "Optional[BuildkiteCommandStep]":
+    """The job that checks no test dropped out of a build's shards, or None
+    when nothing in this build is sharded.
+
+    Fails when a test is missed or coverage cannot be proven, so a successful
+    shard cannot hide a missing record. The comparison source is packed at
+    generation, so the job runs the same revision as the plugin without a
+    runtime download. It depends on the sharded steps, so no agent is held
+    while they queue and run. A canceled or timed-out shard stops it from
+    running (Buildkite's rule even with allow_dependency_failure); the build
+    is red then, and retrying the shard releases it.
+    """
+    steps = {}
+    for group in groups:
+        for step in group.steps:
+            packed = (step.env or {}).get(runtime_shard.PLAN_ENV)
+            if not packed:
+                continue
+            plan = runtime_shard.unpack(packed)
+            steps[step.key] = [
+                {
+                    "position": planned["position"],
+                    "label": planned["label"],
+                    # Shown in the annotation, so a reader knows which command.
+                    "command": " ".join(["pytest"] + planned["args"]),
+                    "fallback": planned["fallback"],
+                    "owners": runtime_shard.owners(planned),
+                    # Only a terminal failure on a soft-fail step relaxes gaps;
+                    # a passed step still has to prove coverage.
+                    "soft_fail": bool(step.soft_fail),
+                }
+                for planned in plan["commands"]
+            ]
+    if not steps:
+        return None
+    source_path = os.path.join(
+        os.path.dirname(__file__), "runtime_shard_coverage.py"
+    )
+    with open(source_path) as f:
+        coverage_source = f.read()
+    on_main = get_global_config()["branch"] == "main"
+    queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
+    retry = ensure_infra_failure_retry(None)
+    return BuildkiteCommandStep(
+        label=":mag: Check every test ran",
+        key="runtime-shard-coverage-check",
+        env={
+            "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
+            "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),
+        },
+        agents={"queue": queue.value},
+        commands=[
+            'python3 -I -c \'import base64,json,os,zlib;'
+            'exec(json.loads(zlib.decompress(base64.b64decode('
+            'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\'',
+        ],
+        depends_on=list(steps),
+        allow_dependency_failure=True,
+        soft_fail=False,
+        timeout_in_minutes=COVERAGE_TIMEOUT_MINUTES,
+        retry=retry,
     )
 
 
@@ -1015,7 +1196,9 @@ def _matches_source_dependency(source_file: str, diff_file: str) -> bool:
 def ensure_infra_failure_retry(
     retry: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Add one-time retries for agent-lost (-1) and provider hook (255) failures."""
+    """Add one-time retries for agent-lost or timed-out (-1), agent-terminated
+    (255), Git mirror lock (94) and the hooks' provider failures (201-205). A
+    status the step already retries keeps the step's own rule."""
     retry_policy = deepcopy(retry or {})
     automatic = retry_policy.get("automatic")
 
@@ -1040,17 +1223,85 @@ def ensure_infra_failure_retry(
             existing_statuses.update(exit_status)
         else:
             existing_statuses.add(exit_status)
-    infra_conditions = [
-        dict(condition)
-        for condition in (EXIT_STATUS_NEGATIVE_ONE_RETRY, EXIT_STATUS_255_RETRY)
-        if condition["exit_status"] not in existing_statuses
+    defaults = [
+        EXIT_STATUS_NEGATIVE_ONE_RETRY,
+        EXIT_STATUS_255_RETRY,
+        EXIT_STATUS_94_RETRY,
+        EXIT_STATUS_HOOK_RETRY,
     ]
+    infra_conditions = []
+    for condition in defaults:
+        status = condition["exit_status"]
+        if isinstance(status, list):
+            remaining = [s for s in status if s not in existing_statuses]
+            if remaining:
+                infra_conditions.append({**condition, "exit_status": remaining})
+        elif status not in existing_statuses:
+            infra_conditions.append(dict(condition))
     retry_policy["automatic"] = [*infra_conditions, *automatic_conditions]
     return retry_policy
 
 
 # "off" is the rollback switch: enrolled steps run as their normal single job.
 RUNTIME_SHARD_ENV_VAR = "VLLM_CI_RUNTIME_SHARD"
+
+# Under automatic_shard_default: step key -> why the planner gave it no shards
+# in this build, for the one annotation that lists them (one_job_annotation).
+ONE_JOB_REASONS: Dict[str, str] = {}
+
+
+def _shard_by_default() -> bool:
+    return bool(get_global_config().get("automatic_shard_default"))
+
+
+def _automatic_shard_on(step: Step, amd: Optional[Dict[str, Any]] = None) -> bool:
+    """Whether the step wants shards. For an AMD mirror, `step` is the
+    mirror's effective step and `amd` its block.
+
+    Under automatic_shard_default a step shards unless it says false, and a
+    mirror follows its step unless it says otherwise. Elsewhere, on a branch
+    that hasn't opted in, a step says true and so does its mirror.
+    """
+    if not _shard_by_default():
+        return bool(step.automatic_shard) and (amd is None or bool(amd.get("automatic_shard")))
+    on = True if step.automatic_shard is None else step.automatic_shard
+    if amd is None:
+        return on
+    value = amd.get("automatic_shard", on)
+    if not isinstance(value, bool):  # pydantic checks a step's; a mirror is a dict
+        raise ValueError(
+            f"{step.key}: automatic_shard must be true or false, not {value!r}"
+        )
+    return value
+
+
+def one_job_annotation(groups: "List[BuildkiteGroupStep]") -> Optional[str]:
+    """Under automatic_shard_default, one collapsed list of this build's test
+    jobs the planner gave no shards, each with its reason; None when there are
+    none. A job whose tests fit in one job is planned, so it is not listed."""
+    if not _shard_by_default():
+        return None
+    rows = []
+    for group in groups:
+        for step in group.steps:
+            reason = ONE_JOB_REASONS.get(step.key)
+            # A fixed split that opted out still runs several jobs.
+            if (
+                reason
+                and not step.deferred
+                and not step.parallelism
+                and not step.label.startswith(":docker:")
+            ):
+                # A planner error is free text: keep it inside its table cell.
+                reason = reason.replace("|", "\\|").replace("\n", " ")
+                rows.append(f"| {step.label} | {reason} |")
+    if not rows:
+        return None
+    jobs = f"{len(rows)} job{'' if len(rows) == 1 else 's'}"
+    return (
+        f"<details><summary>{jobs} ran as one job without a shard plan</summary>\n\n"
+        "| Job | Why |\n| --- | --- |\n" + "\n".join(rows) + "\n\n</details>"
+    )
 
 
 def _runtime_shard_mode(
@@ -1059,19 +1310,21 @@ def _runtime_shard_mode(
     list_file_diff: List[str],
     amd: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
-    """How to run a step with `automatic_shard: true`: "on" (as shards),
-    "shadow" (one job, plus an annotation of the plan), or None (as usual).
-    For an AMD mirror, `step` is the mirror's effective step and `amd` its
-    block, whose own `automatic_shard` must be set too."""
-    if not step.automatic_shard or (amd and not amd.get("automatic_shard")):
+    """How to run a step that wants shards: "on" (as shards), "shadow" (one
+    job, plus an annotation of the plan), or None (as usual). For an AMD
+    mirror, `step` is the mirror's effective step and `amd` its block."""
+    by_default = _shard_by_default()
+    on = _automatic_shard_on(step, amd)
+    if not by_default and not on:
         return None
-    if amd:
-        should_run = _amd_mirror_should_run(
-            _step_should_run(step, list_file_diff), list_file_diff
-        )
-    else:
-        should_run = _step_should_run(step, list_file_diff)
-    if not should_run:
+    if not _step_should_run(step, list_file_diff):
+        return None
+    if by_default and step.parallelism:
+        # A fixed split, the step's own or the one its mirror inherits, runs
+        # as it does without the default.
+        return None
+    if not on:
+        ONE_JOB_REASONS[step_key] = "opted out (`automatic_shard: false`)"
         return None
     mode = os.getenv(RUNTIME_SHARD_ENV_VAR) or "on"
     if mode not in ("on", "shadow"):
@@ -1079,17 +1332,30 @@ def _runtime_shard_mode(
             print(
                 f"automatic_shard ignored on {step_key}: {RUNTIME_SHARD_ENV_VAR}={mode} is not on, shadow or off"
             )
+        ONE_JOB_REASONS[step_key] = f"{RUNTIME_SHARD_ENV_VAR}={mode}"
         return None
-    if (
-        runtime_shard.split_commands(step.commands or []) is None
-        or step.no_plugin
-        or (is_amd_device(step.device) and step.dind)
-        or (step.num_nodes and step.num_nodes >= 2)
-    ):
-        print(
-            f"automatic_shard ignored on {step_key}: only single-node, non-dind "
-            "steps whose test commands are all plain pytest can be sharded"
-        )
+    # What pytest reads its extra options from: the step's, then its mirror's.
+    env = dict(step.env or {})
+    env.update((amd or {}).get("env") or {})
+    reason = None
+    if step.num_nodes and step.num_nodes >= 2:
+        reason = "multi-node"
+    elif step.no_plugin:
+        reason = "no_plugin"
+    elif is_amd_device(step.device) and step.dind:
+        reason = "dind"
+    elif runtime_shard.split_commands(step.commands or []) is None:
+        reason = "commands aren't all plain pytest"
+    elif runtime_shard.unshardable(str(env.get("PYTEST_ADDOPTS", ""))):
+        reason = "`PYTEST_ADDOPTS` sets its own shards or pytest-xdist"
+    if reason:
+        if by_default:
+            ONE_JOB_REASONS[step_key] = reason
+        else:
+            print(
+                f"automatic_shard ignored on {step_key}: only single-node, non-dind "
+                "steps whose test commands are all plain pytest can be sharded"
+            )
         return None
     return mode
 
@@ -1101,6 +1367,8 @@ def _shard_at_generation(
     commands: List[str],
     env: Optional[Dict[str, str]],
     mode: str,
+    timeout_in_minutes: Optional[int] = None,
+    setup_profile: SetupProfile = "nvidia",
 ) -> Optional[Tuple[int, List[str], Dict[str, str]]]:
     """Plan an enrolled step's shards from the checkout (runtime_shard.py)
     and, in "on" mode, turn its job's prepared commands and env into one
@@ -1109,15 +1377,32 @@ def _shard_at_generation(
     leave the job as it is: short of a plan of two or more shards, so
     sharding never blocks the step's tests. "shadow" only annotates the plan.
     The NVIDIA job and a native AMD mirror's both go through here.
+    `timeout_in_minutes`, the job's own as its YAML sets it, sizes a
+    fallback plan when main has no timings for the step.
     """
     result, text = runtime_shard.plan_step(
-        step_key, step.commands or [], step.working_dir, os.getcwd(), queue
+        step_key,
+        step.commands or [],
+        step.working_dir,
+        os.getcwd(),
+        queue,
+        timeout_in_minutes,
     )
     print(text)
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
-    if result is None or result["overBudget"] or runtime_shard.setup_too_long(result):
+    fallback = bool(result and result.get("fallbackPlan"))
+    if (result is None or (fallback and result["shards"] < 2)) and _shard_by_default():
+        # One row in the one-job list, not an annotation per step.
+        ONE_JOB_REASONS[step_key] = text
+        return None
+    if (
+        result is None
+        or fallback
+        or result["overBudget"]
+        or runtime_shard.setup_too_long(result)
+    ):
         runtime_shard.annotate(step_key, text, "warning")
     if result is None or result["shards"] < 2:
         return None
@@ -1128,7 +1413,7 @@ def _shard_at_generation(
         f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
         f" -p {runtime_shard.PLUGIN_MODULE}"
     ).strip()
-    plan = {"shards": result["shards"], "commands": result["commands"]}
+    plan = {"shards": result["shards"], "commands": result["commands"], "key": step_key}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
     commands = list(commands)
@@ -1148,7 +1433,8 @@ def _shard_at_generation(
             commands[at + 1] = runtime_shard.guard(
                 commands[at + 1], planned, result["shards"]
             )
-    return result["shards"], runtime_shard.shard_job_setup() + commands, env
+    checkout = _fnrec_checkout_path(step, setup_profile)
+    return result["shards"], runtime_shard.shard_job_setup(checkout) + commands, env
 
 
 def convert_group_step_to_buildkite_step(
@@ -1203,6 +1489,8 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         amd_env,
                         amd_shard_mode,
+                        step.timeout_in_minutes,
+                        "amd",
                     )
                     if amd_shard_mode
                     else None
@@ -1231,7 +1519,8 @@ def convert_group_step_to_buildkite_step(
                     extra_artifact_paths=_fnrec_artifact_paths(step, "amd")
                     + (
                         [KERNREC_ARTIFACT_PATH] if _kernrec_applies(step, "amd") else []
-                    ),
+                    )
+                    + ([runtime_shard.COVERAGE_ARTIFACT_PATH] if amd_sharded else []),
                     recorded_step=step,
                 )
                 amd_step.deferred = not _step_should_run(step, list_file_diff)
@@ -1239,7 +1528,10 @@ def convert_group_step_to_buildkite_step(
                 continue
 
             # command step
-            step_commands = _prepare_commands(step, variables_to_inject)
+            setup_profile = _get_setup_profile(step)
+            step_commands = _prepare_commands(
+                step, variables_to_inject, setup_profile
+            )
 
             buildkite_step = BuildkiteCommandStep(
                 label=step.label,
@@ -1263,12 +1555,11 @@ def convert_group_step_to_buildkite_step(
                     "VLLM_KERNEL_SYMBOL_MAP": "1",
                 }
             # Each recorder writes under its own <checkout>/.<name>/<job-id>,
-            # which the agent collects from the checkout. _prepare_commands
-            # above used its default profile, so this is the nvidia path.
+            # which the agent collects from the checkout.
             recorder_globs: List[str] = []
-            if _kernrec_applies(step):
+            if _kernrec_applies(step, setup_profile):
                 recorder_globs.append(KERNREC_ARTIFACT_PATH)
-            if _fnrec_applies(step, "nvidia"):
+            if _fnrec_applies(step, setup_profile):
                 recorder_globs.extend(FNREC_ARTIFACT_PATHS)
             if recorder_globs:
                 buildkite_step.artifact_paths = _merge_artifact_paths(
@@ -1309,7 +1600,9 @@ def convert_group_step_to_buildkite_step(
                 )
             elif step.timeout_in_minutes:
                 buildkite_step.timeout_in_minutes = _get_timeout_in_minutes(
-                    _recording_timeout(step, step.timeout_in_minutes)
+                    _recording_timeout(
+                        step, step.timeout_in_minutes, setup_profile
+                    )
                 )
 
             buildkite_step.deferred = not _step_should_run(step, list_file_diff)
@@ -1322,8 +1615,9 @@ def convert_group_step_to_buildkite_step(
                 buildkite_step.plugins = [_get_step_plugin(step)]
                 # L4-on-EKS steps get a retry policy that also covers pod-level
                 # failures (agent stops), unless the step opted out explicitly.
+                # The repo-wide infra retries (-1, 255, 94) still apply.
                 if step.device == DeviceType.L4 and not step.retry:
-                    buildkite_step.retry = K8S_RETRY
+                    buildkite_step.retry = ensure_infra_failure_retry(K8S_RETRY)
 
             shard_mode = (
                 _runtime_shard_mode(step, step_key, list_file_diff)
@@ -1338,6 +1632,7 @@ def convert_group_step_to_buildkite_step(
                     buildkite_step.commands,
                     buildkite_step.env,
                     shard_mode,
+                    step.timeout_in_minutes,
                 )
                 if shard_mode
                 else None
@@ -1350,6 +1645,10 @@ def convert_group_step_to_buildkite_step(
                 ) = sharded
                 # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
                 buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
+                buildkite_step.artifact_paths = _merge_artifact_paths(
+                    buildkite_step.artifact_paths,
+                    [runtime_shard.COVERAGE_ARTIFACT_PATH],
+                )
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1423,6 +1722,9 @@ def convert_group_step_to_buildkite_step(
                         amd_commands,
                         extra_env,
                         amd_shard_mode,
+                        # The mirror's own; AMD's 3-hour default sizes nothing.
+                        amd.get("timeout_in_minutes"),
+                        "amd",
                     )
                     if amd_shard_mode
                     else None
@@ -1460,14 +1762,12 @@ def convert_group_step_to_buildkite_step(
                         [KERNREC_ARTIFACT_PATH]
                         if _kernrec_applies(amd_command_step, "amd")
                         else []
-                    ),
+                    )
+                    + ([runtime_shard.COVERAGE_ARTIFACT_PATH] if amd_sharded else []),
                     recorded_step=amd_command_step,
                 )
-                amd_step.deferred = not _amd_mirror_should_run(
-                    _step_should_run(
-                        _get_amd_mirror_effective_step(step, amd),
-                        list_file_diff,
-                    ),
+                amd_step.deferred = not _step_should_run(
+                    _get_amd_mirror_effective_step(step, amd),
                     list_file_diff,
                 )
                 amd_hardware_steps.append(amd_step)
@@ -1486,13 +1786,18 @@ def convert_group_step_to_buildkite_step(
     return buildkite_group_steps
 
 
-def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+def _step_should_run(
+    step: Step, list_file_diff: List[str], *, honor_includes: bool = True
+) -> bool:
+    global_config = get_global_config()
+    if global_config["aiter_nightly"] == "1":
+        # Scheduled: nobody would unblock its steps, so NOAUTO does not apply.
+        return step.key in global_config["only_step_keys"]
     if os.getenv("NOAUTO") == "1":
         return False
-    global_config = get_global_config()
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
-    if step.key in (global_config.get("include_step_keys") or ()):
+    if honor_includes and step.key in (global_config.get("include_step_keys") or ()):
         return True
     # The test selector's choice (selector_gate.py), prerequisites included.
     # Unlike only_step_keys it removes nothing: the rest are deferred, so
@@ -1508,8 +1813,15 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return True
     if global_config["nightly"] == "1":
         return True
+    # Every AMD step runs in the ROCm stack image, so a change to what it is
+    # built from runs them all, optional ones included.
+    if is_amd_device(step.device) and any(
+        path in list_file_diff for path in AMD_ROCM_STACK_FILES
+    ):
+        return True
     if step.optional:
-        return False
+        # As the selector gate does: an edited optional step runs on its PR.
+        return is_amd_device(step.device) and amd_step_redefined(step, list_file_diff)
     if (
         is_amd_gpu_device(step.device)
         and not step.dind
@@ -1518,19 +1830,26 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         )
     ):
         return True
-    if global_config["run_all"]:
+    if global_config["run_all"] and not (
+        global_config.get("cuda_only_run_all") and is_amd_device(step.device)
+    ):
         return True
     # AMD is not selected by ci-selector yet: a file that runs everything on
     # AMD may be narrowed on CUDA (csrc/, which ROCm compiles through HIPify).
     if global_config.get("amd_run_all") and is_amd_device(step.device):
         return True
+    if is_amd_device(step.device):
+        return _source_file_dependencies_match(
+            amd_dependencies(step, list_file_diff), list_file_diff
+        )
     return _source_file_dependencies_match(
         step.source_file_dependencies, list_file_diff
     )
 
 
 def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
-    source_file_dependencies = list(amd.get("source_file_dependencies") or [])
+    mirror_dependencies = amd.get("source_file_dependencies") or []
+    source_file_dependencies = list(mirror_dependencies)
     for dependency in step.source_file_dependencies or []:
         if dependency not in source_file_dependencies:
             source_file_dependencies.append(dependency)
@@ -1544,8 +1863,19 @@ def _get_amd_mirror_effective_step(step: Step, amd: Dict[str, Any]) -> Step:
             "dind": amd.get("dind", True),
             "optional": amd.get("optional", step.optional),
             "source_file_dependencies": source_file_dependencies,
+            "source_file_declared": step.source_file_declared
+            or step.source_file in mirror_dependencies,
         }
     )
+
+
+def amd_mirror_step(step: Step) -> Optional[Step]:
+    """The step's AMD mirror as the generator decides whether to run it, or
+    None without one. For run decisions and key classification only: it
+    keeps the step's depends_on, not the mirror's, and its dind ignores
+    rocm_build_layout()."""
+    amd = (step.mirror or {}).get("amd")
+    return _get_amd_mirror_effective_step(step, amd) if amd else None
 
 
 def _source_file_dependencies_match(
@@ -1637,6 +1967,8 @@ def _create_amd_step(
     )
     if display_label:
         options["label"] = display_label
+    # AMD's own retries plus the repo-wide infra ones every other step gets.
+    options["retry"] = ensure_infra_failure_retry(options.get("retry"))
     if extra_artifact_paths:
         options["artifact_paths"] = _merge_artifact_paths(
             options.get("artifact_paths"), extra_artifact_paths

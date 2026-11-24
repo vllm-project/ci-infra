@@ -1,5 +1,6 @@
 import pytest
 
+import amd
 import buildkite_step
 import selector_gate
 import step as step_module
@@ -30,6 +31,7 @@ def fake_global_config(monkeypatch):
         "docs_only_disable": "1",
         "nightly": "0",
         "torch_nightly": "0",
+        "aiter_nightly": "0",
         "run_all": False,
         "list_file_diff": [],
         "fail_fast": False,
@@ -38,6 +40,7 @@ def fake_global_config(monkeypatch):
     }
     monkeypatch.setattr(step_module, "get_global_config", lambda: config)
     monkeypatch.setattr(buildkite_step, "get_global_config", lambda: config)
+    monkeypatch.setattr(amd, "get_global_config", lambda: config)
     monkeypatch.setattr(
         buildkite_step,
         "get_ecr_cache_registry",
@@ -46,7 +49,7 @@ def fake_global_config(monkeypatch):
     monkeypatch.setattr(
         buildkite_step,
         "get_image",
-        lambda cpu=False, arm64=False: "test-image",
+        lambda cpu=False, arm64=False, xpu=False: "test-image",
     )
     monkeypatch.setattr(
         buildkite_step,

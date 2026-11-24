@@ -1,10 +1,27 @@
 import os
 import re
+import subprocess
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, TypedDict
+from functools import lru_cache
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    FrozenSet,
+    List,
+    Mapping,
+    Optional,
+    TypedDict,
+)
+
+import yaml
 
 from constants import AgentQueue, DeviceType, Platform
+from global_config import get_global_config
+
+if TYPE_CHECKING:
+    from step import Step
 
 AMD_TEST_COMMAND = "bash .buildkite/scripts/hardware_ci/run-amd-test.sh"
 AMD_STABLE_CI_BASE_IMAGE = "rocm/vllm-dev:ci_base"
@@ -35,9 +52,16 @@ AMD_NATIVE_RUNTIME_SOURCE_DEPENDENCIES = (
 )
 AMD_STANDARD_TIMEOUT_MINUTES = 3 * 60
 AMD_ROCM_BASE_REFRESH_STEP_KEY = "refresh-rocm-base-amd"
-AMD_ROCM_BASE_DOCKERFILE = "docker/Dockerfile.rocm_base"
+# What vLLM's .buildkite/scripts/rocm/build.sh keys the ROCm stack image on,
+# the image every AMD step runs in: a change to either file rebuilds it.
+AMD_ROCM_STACK_FILES = (
+    "docker/Dockerfile.rocm_base",
+    "tools/vllm-rocm/therock_wheels.py",
+)
 AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES = 9 * 60
 AMD_ROCM_BASE_REFRESH_NOOP_TIMEOUT_MINUTES = 15
+# vLLM builds AITER only for these (AITER_ROCM_ARCH in docker/Dockerfile.rocm_base).
+AITER_GPU_ARCHS = frozenset({"gfx942", "gfx950"})
 AMD_ALWAYS_RUN_STEP_KEYS = frozenset(
     {
         "ensure-ci-base-amd",
@@ -53,6 +77,8 @@ AMD_RETRY = {
         {"exit_status": 128, "limit": 1},
         # ROCm/KFD reports GPU hangs by aborting the process (SIGABRT).
         {"exit_status": 134, "limit": 1},
+        # The agent's Git mirror lock timeout, raised before the command runs.
+        {"exit_status": 94, "limit": 1},
         {"signal_reason": "agent_stop", "limit": 1},
         {"signal_reason": "agent_refused", "limit": 1},
     ],
@@ -114,11 +140,14 @@ def rocm_build_layout() -> bool:
 
 def rocm_ci_repo() -> str:
     """The trust rule: only non-PR builds of vllm-project/vllm main, not the
-    AITER nightly, write rocm/vllm-ci."""
+    AITER nightly, write rocm/vllm-ci. A build triggered from another build is
+    excluded: a PR job can upload a trigger step with any branch and commit."""
     repo = os.getenv("BUILDKITE_REPO", "")
     trusted = (
         os.getenv("BUILDKITE_PULL_REQUEST") == "false"
         and os.getenv("BUILDKITE_BRANCH") == "main"
+        and os.getenv("BUILDKITE_SOURCE") != "trigger_job"
+        and not os.getenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID")
         and re.search(r"[/:]vllm-project/vllm(\.git)?$", repo)
         and os.getenv("AITER_NIGHTLY") != "1"
     )
@@ -137,12 +166,6 @@ def get_rocm_base_refresh_timeout() -> int:
     return AMD_ROCM_BASE_REFRESH_TIMEOUT_MINUTES
 
 
-def _amd_mirror_should_run(default_should_run: bool, list_file_diff: List[str]) -> bool:
-    return default_should_run or (
-        os.getenv("NOAUTO") != "1" and AMD_ROCM_BASE_DOCKERFILE in list_file_diff
-    )
-
-
 def get_rocm_base_refresh_env() -> Dict[str, str]:
     """Bind the refresh script controls to the timeout decision."""
     if rocm_build_layout():
@@ -157,6 +180,7 @@ def get_rocm_base_refresh_env() -> Dict[str, str]:
 class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
+    arch: str
     uses_dra: bool = False
     # One queue serves every GPU count; the agent stacks behind it are told
     # apart by their gpu_size tag, so the step must target it explicitly.
@@ -165,32 +189,35 @@ class AmdDeviceConfig:
 
 AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI250_1.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 1, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 1, "gfx90a", gpu_size_tag=True
     ),
     DeviceType.AMD_MI250_2.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 2, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 2, "gfx90a", gpu_size_tag=True
     ),
     DeviceType.AMD_MI250_4.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 4, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 4, "gfx90a", gpu_size_tag=True
     ),
     DeviceType.AMD_MI250_8.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 8, gpu_size_tag=True
+        AgentQueue.AMD_MI250, 8, "gfx90a", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1),
-    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2),
-    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4),
-    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8),
-    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1),
-    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2),
-    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4),
-    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8),
+    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1, "gfx942"),
+    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2, "gfx942"),
+    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4, "gfx942"),
+    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8, "gfx942"),
+    DeviceType.AMD_MI300_DPX.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI300_DPX, 1, "gfx942", uses_dra=True
+    ),
+    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1, "gfx942"),
+    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2, "gfx942"),
+    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4, "gfx942"),
+    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8, "gfx942"),
     DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI355_DPX, 1, uses_dra=True
+        AgentQueue.AMD_MI355_DPX, 1, "gfx950", uses_dra=True
     ),
-    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1),
-    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2),
-    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4),
-    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8),
+    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1, "gfx950"),
+    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2, "gfx950"),
+    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4, "gfx950"),
+    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8, "gfx950"),
 }
 
 
@@ -237,6 +264,14 @@ def valid_amd_gpu_devices() -> List[str]:
     return list(AMD_DEVICE_CONFIGS)
 
 
+def runs_in_aiter_nightly(device: Optional[str]) -> bool:
+    """AMD build steps, and GPU jobs on an AITER arch."""
+    if _device_value(device) == DeviceType.AMD_CPU.value:
+        return True
+    config = get_amd_device_config(device)
+    return config is not None and config.arch in AITER_GPU_ARCHS
+
+
 def get_amd_agent_queue(device: Optional[str]) -> Optional[AgentQueue]:
     config = get_amd_device_config(device)
     return config.queue if config else None
@@ -246,13 +281,14 @@ _LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
 
 
 def get_amd_label_tag(device: Optional[str]) -> str:
-    """The hardware tag of an AMD GPU label: "MI355 DPX" for mi355_dpx, else
-    the pool's family ("mi300_1" -> "MI300"); empty for non-GPU devices."""
+    """The hardware tag of an AMD GPU label: "<FAMILY> DPX" for a *_dpx device
+    ("mi300_dpx" -> "MI300 DPX"), else the pool's family ("mi300_1" -> "MI300");
+    empty for non-GPU devices."""
     value = _device_value(device) or ""
-    if value == DeviceType.AMD_MI355_DPX.value:
-        return "MI355 DPX"
     if not value.startswith("mi"):
         return ""
+    if value.endswith("_dpx"):
+        return f"{value.removesuffix('_dpx').upper()} DPX"
     return value.split("_", 1)[0].upper()
 
 
@@ -600,3 +636,112 @@ def build_amd_step_options(
         "priority": 200,
         "retry": AMD_RETRY,
     }
+
+
+def amd_dependencies(step: "Step", list_file_diff: List[str]) -> List[str]:
+    """The step's source_file_dependencies, without its own yaml when the diff
+    edits that yaml but not the step's entry."""
+    dependencies = step.source_file_dependencies or []
+    if step.source_file_declared:
+        return dependencies
+    redefined = _redefined_keys(step, list_file_diff)
+    if redefined is None or step.key in redefined:
+        return dependencies
+    return [d for d in dependencies if d != step.source_file]
+
+
+def amd_step_redefined(step: "Step", list_file_diff: List[str]) -> bool:
+    """Whether the diff changes or adds the step's own yaml entry."""
+    redefined = _redefined_keys(step, list_file_diff)
+    return redefined is not None and step.key in redefined
+
+
+def _redefined_keys(
+    step: "Step", list_file_diff: List[str]
+) -> Optional[FrozenSet[str]]:
+    """Keys the diff's edit to the step's yaml redefines. None when the yaml
+    is not edited or the edit can't be pinned to steps: either way the step's
+    dependencies apply as written."""
+    if step.source_file not in list_file_diff:
+        return None
+    return changed_step_keys_in_file(step.source_file, _diff_base_ref())
+
+
+def _diff_base_ref() -> Optional[str]:
+    """The commit get_list_file_diff diffs against."""
+    global_config = get_global_config()
+    if global_config["branch"] == "main":
+        return "HEAD~1"
+    merge_base = global_config.get("merge_base_commit")
+    return merge_base.strip() if merge_base else None
+
+
+@lru_cache(maxsize=None)
+def changed_step_keys_in_file(
+    path: str, base_ref: Optional[str]
+) -> Optional[FrozenSet[str]]:
+    """`changed_step_keys` between `base_ref` and the checkout. Cached: every
+    AMD step in the file asks, on each of its _step_should_run calls."""
+    base = subprocess.run(
+        ["git", "show", f"{base_ref}:{path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if base.returncode == 0:
+        with open(path, encoding="utf-8") as f:
+            keys = changed_step_keys(base.stdout, f.read())
+        shown = (
+            "not pinned to steps" if keys is None else ", ".join(sorted(keys)) or "none"
+        )
+    else:  # a new file (git diff already ran against base_ref)
+        keys, shown = None, f"not pinned to steps (no base: {base.stderr.strip()})"
+    print(f"{path}: AMD steps count the edit only if redefined: {shown}")
+    return keys
+
+
+def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]]:
+    """Keys whose entry changed, plus `amd-<key>` if it has a `mirror.amd`
+    block (only that for a mirror-only change). None if the edit can't be
+    pinned to steps."""
+    head = yaml.safe_load(head_text)
+    try:
+        base = yaml.safe_load(base_text)
+    except yaml.YAMLError:
+        # Main's copy is broken: don't fail the PR that fixes it.
+        return None
+    base_steps, head_steps = _steps_by_key(base), _steps_by_key(head)
+    if (
+        base_steps is None
+        or head_steps is None
+        or _without(base, "steps") != _without(head, "steps")
+    ):
+        return None
+    changed = set()
+    for key, entry in head_steps.items():
+        old = base_steps.get(key)
+        edited = old is None or _without(old, "mirror") != _without(entry, "mirror")
+        if edited:
+            changed.add(key)
+        amd = _amd_block(entry)
+        if amd is not None and (edited or _amd_block(old) != amd):
+            changed.add(f"amd-{key}")
+    return frozenset(changed)
+
+
+def _steps_by_key(doc: Any) -> Optional[Dict[str, Dict[str, Any]]]:
+    entries = doc.get("steps") if isinstance(doc, dict) else None
+    if not isinstance(entries, list) or not all(
+        isinstance(entry, dict) and entry.get("key") for entry in entries
+    ):
+        return None
+    steps = {entry["key"]: entry for entry in entries}
+    return steps if len(steps) == len(entries) else None
+
+
+def _without(entry: Dict[str, Any], field: str) -> Dict[str, Any]:
+    return {name: value for name, value in entry.items() if name != field}
+
+
+def _amd_block(entry: Dict[str, Any]) -> Any:
+    return (entry.get("mirror") or {}).get("amd")

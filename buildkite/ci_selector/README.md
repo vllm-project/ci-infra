@@ -28,7 +28,7 @@ Selecting takes one observation and carries no gate. Dropping carries all of the
 
 ## In CI
 
-The pipeline generator calls the selector on every PR, branch and main build (a main build diffs against its parent commit) (`buildkite/pipeline_generator/selector_gate.py`). The selector's step keys decide which jobs run, image builds and other prerequisites included; every other job is deferred into the build's **Run more jobs** input step. AMD steps, native and `amd-` mirrors, are left out of that: they keep the `source_file_dependencies` rules, and the decision file lists any the selector named under `selector_amd_left_to_todays_rules`. Release branches, nightly and run-all builds (which includes the scheduled full CI runs), and builds that name their own steps (`VLLM_CI_ONLY_STEP_KEYS`) keep the generator's own rules, and so does any build where the selector fails, times out, or names a step the generator does not know.
+The pipeline generator calls the selector on every PR, branch and main build (a main build diffs against its parent commit) (`buildkite/pipeline_generator/selector_gate.py`). The selector's step keys decide which jobs run, image builds and other prerequisites included; every other job is deferred into the build's **Run more jobs** input step. AMD steps, native and `amd-` mirrors, are left out of that: they keep the `source_file_dependencies` rules, and the decision file lists any the selector named under `selector_amd_left_to_todays_rules`. Release branches, nightly, AITER nightly and run-all builds (which includes the scheduled full CI runs), and builds that name their own steps (`VLLM_CI_ONLY_STEP_KEYS`) keep the generator's own rules, and so does any build where the selector fails, times out, or names a step the generator does not know.
 
 `VLLM_CI_SELECTOR` overrides it for one build: `shadow` runs the selector and records its decision without applying it, `off` skips it.
 
@@ -52,7 +52,7 @@ ci-fetch-kernel-record          # the kernel record, which answers for csrc/
 
 Each follows its own `latest.json` in the public `vllm-ci-selector` bucket, validates what it downloaded, and only then replaces what is on disk.
 
-Override the locations with `--table` or `$CI_SELECTOR_TABLE`, and `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP`. Without the Python record the selector runs on the code map alone and says so on stderr; without the kernel record csrc files do the same, which today means every step on the CUDA image.
+Override the locations with `--table` or `$CI_SELECTOR_TABLE`, and `--kernel-table` / `--kernel-symbol-map` or `$CI_SELECTOR_KERNEL_TABLE` / `$CI_SELECTOR_KERNEL_SYMBOL_MAP`. With no Python table named or on disk, `ci-select` downloads the latest itself and parses it once. A named table that is missing or unreadable leaves the selector on the code map alone, and it says so on stderr; without the kernel record csrc files do the same, which today means every step on the CUDA image.
 
 ## Commands
 

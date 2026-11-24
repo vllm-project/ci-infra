@@ -44,6 +44,12 @@ variable "vllm_commit" {
   description = "vLLM commit SHA for cache warming"
 }
 
+variable "ami_name_prefix" {
+  type        = string
+  default     = "vllm-buildkite-stack-linux-cpu-build"
+  description = "AMI name prefix. The pipeline's cleanup step only deletes AMIs named '<default>-*', so canary builds must use a different prefix."
+}
+
 locals {
   timestamp         = regex_replace(timestamp(), "[- TZ:]", "")
   deprecate_hours   = var.deprecate_days * 24
@@ -51,10 +57,10 @@ locals {
 }
 
 source "amazon-ebs" "cpu_build_box" {
-  ami_name        = "vllm-buildkite-stack-linux-cpu-build-${local.timestamp}"
+  ami_name        = "${var.ami_name_prefix}-${local.timestamp}"
   ami_description = "vLLM Buildkite CPU Build AMI (optimized for Docker builds with pre-warmed cache)"
 
-  # Deprecate after 7 days - allows rollback window before cleanup
+  # Deprecate after deprecate_days (default 7) - allows rollback window before cleanup
   deprecate_at = local.deprecate_at
 
   # Network-optimized instance for fast image pulls during AMI build
@@ -88,6 +94,12 @@ source "amazon-ebs" "cpu_build_box" {
 
   ssh_username = "ec2-user"
   ssh_timeout  = "30m"
+
+  # packer_build_queue may stop and terminate only instances with this tag
+  # (packer-ami-builder-policy in ci-infra-private).
+  run_tags = {
+    vllm-packer = "true"
+  }
 }
 
 build {

@@ -12,6 +12,8 @@ remembered to.
 
 from __future__ import annotations
 
+import dataclasses
+
 from ci_selector.codemap.classify import select
 from ci_selector.codemap.graph.build import FullGraph
 from ci_selector.codemap.graph.demote import (
@@ -147,6 +149,29 @@ def always_run_ids(state: RepoState) -> set[str]:
 
 def steps_by_id(state: RepoState) -> dict[str, Step]:
     return {s.step_id: s for p in state.pipelines for s in p.steps}
+
+
+def with_unmapped_device(
+    state: RepoState, monkeypatch, family: str, keep_out_of: str
+) -> tuple[RepoState, str, set[str]]:
+    """A copy of `state` where one `family` step that a change to `keep_out_of`
+    does not select runs on a device the taxonomy cannot place.
+
+    Returns the copy, that step's id, and what `keep_out_of` selected before.
+    The copy is a new instance, so its family partition is computed afresh."""
+    assert state.build_map.families.get(keep_out_of), (
+        f"{keep_out_of} has no build-map families at this vLLM, so nothing narrows it"
+    )
+    on = set(select(state, [keep_out_of]).selected)
+    per, _union, _nonfamily = state.family_partition()
+    dropped = sorted((per[family] & state.auto_step_ids) - on)
+    assert dropped, f"every {family} step is selected for {keep_out_of}"
+    stray = steps_by_id(state)[dropped[0]]
+    monkeypatch.setattr(stray, "device", "never-seen-device-9000")
+    preflight = dataclasses.replace(
+        state.preflight, unmapped_devices=frozenset({"never-seen-device-9000"})
+    )
+    return dataclasses.replace(state, preflight=preflight), stray.step_id, on
 
 
 def declaring_steps(

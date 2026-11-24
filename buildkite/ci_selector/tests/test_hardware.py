@@ -138,6 +138,9 @@ def test_family_of_device_spot_checks():
     assert hardware.family_of_device("mi300_4") == "amd"
     assert hardware.family_of_device("amd_cpu") == "cpu"
     assert hardware.family_of_device("intel_gpu") == "xpu"
+    assert hardware.family_of_device("intel_gpu_k8s") == "xpu"
+    assert hardware.family_of_device("intel_cpu") == "cpu"
+    assert hardware.family_of_device("intel_hpu") == "hpu"
     assert hardware.family_of_device("cpu-small") is None
 
 

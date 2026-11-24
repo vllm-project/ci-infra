@@ -248,14 +248,16 @@ def test_native_tests_declines_without_derived_evidence(state):
 def test_cuda_only_kernel_drops_its_declared_intel_steps(state):
     """A cuda-only kernel does not select an xpu step that declares it: the
     build map proves the file never compiles into that step."""
-    if state.preflight.unmapped_devices:
-        pytest.skip("the build map stood down, so every family is kept")
     # Test steps only: the xpu image builder carries no device name, so it
-    # rides the remainder under cuda scoping.
+    # rides the remainder under cuda scoping. A step on an unplaced device is
+    # kept by every family narrowing, so it is not promised to drop.
+    by_id = steps_by_id(state)
     intel = {
         s
         for s in state.auto_step_ids
-        if s.startswith("vllm_intel_ci:") and "image-build" not in s
+        if s.startswith("vllm_intel_ci:")
+        and "image-build" not in s
+        and by_id[s].device not in state.preflight.unmapped_devices
     }
     from helpers import declaring_steps
 

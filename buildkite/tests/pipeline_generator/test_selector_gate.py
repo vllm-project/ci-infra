@@ -1,6 +1,7 @@
 """The selector gate: when the test selector may choose a PR build's steps,
 what it records, and that it never makes a build fail."""
 
+import gzip
 import json
 import os
 import subprocess
@@ -67,6 +68,7 @@ def test_a_pr_build_records_the_selectors_keys():
     [
         ({"branch": "releases/v0.20"}, "release branch"),
         ({"nightly": "1"}, "nightly"),
+        ({"aiter_nightly": "1"}, "AITER nightly"),
         ({"run_all": True}, "run-all"),
         ({"only_step_keys": frozenset({"x"})}, "VLLM_CI_ONLY_STEP_KEYS"),
         ({"platform": Platform.AMD}, "AMD-only"),
@@ -250,6 +252,7 @@ def test_optional_steps_stay_optional(pr_config, monkeypatch):
             optional=True,
             commands=["n"],
             depends_on=["image-build"],
+            mirror={"amd": {"device": "mi300_1"}},
         ),
     ]
     monkeypatch.setattr(
@@ -438,6 +441,282 @@ def test_steps_whose_definition_changed_run_even_when_optional(pr_config, monkey
     assert record["selector_changed_steps"] == ["nightly-changed"]
     assert record["selector_keys"] == ["nightly-changed", "test-b"]
     assert record["selector_optional_dropped"] == ["nightly-other"]
+
+
+def _mirrored(key, optional, mirror_optional=None):
+    amd = {"device": "mi300_1", "depends_on": ["image-build-amd"]}
+    if mirror_optional is not None:
+        amd["optional"] = mirror_optional
+    return Step(
+        label=key,
+        key=key,
+        optional=optional,
+        commands=["x"],
+        depends_on=["image-build"],
+        mirror={"amd": amd},
+    )
+
+
+@pytest.mark.parametrize(
+    "optional, mirror_optional, mirror_is_optional",
+    [
+        (True, False, False),
+        (False, True, True),
+        (True, None, True),  # the mirror inherits its step's
+        (False, None, False),
+    ],
+)
+def test_a_mirror_is_optional_as_the_generator_runs_it(
+    optional, mirror_optional, mirror_is_optional
+):
+    steps = [_mirrored("x", optional, mirror_optional)]
+    effective = buildkite_step._get_amd_mirror_effective_step(
+        steps[0], steps[0].mirror["amd"]
+    )
+    assert effective.optional is mirror_is_optional
+    assert ("amd-x" in selector_gate.optional_keys(steps)) is mirror_is_optional
+    assert ("x" in selector_gate.optional_keys(steps)) is optional
+    assert selector_gate.known_keys(steps) == {"x", "amd-x"}
+    assert selector_gate.amd_keys(steps) == {"amd-x"}
+
+
+def test_a_mirror_that_runs_on_prs_is_left_to_amds_rules_not_dropped_as_optional(
+    pr_config, monkeypatch
+):
+    """A mirror that runs on PRs under a nightly-only step is AMD's to run,
+    not an optional step to drop."""
+    steps = _steps() + [_mirrored("eplb", optional=True, mirror_optional=False)]
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission(["test-b", "eplb", "amd-eplb"])
+    )
+    record = pg._selector_decision(steps)
+    assert record["applied"] is True
+    assert record["selector_optional_dropped"] == ["eplb"]
+    assert record["selector_amd_left_to_todays_rules"] == ["amd-eplb"]
+    assert record["selector_keys"] == ["test-b"]
+    assert pr_config.get("selector_step_keys") == frozenset({"test-b"})
+
+
+def test_a_mirror_key_for_a_step_with_no_mirror_is_unknown(pr_config, monkeypatch):
+    """Only real mirrors are known: a key for a missing one means the
+    selector and the generator disagree, so the build keeps today's rules."""
+    steps = _steps() + [
+        Step(label="Nightly", key="test-nightly", optional=True, commands=["n"]),
+    ]
+    monkeypatch.setattr(
+        selector_gate, "run_ci_select", _emission(["test-b", "amd-test-nightly"])
+    )
+    record = pg._selector_decision(steps)
+    assert record["applied"] is False
+    assert "amd-test-nightly" in record["fallback"]
+    assert pr_config.get("selector_step_keys") is None
+
+
+def test_a_step_without_a_key_is_not_classified():
+    steps = [_mirrored("x", optional=True)]
+    steps[0].key = None
+    assert selector_gate.known_keys(steps) == frozenset()
+    assert selector_gate.amd_keys(steps) == frozenset()
+    assert selector_gate.optional_keys(steps) == frozenset()
+
+
+# ---- which recordings a run uses -------------------------------------------
+
+
+class _Response:
+    """What `urllib.request.urlopen` returns, enough for `_latest` and
+    `record_python`."""
+
+    def __init__(self, body):
+        self.body = body if isinstance(body, bytes) else body.encode()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def read(self, size=-1):
+        if size < 0:
+            out, self.body = self.body, b""
+        else:
+            out, self.body = self.body[:size], self.body[size:]
+        return out
+
+
+def _table(python="3.14.10"):
+    """The head of a published table.json.gz, as `record_python` reads it."""
+    stamp = {"jobs": ["j"], "interpreters": [python] if python else []}
+    table = {
+        "version": 8,
+        "source": {"commit": "f" * 40},
+        "rows": {"a-step": {"keyed": True, "stamp": stamp, "functions": {}}},
+    }
+    return gzip.compress(json.dumps(table, indent=1).encode())
+
+
+class _Publishing:
+    """`latest.json` for each recorder, as S3 serves it while a publish lands:
+    the first read gets build 1, every later read build 2."""
+
+    def __init__(self):
+        self.reads = {"fnrec": 0, "kernrec": 0}
+
+    @staticmethod
+    def pointer(recorder, build):
+        return {"build": build, "commit": f"{recorder}-{build}".ljust(40, "0")}
+
+    def urlopen(self, url, timeout=None):
+        if url.endswith("/table.json.gz"):
+            return _Response(_table())
+        recorder = url.split("/ci/")[1].split("/")[0]
+        self.reads[recorder] += 1
+        return _Response(
+            json.dumps(self.pointer(recorder, min(self.reads[recorder], 2)))
+        )
+
+
+def _fake_selector_run(monkeypatch, publishing):
+    """Stub every process `run_ci_select` starts. A publish lands while
+    `ci-select` runs: every pointer read after that sees build 2."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        if "ci-select" in cmd:
+            # The publish: count a read even for a gate that has not read
+            # yet, so its first read after the run already sees build 2.
+            for recorder in publishing.reads:
+                publishing.reads[recorder] = max(publishing.reads[recorder], 1)
+            stdout = json.dumps({"omit": False, "reason": "", "keys": ["y"]})
+        else:
+            stdout = "c" * 40 + "\n"
+        return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(selector_gate.subprocess, "run", fake_run)
+    monkeypatch.setattr(selector_gate.shutil, "which", lambda _: "/bin/uv")
+    monkeypatch.setattr(selector_gate.urllib.request, "urlopen", publishing.urlopen)
+    return calls
+
+
+def test_a_publish_mid_run_cannot_change_which_recordings_are_recorded(monkeypatch):
+    """Each pointer is read once, before anything downloads. Both downloads
+    are pinned to it and the record is that same read."""
+    publishing = _Publishing()
+    calls = _fake_selector_run(monkeypatch, publishing)
+
+    result = selector_gate.run_ci_select("/vllm", "a" * 40, "b" * 40, "vllm_ci")
+
+    first = {r: _Publishing.pointer(r, 1) for r in ("fnrec", "kernrec")}
+    assert result["records"] == first
+    assert publishing.reads == {"fnrec": 1, "kernrec": 1}
+    (kernel_fetch,) = [cmd for cmd, _ in calls if "ci-fetch-kernel-record" in cmd]
+    assert (
+        kernel_fetch[kernel_fetch.index("--commit") + 1] == first["kernrec"]["commit"]
+    )
+    ((select, select_kw),) = [(c, kw) for c, kw in calls if "ci-select" in c]
+    assert "--table" not in select, "ci-select downloads the table itself"
+    assert select_kw["env"][selector_gate.FNREC_COMMIT_ENV] == first["fnrec"]["commit"]
+    assert selector_gate.FNREC_COMMIT_ENV not in os.environ, "set on ci-select only"
+
+
+def test_ci_select_runs_under_the_python_that_made_the_record(monkeypatch):
+    """vLLM's CI moved to 3.14 and its records with it; ci-select under 3.12
+    read every row as another Python's and dropped nothing."""
+    calls = _fake_selector_run(monkeypatch, _Publishing())
+
+    result = selector_gate.run_ci_select("/vllm", "a" * 40, "b" * 40, "vllm_ci")
+
+    uv_runs = [cmd for cmd, _ in calls if cmd[:2] == ["/bin/uv", "run"]]
+    assert uv_runs and all(c[c.index("--python") + 1] == "3.14" for c in uv_runs)
+    assert result["python"] == "3.14"
+
+
+@pytest.mark.parametrize(
+    "body, python",
+    [
+        (_table("3.14.10"), "3.14"),
+        (_table("3.13.2"), "3.13"),
+        # older than ci-select supports, or no interpreter on record
+        (_table("3.11.9"), selector_gate.DEFAULT_SELECTOR_PYTHON),
+        (_table(None), selector_gate.DEFAULT_SELECTOR_PYTHON),
+        (b"not gzip", selector_gate.DEFAULT_SELECTOR_PYTHON),
+        (OSError("S3 unreachable"), selector_gate.DEFAULT_SELECTOR_PYTHON),
+    ],
+    ids=["3.14", "3.13", "too-old", "unstamped", "corrupt", "unreachable"],
+)
+def test_the_record_python_is_read_off_the_table_head(monkeypatch, body, python):
+    """A table the gate cannot read leaves ci-select on its oldest Python,
+    where a record made by another one only adds steps: never a failed build."""
+    seen = []
+
+    def urlopen(url, timeout=None):
+        seen.append(url)
+        if isinstance(body, Exception):
+            raise body
+        return _Response(body)
+
+    monkeypatch.setattr(selector_gate.urllib.request, "urlopen", urlopen)
+    assert selector_gate.record_python("c" * 40) == python
+    assert seen == [selector_gate.TABLE_URL.format(commit="c" * 40)]
+
+
+def test_the_table_url_is_the_one_ci_select_downloads():
+    """The gate reads the head of the very table ci-select fetches for the
+    pinned commit (scripts/fetch_functions.py: DEFAULT_URL/<commit>/TABLE_NAME)."""
+    selector = os.path.join(
+        os.path.dirname(selector_gate.__file__),
+        "..",
+        "ci_selector",
+        "ci_selector",
+        "scripts",
+        "fetch_functions.py",
+    )
+    with open(selector) as f:
+        text = f.read()
+    base = selector_gate.TABLE_URL.split("/{commit}/")[0]
+    assert f'DEFAULT_URL = "{base}"' in text
+    assert selector_gate.TABLE_URL.endswith("/table.json.gz")
+
+
+@pytest.mark.parametrize(
+    "pointer, error",
+    [(OSError("S3 unreachable"), OSError), ({"build": 3}, ValueError)],
+    ids=["unreachable", "no-commit"],
+)
+def test_an_unusable_pointer_stops_the_run_before_anything_downloads(
+    monkeypatch, pointer, error
+):
+    """Without a commit there is no saying which recording would be used, so
+    the run raises and the build keeps today's rules."""
+    calls = _fake_selector_run(monkeypatch, _Publishing())
+
+    def urlopen(url, timeout=None):
+        if isinstance(pointer, Exception):
+            raise pointer
+        return _Response(json.dumps(pointer))
+
+    monkeypatch.setattr(selector_gate.urllib.request, "urlopen", urlopen)
+    with pytest.raises(error):
+        selector_gate.run_ci_select("/vllm", "a" * 40, "b" * 40, "vllm_ci")
+    assert not [
+        c for c, _ in calls if "ci-fetch-kernel-record" in c or "ci-select" in c
+    ]
+
+
+def test_the_pin_uses_the_name_ci_select_reads():
+    """The gate and `ci-select` ship separately and share only this name, so a
+    typo on either side silently brings the race back."""
+    selector = os.path.join(
+        os.path.dirname(selector_gate.__file__),
+        "..",
+        "ci_selector",
+        "ci_selector",
+        "scripts",
+        "fetch_functions.py",
+    )
+    with open(selector) as f:
+        assert f'"{selector_gate.FNREC_COMMIT_ENV}"' in f.read()
 
 
 # `/ci run --include <key> ...` (VLLM_CI_INCLUDE_STEP_KEYS)

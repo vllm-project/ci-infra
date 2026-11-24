@@ -101,6 +101,8 @@ With `build.sh`, a failed selection or install fails `image-build-amd` (retried 
 
 A retried overlay step reinstalls the wheel its first attempt chose.
 
+The pipeline generator does the same when `AITER_NIGHTLY=1` is set on a build it generates, such as `ci`, with `build.sh` only: its `image-build-amd` installs the wheel as above, and generation fails on an older checkout. It chooses jobs by GPU instead of by tag: the AMD build steps and the GPU jobs on gfx942 (MI300, MI325) and gfx950 (MI355), unblocked. Every other step, CUDA included, is dropped (on a PR build, pre-commit still runs). See the [pipeline generator README](buildkite/pipeline_generator/README.md#environment-variables).
+
 ### Bootstrap Scripts
 
 | Script | Pipeline | Generation Method |
@@ -146,7 +148,7 @@ A daily Buildkite pipeline (`.buildkite/pipelines/rebuild-cpu-ami.yml`, schedule
 
 1. **Build AMI**: Packer creates an AMI from the Buildkite Elastic Stack base, installs BuildKit as a standalone systemd service (not docker-container driver), and pre-pulls the latest postmerge Docker image layers using the bake config artifact from the most recent CI build.
 2. **Update SSM**: Stores the new AMI ID in AWS SSM Parameter Store.
-3. **Update Launch Templates**: Creates new EC2 Launch Template versions for premerge, postmerge, and release CPU queues, then updates Auto Scaling Groups. Existing instances cycle out naturally (`TerminateInstanceAfterJob=true`).
+3. **Update Launch Templates**: Creates new EC2 Launch Template versions for the postmerge and release CPU queues, then updates Auto Scaling Groups. `cpu_queue_premerge_us_east_1` is skipped: it runs Elastic CI Stack v7, which must not run this v6-based AMI. Existing instances cycle out naturally (`TerminateInstanceAfterJob=true`).
 4. **Cleanup**: Retains the 3 most recent old AMIs for rollback, deletes older ones and their snapshots.
 
 The warm-cache AMI is used by the `cpu_queue_*_us_east_1` queues and release queues.
@@ -188,8 +190,8 @@ When no critical source files have changed, CI uses precompiled wheels from the 
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
-| `AITER_NIGHTLY` | AMD CI: set to `1` to test the latest AITER nightly wheel on every MI300/MI355 production step (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
-| `AITER_SPEC` | AMD CI, with vLLM's `build.sh`: optional pip spec that pins the AITER wheel the test image installs (default with `AITER_NIGHTLY=1`: the newest matching nightly) |
+| `AITER_NIGHTLY` | Set to `1` to test the latest AITER nightly wheel (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
+| `AITER_SPEC` | With vLLM's `build.sh` (AMD CI and the pipeline generator): optional pip spec that pins the AITER wheel the test image installs (default with `AITER_NIGHTLY=1`: the newest matching nightly) |
 | `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
 

@@ -8,7 +8,7 @@ Downloads each job's `.kernrec/**/kern.*.txt` artifacts into
 <out>/<step_key>/<job-id>/, then prints one line per step: processes,
 unique kernels, dropped records, and whether each expected name showed up.
 Jobs with no recording are listed too, since silence is the failure mode
-that matters most.
+that matters most; one whose exit probe kernel_table accepts reads as empty.
 
 Token needs read_builds and read_artifacts. The spike's expectations:
 
@@ -71,6 +71,24 @@ def download(url: str, token: str, dest: Path) -> None:
     dest.write_bytes(_curl([target]))
 
 
+def _probed_empty(arts: list[dict], token: str, jdir: Path) -> bool:
+    """Whether the job's sidecar holds an exit probe kernel_table accepts."""
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    from kernel_table import _trace_health
+
+    sidecars = [
+        x
+        for x in arts
+        if x["path"].removeprefix("./").startswith(".kernrec/")
+        and x["path"].endswith("/kernrec.json")
+    ]
+    if len(sidecars) != 1:
+        return False
+    download(sidecars[0]["download_url"], token, jdir / "kernrec.json")
+    return _trace_health(jdir, [])[2]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("build")
@@ -115,6 +133,9 @@ def main() -> int:
             for x in recs:
                 download(x["download_url"], token, jdir / Path(x["path"]).name)
             label = f"{step_key} [{j.get('name', '')[:48]}] job={j['state']}"
+            if not recs and _probed_empty(arts, token, jdir):
+                print(f"--- {label} : empty (probed: no GPU process ran)")
+                continue
             if not recs:
                 print(f"--- {label} : NO RECORDING ({len(arts)} artifacts)")
                 failures += 1

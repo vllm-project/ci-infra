@@ -4,23 +4,31 @@ import os
 import shutil
 import subprocess
 import time
-from typing import Dict, FrozenSet, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, NoReturn, Optional, Tuple
 
 import yaml
 
-from amd import AMD_ALWAYS_RUN_STEP_KEYS, normalize_amd_depends_on, runs_on
+from amd import (
+    AMD_ALWAYS_RUN_STEP_KEYS,
+    is_amd_gpu_device,
+    normalize_amd_depends_on,
+    rocm_build_layout,
+    runs_in_aiter_nightly,
+    runs_on,
+)
 from buildkite_step import (
     AMD_GROUP,
     COLLECT_GROUP,
     PRECOMMIT_GROUP,
     BuildkiteGroupStep,
-    _amd_mirror_should_run,
     _generate_step_key,
     _get_amd_mirror_effective_step,
     _step_should_run,
     add_precommit_dependency,
     convert_group_step_to_buildkite_step,
     fnrec_collect_group,
+    one_job_annotation,
+    shard_coverage_check_step,
     kernrec_collect_group,
     kernrec_amd_enabled,
     kernrec_enabled,
@@ -29,6 +37,7 @@ from buildkite_step import (
 )
 from constants import AgentQueue, Platform
 from recorder_switches import fnrec_enabled
+import runtime_shard
 import selector_gate
 from global_config import PLATFORM_ENV_VAR, get_global_config, init_global_config
 from step import Step, group_steps, read_steps_from_job_dir
@@ -75,6 +84,12 @@ def _annotate_best_effort(message: str, style: Optional[str] = None) -> None:
         subprocess.run(command, check=False)
     except OSError:
         pass
+
+
+def _fail_generation(message: str) -> NoReturn:
+    """Fail the build with the reason on the build page, not only in the log."""
+    _annotate_best_effort(message, style="error")
+    raise ValueError(message)
 
 
 class PipelineGenerator:
@@ -147,6 +162,19 @@ class PipelineGenerator:
                 f.write("true")
             return
 
+        aiter_nightly = global_config["aiter_nightly"] == "1"
+        if aiter_nightly and platform == Platform.CUDA:
+            # TORCH_NIGHTLY also sets the platform to cuda (global_config.py).
+            _fail_generation(
+                "AITER_NIGHTLY runs only AMD jobs, so it cannot be combined with "
+                f"{PLATFORM_ENV_VAR}=cuda or TORCH_NIGHTLY."
+            )
+        if aiter_nightly and not rocm_build_layout():
+            # Without it the build would pass while testing the stock AITER.
+            _fail_generation(
+                "AITER nightly needs vLLM's .buildkite/scripts/rocm/build.sh, "
+                "which installs the AITER nightly wheel; this checkout has none."
+            )
         if platform:
             reason = (
                 "torch nightly validates CUDA only"
@@ -155,6 +183,15 @@ class PipelineGenerator:
             )
             _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
+        if aiter_nightly:
+            nightly_keys = aiter_nightly_step_keys(steps)
+            # A rerun (VLLM_CI_ONLY_STEP_KEYS) runs only the jobs it names.
+            run_keys = global_config["only_step_keys"] or nightly_keys
+            try:
+                check_runs_in_aiter_nightly(steps, run_keys, nightly_keys)
+            except ValueError as error:
+                _fail_generation(str(error))
+            global_config["only_step_keys"] = run_keys
         all_steps = list(steps)
         images_step = _images_step_key()
         # With an images step, it uploads them; bootstrap only learns which,
@@ -231,6 +268,12 @@ class PipelineGenerator:
             collect += kernrec_collect_group(buildkite_group_steps).steps
         if fnrec_enabled():
             collect += fnrec_collect_group(buildkite_group_steps).steps
+        one_job = one_job_annotation(buildkite_group_steps)
+        if one_job:
+            runtime_shard.annotate("one-job", one_job, "warning")
+        coverage = shard_coverage_check_step(buildkite_group_steps)
+        if coverage:
+            collect.append(coverage)
         if collect:
             buildkite_group_steps.append(
                 BuildkiteGroupStep(group=COLLECT_GROUP, steps=collect)
@@ -285,14 +328,14 @@ class PipelineGenerator:
 
 
 def _skips_ci_as_docs_only(global_config: dict) -> bool:
-    """Whether the build runs nothing: a doc-only change, unless RUN_ALL or a
-    list of steps asks for them (VLLM_CI_ONLY_STEP_KEYS, or the extra jobs of
-    `/ci run --include`)."""
+    """Whether the build runs nothing: a doc-only change, unless RUN_ALL, a
+    list of steps or the AITER nightly asks for them."""
     return (
         global_config["docs_only_disable"] == "0"
         and not global_config["run_all"]
         and global_config["only_step_keys"] is None
         and not global_config.get("include_step_keys")
+        and global_config["aiter_nightly"] != "1"
         and is_docs_only_change(global_config["list_file_diff"])
     )
 
@@ -410,6 +453,8 @@ def upload_image_steps_early(steps: List[Step], output_dir: str) -> FrozenSet[st
         os.getenv(EARLY_IMAGE_UPLOAD_ENV_VAR) == "0"
         or not os.getenv("BUILDKITE_JOB_ID")
         or global_config["only_step_keys"] is not None
+        # Its run keys leave out the CUDA image; the images step never learns them.
+        or global_config["aiter_nightly"] == "1"
     ):
         return frozenset()
     early = [copy.deepcopy(step) for step in steps if _is_image_step(step)]
@@ -517,23 +562,16 @@ def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
     Steps a `/ci run --include` request added are the requester's choice,
     not today's rules: they stay out of this baseline, which the selector is
     compared with, and are recorded as `included_keys` instead."""
-    global_config = get_global_config()
-    included = global_config.get("include_step_keys")
-    global_config["include_step_keys"] = None
-    try:
-        keys = []
-        for step in steps:
-            if _step_should_run(step, diff):
-                keys.append(step.key)
-            amd = (step.mirror or {}).get("amd")
-            if amd and _amd_mirror_should_run(
-                _step_should_run(_get_amd_mirror_effective_step(step, amd), diff),
-                diff,
-            ):
-                keys.append(f"amd-{step.key}")
-        return keys
-    finally:
-        global_config["include_step_keys"] = included
+    keys = []
+    for step in steps:
+        if _step_should_run(step, diff, honor_includes=False):
+            keys.append(step.key)
+        amd = (step.mirror or {}).get("amd")
+        if amd and _step_should_run(
+            _get_amd_mirror_effective_step(step, amd), diff, honor_includes=False
+        ):
+            keys.append(f"amd-{step.key}")
+    return keys
 
 
 # How selector_gate records the selector declining because it cannot narrow
@@ -639,7 +677,13 @@ def select_steps_and_dependencies(
         if step.key in steps_by_key:
             raise ValueError(f"Duplicate CI step key: {step.key}")
         steps_by_key[step.key] = step
-        dependencies_by_key[step.key] = step.depends_on or []
+        # Use the depends_on that gets uploaded, not the YAML's: for an AMD GPU
+        # job, amd.py swaps image-build for image-build-amd, adding it if absent.
+        dependencies_by_key[step.key] = (
+            normalize_amd_depends_on(step.depends_on)
+            if is_amd_gpu_device(step.device)
+            else step.depends_on or []
+        )
         if not runs_on(platform, step.device):
             off_platform_keys.add(step.key)
 
@@ -687,6 +731,39 @@ def select_steps_and_dependencies(
         if step.key in selected_step_keys or f"amd-{step.key}" in selected_step_keys
     ]
     return selected, frozenset(selected_step_keys)
+
+
+def aiter_nightly_step_keys(steps: List[Step]) -> FrozenSet[str]:
+    """The steps the AITER nightly runs: the AMD build steps and the AMD GPU
+    jobs on gfx942/gfx950."""
+    nightly_keys = set()
+    for step in steps:
+        key = step.key or _generate_step_key(step.label)
+        if runs_in_aiter_nightly(step.device):
+            nightly_keys.add(key)
+        # An AMD GPU job is not mirrored; mirrors come from other steps.
+        amd_mirror = (step.mirror or {}).get("amd")
+        if (
+            amd_mirror
+            and not is_amd_gpu_device(step.device)
+            and runs_in_aiter_nightly(amd_mirror.get("device"))
+        ):
+            nightly_keys.add(f"amd-{key}")
+    return frozenset(nightly_keys)
+
+
+def check_runs_in_aiter_nightly(
+    steps: List[Step], run_keys: FrozenSet[str], nightly_keys: FrozenSet[str]
+) -> None:
+    """Raises ValueError if `run_keys`, or their prerequisites, include a step
+    outside `nightly_keys`."""
+    _, needed_keys = select_steps_and_dependencies(steps, run_keys)
+    non_nightly_keys = needed_keys - nightly_keys
+    if non_nightly_keys:
+        raise ValueError(
+            "AITER nightly runs only the AMD build steps and AMD GPU jobs on "
+            "gfx942/gfx950, but needs: " + ", ".join(sorted(non_nightly_keys))
+        )
 
 
 def is_docs_only_change(list_file_diff: List[str]) -> bool:

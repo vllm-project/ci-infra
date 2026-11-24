@@ -13,7 +13,7 @@ import pytest
 from ci_selector.codemap import unions
 from ci_selector.codemap.build_map import ALL_FAMILIES, ENV_VAR, BuildMap, mode
 from ci_selector.codemap.classify import select
-from helpers import HW, drift_message
+from helpers import HW, drift_message, with_unmapped_device
 
 CUDA_TU = "csrc/libtorch_stable/quantization/machete/machete_pytorch.cu"
 # Outside csrc/rocm/ on purpose, so this anchors the HIP grammar leg rather
@@ -474,16 +474,31 @@ def test_the_switch_off_restores_the_wider_answer(state, monkeypatch):
     assert set(off) & per["xpu"]  # unnarrowed, it reaches intel again
 
 
-def test_the_clause_stands_down_on_unmapped_devices(state, monkeypatch):
-    """family_steps() is incomplete when a device cannot be placed, so
-    nothing may subtract with it."""
-    on = select(state, [CUDA_TU]).selected
-    monkeypatch.setattr(state.preflight, "unmapped_devices", ["never-seen-device-9000"])
-    stood_down = select(state, [CUDA_TU]).selected
-    monkeypatch.setenv(ENV_VAR, "off")
-    off = select(state, [CUDA_TU]).selected
-    assert stood_down == off
-    assert set(on) < set(stood_down)
+def test_an_unmapped_device_keeps_only_its_own_steps(state, monkeypatch):
+    """A device the taxonomy cannot place could be any family, so its steps
+    are kept. Every other step's family is still known, so the narrowing
+    still subtracts them."""
+    stray_state, stray, on = with_unmapped_device(state, monkeypatch, "xpu", HIP_TU)
+    picked = set(select(stray_state, [HIP_TU]).selected)
+    assert stray in picked
+    assert picked - {stray} == on, sorted(picked ^ (on | {stray}))[:5]
+
+
+def test_the_exclusive_union_cut_keeps_an_unmapped_devices_steps(state, monkeypatch):
+    """The image union cuts an exclusive file to its family's steps. A step on
+    an unplaced device survives the cut; the known xpu steps do not."""
+    from ci_selector.codemap.claim import Claim
+
+    path = "csrc/rocm/attention.cu"
+    stray_state, stray, _on = with_unmapped_device(state, monkeypatch, "xpu", path)
+    reached = stray_state.artifacts.steps_for_input(path)
+    assert stray in reached, f"{stray} no longer builds an image holding {path}"
+    added = unions._apply_image_input_union(
+        stray_state, path, Claim("graph", "probe")
+    ).step_ids
+    per, _union, _nonfamily = stray_state.family_partition()
+    assert stray in added
+    assert not added & per["xpu"], sorted(added & per["xpu"])[:5]
 
 
 def test_the_walker_never_maps_outside_csrc_and_cmake(state):

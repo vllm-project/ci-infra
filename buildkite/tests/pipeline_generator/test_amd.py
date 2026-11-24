@@ -1,12 +1,16 @@
+import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
 import amd
 import buildkite_step
+import pipeline_generator
 from amd import is_amd_device
 from constants import AgentQueue
-from step import Step
+from step import Step, read_steps_from_job_dir
+from utils_lib import git_utils
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
@@ -105,6 +109,8 @@ def build_sh_layout(tmp_path, monkeypatch):
     monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
     monkeypatch.setenv("BUILDKITE_BRANCH", "main")
     monkeypatch.delenv("AITER_NIGHTLY", raising=False)
+    monkeypatch.delenv("BUILDKITE_SOURCE", raising=False)
+    monkeypatch.delenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID", raising=False)
     return monkeypatch
 
 
@@ -116,6 +122,9 @@ def build_sh_layout(tmp_path, monkeypatch):
         ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-dev"),
         ({"AITER_NIGHTLY": "1"}, "rocm/vllm-dev"),
         ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-dev"),
+        # A trigger step uploaded by a PR job can build main with any commit.
+        ({"BUILDKITE_SOURCE": "trigger_job"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "1"}, "rocm/vllm-dev"),
     ],
 )
 def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
@@ -158,6 +167,28 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
     assert [v["name"] for v in pod["volumes"]] == ["devshm"]
 
 
+def test_amd_cpu_step_gets_only_the_repo_wide_retries():
+    step = Step(
+        label="AMD build",
+        group="Hardware - AMD Build",
+        key="amd-build-no-yaml-retry",
+        device="amd_cpu",
+        commands=["build"],
+    )
+
+    command_step = _render_single_step(step).steps[-1]
+
+    assert command_step.retry == {
+        "automatic": [
+            {"signal_reason": "stack_error", "limit": 1},
+            {"exit_status": -1, "limit": 1},
+            {"exit_status": 255, "limit": 1},
+            {"exit_status": 94, "limit": 1},
+            {"exit_status": [201, 202, 203, 204, 205], "limit": 1},
+        ]
+    }
+
+
 @pytest.mark.parametrize(
     ("device", "queue", "dind", "expected_gpu_count"),
     [
@@ -167,6 +198,8 @@ def test_build_sh_layout_pods_run_the_build_image(build_sh_layout):
         ("mi325_1", AgentQueue.AMD_MI325_1, True, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, False, "1"),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX, True, "1"),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, False, "1"),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX, True, "1"),
     ],
 )
 def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_count):
@@ -189,7 +222,12 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert group_step.group == "Hardware-AMD Tests"
     # Optional, so it waits in the "Run more jobs" input step.
     assert command_step.deferred
-    tag = {"mi300_4": "MI300", "mi325_1": "MI325", "mi355_dpx": "MI355 DPX"}[device]
+    tag = {
+        "mi300_4": "MI300",
+        "mi325_1": "MI325",
+        "mi355_dpx": "MI355 DPX",
+        "mi300_dpx": "MI300 DPX",
+    }[device]
     assert command_step.label == f":amd: ({tag}) AMD direct test"
     assert command_step.depends_on == ["image-build-amd"]
     assert command_step.agents == {"queue": queue}
@@ -208,7 +246,7 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         pod_patch = command_step.plugins[0]["kubernetes"]["podSpecPatch"]
         container = pod_patch["containers"][0]
         assert container["image"] == amd.AMD_NATIVE_BASE_IMAGE
-        if device == "mi355_dpx":
+        if device.endswith("_dpx"):
             assert "resources" not in container
         else:
             assert container["resources"]["limits"]["amd.com/gpu"] == expected_gpu_count
@@ -236,13 +274,16 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
         amd.AMD_NATIVE_BASE_IMAGE if not dind else amd.AMD_STABLE_CI_BASE_IMAGE
     )
 
-    assert command_step.retry == amd.AMD_RETRY
-    assert len(command_step.retry["automatic"]) == 7
-    assert command_step.retry["automatic"][0] == {
-        "signal_reason": "stack_error",
-        "limit": 1,
-    }
-    assert {"exit_status": 134, "limit": 1} in command_step.retry["automatic"]
+    # AMD's own retries plus the repo-wide infra ones (255, 94, 201-205).
+    assert command_step.retry == buildkite_step.ensure_infra_failure_retry(
+        amd.AMD_RETRY
+    )
+    automatic = command_step.retry["automatic"]
+    assert {"exit_status": 94, "limit": 1} in automatic
+    assert {"exit_status": 255, "limit": 1} in automatic
+    assert {"exit_status": [201, 202, 203, 204, 205], "limit": 1} in automatic
+    assert {"signal_reason": "stack_error", "limit": 1} in automatic
+    assert {"exit_status": 134, "limit": 1} in automatic
 
     test_commands = command_step.env["VLLM_TEST_COMMANDS"]
     assert test_commands.startswith(f"export VLLM_TEST_GROUP_NAME={step.key}")
@@ -260,7 +301,9 @@ def test_direct_amd_gpu_steps_use_dind_flag(device, queue, dind, expected_gpu_co
     assert "CUDA_ENABLE_COREDUMP_ON_EXCEPTION" not in test_commands
 
 
-@pytest.mark.parametrize("device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1)])
+@pytest.mark.parametrize(
+    "device,gpu_count", [("mi300_4", 4), ("mi355_dpx", 1), ("mi300_dpx", 1)]
+)
 def test_amd_device_rejects_conflicting_gpu_count(device, gpu_count):
     step = Step(
         label="AMD GPU count mismatch",
@@ -333,6 +376,7 @@ def test_rocm_debug_agent_setup_is_opt_in(monkeypatch):
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX),
     ],
 )
 def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
@@ -388,9 +432,12 @@ def test_amd_mirror_uses_shared_gating_with_amd_dependency_fallback(
     assert "ROCm debug agent disabled" in (amd_command_step.env["VLLM_TEST_COMMANDS"])
 
 
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
 @pytest.mark.parametrize("optional", [False, True])
-def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
-    fake_global_config["list_file_diff"] = [amd.AMD_ROCM_BASE_DOCKERFILE]
+def test_rocm_stack_change_runs_only_amd_mirror(
+    fake_global_config, optional, stack_file
+):
+    fake_global_config["list_file_diff"] = [stack_file]
     step = Step(
         label="ROCm base mirrored test",
         group="Mirrors",
@@ -414,11 +461,77 @@ def test_rocm_base_change_runs_only_amd_mirror(fake_global_config, optional):
     assert isinstance(amd_group.steps[0], buildkite_step.BuildkiteCommandStep)
 
 
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
+@pytest.mark.parametrize("optional", [False, True])
+@pytest.mark.parametrize("dind", [False, True])
+def test_rocm_stack_change_runs_standalone_amd_steps(
+    fake_global_config, optional, dind, stack_file
+):
+    fake_global_config["list_file_diff"] = [stack_file]
+    amd_step = Step(
+        label="AMD test",
+        group="Direct AMD",
+        key="amd-test",
+        device="mi300_1",
+        dind=dind,
+        optional=optional,
+        commands=["pytest tests/foo.py"],
+        source_file_dependencies=["vllm/"],
+    )
+    cuda_step = Step(
+        label="CUDA test",
+        group="Direct AMD",
+        key="cuda-test",
+        optional=optional,
+        commands=["pytest tests/foo.py"],
+        source_file_dependencies=["vllm/"],
+    )
+
+    assert buildkite_step._step_should_run(amd_step, [stack_file])
+    assert not buildkite_step._step_should_run(cuda_step, [stack_file])
+    assert not buildkite_step._step_should_run(amd_step, ["docker/Dockerfile.rocm"])
+
+
+@pytest.mark.parametrize("stack_file", amd.AMD_ROCM_STACK_FILES)
+def test_rocm_stack_change_respects_noauto_and_only_step_keys(
+    fake_global_config, monkeypatch, stack_file
+):
+    diff = [stack_file]
+    steps = [
+        Step(
+            label="AMD test",
+            key="amd-test",
+            device="mi300_1",
+            optional=True,
+            commands=["pytest tests/foo.py"],
+        ),
+        Step(
+            label="Mirrored test",
+            key="mirrored-test",
+            optional=True,
+            commands=["pytest tests/foo.py"],
+            mirror={"amd": {"device": "mi300_1"}},
+        ),
+    ]
+    assert pipeline_generator._legacy_keys(steps, diff) == [
+        "amd-test",
+        "amd-mirrored-test",
+    ]
+
+    fake_global_config["only_step_keys"] = frozenset({"amd-test"})
+    assert pipeline_generator._legacy_keys(steps, diff) == ["amd-test"]
+
+    fake_global_config["only_step_keys"] = None
+    monkeypatch.setenv("NOAUTO", "1")
+    assert pipeline_generator._legacy_keys(steps, diff) == []
+
+
 @pytest.mark.parametrize(
     "device,queue",
     [
         ("mi325_1", AgentQueue.AMD_MI325_1),
         ("mi355_dpx", AgentQueue.AMD_MI355_DPX),
+        ("mi300_dpx", AgentQueue.AMD_MI300_DPX),
     ],
 )
 def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device, queue):
@@ -455,7 +568,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
     assert amd_command_step.plugins is not None
     pod_patch = amd_command_step.plugins[0]["kubernetes"]["podSpecPatch"]
     container = pod_patch["containers"][0]
-    if device == "mi355_dpx":
+    if device.endswith("_dpx"):
         assert "resources" not in container
     else:
         assert container["resources"] == {
@@ -464,7 +577,7 @@ def test_dind_false_mirror_uses_native_runner_gating(fake_global_config, device,
         }
 
 
-@pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx"])
+@pytest.mark.parametrize("device", ["mi300_4", "mi355_dpx", "mi300_dpx"])
 def test_native_amd_no_gpu_preserves_allocation_contract(device):
     step = Step(
         label="Native AMD CPU test",
@@ -485,7 +598,7 @@ def test_native_amd_no_gpu_preserves_allocation_contract(device):
     container = command_step.plugins[0]["kubernetes"]["podSpecPatch"]["containers"][0]
     container_env = {entry["name"]: entry for entry in container["env"]}
     assert container_env["VLLM_CI_EXPECTED_GPU_COUNT"]["value"] == "0"
-    if device == "mi355_dpx":
+    if device.endswith("_dpx"):
         assert "resources" not in container
     else:
         assert container["resources"] == {
@@ -639,6 +752,10 @@ def test_amd_mirror_enforces_its_own_timeout(
     # timeout up to the standard AMD limit.
     assert default_command_step.timeout_in_minutes == 40
     assert amd_command_step.timeout_in_minutes == expected_timeout
+    # A mirror gets the same retries as a direct AMD step.
+    assert amd_command_step.retry == buildkite_step.ensure_infra_failure_retry(
+        amd.AMD_RETRY
+    )
 
 
 def test_skip_timeout_omits_main_and_amd_mirror_timeouts(
@@ -735,6 +852,7 @@ def test_amd_mirror_without_timeout_uses_standard_timeout(fake_global_config):
             ":amd: (MI325) Docker Build Metadata",
         ),
         ("LM Eval Small Models", "mi355_dpx", ":amd: (MI355 DPX) LM Eval Small Models"),
+        ("LM Eval Small Models", "mi300_dpx", ":amd: (MI300 DPX) LM Eval Small Models"),
         (":amd: (MI355) Fusion E2E TP2", "mi355_2", ":amd: (MI355) Fusion E2E TP2"),
         (":docker: Refresh ROCm base", "amd_cpu", ":docker: Refresh ROCm base"),
     ],
@@ -920,3 +1038,154 @@ def test_amd_run_all_off_keeps_dependency_rules(fake_global_config):
     assert not buildkite_step._step_should_run(
         native, fake_global_config["list_file_diff"]
     )
+
+
+def test_cuda_only_run_all_runs_cuda_steps_and_leaves_amd_to_its_own_rules(
+    fake_global_config,
+):
+    fake_global_config.update(run_all=True, cuda_only_run_all=True)
+    mirrored, native = _mirrored_and_native()
+    effective = buildkite_step._get_amd_mirror_effective_step(
+        mirrored, mirrored.mirror["amd"]
+    )
+    run = buildkite_step._step_should_run
+
+    assert run(mirrored, ["requirements/cuda.txt"]), "CUDA: run_all"
+    assert not run(effective, ["requirements/cuda.txt"]), "AMD mirror: its own deps"
+    assert run(native, ["tests/amd/test_x.py"]), "native AMD: deps still match"
+
+    fake_global_config["amd_run_all"] = True
+    assert run(native, ["requirements/cuda.txt"]), "amd_run_all still applies"
+
+
+STEP_YAML = ".buildkite/test_areas/models.yaml"
+HEADER = "group: Models\ndepends_on: [image-build]\nsteps:\n"
+KIMI = """\
+- label: Kimi
+  key: kimi
+  device: h100
+  source_file_dependencies: [vllm/models/kimi/]
+  commands: [pytest models/kimi]
+  mirror:
+    amd: {device: mi355_1}
+"""
+DECODE = """\
+- label: Kimi Decode
+  key: kimi-decode-amd
+  device: mi355_8
+  source_file_dependencies: [vllm/models/kimi/amd/]
+  commands: [pytest models/kimi/amd]
+"""
+STEPS = HEADER + KIMI + DECODE
+NEW_STEP = "- {label: New, key: new, commands: [pytest]}\n"
+
+
+def _edit(old, new, text=STEPS):
+    assert old in text
+    return text.replace(old, new, 1)
+
+
+@pytest.mark.parametrize(
+    ("base", "head", "expected"),
+    [
+        pytest.param(
+            STEPS, _edit("h100", "h200"), {"kimi", "amd-kimi"}, id="parent-and-mirror"
+        ),
+        pytest.param(
+            STEPS, _edit("mi355_1", "mi355_2"), {"amd-kimi"}, id="mirror-only"
+        ),
+        pytest.param(STEPS, STEPS + NEW_STEP, {"new"}, id="added"),
+        pytest.param(STEPS, _edit("group: Models", "group: Kimi"), None, id="group"),
+        pytest.param(STEPS, _edit("kimi-decode-amd", "kimi"), None, id="duplicate-key"),
+        pytest.param("steps: [unclosed\n", STEPS, None, id="unparsable-base"),
+    ],
+)
+def test_changed_step_keys(base, head, expected):
+    keys = amd.changed_step_keys(base, head)
+    assert keys == (None if expected is None else frozenset(expected))
+
+
+def test_changed_step_keys_in_file_diffs_against_git(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".buildkite/test_areas").mkdir(parents=True)
+    (tmp_path / STEP_YAML).write_text(STEPS)
+    git = ["git", "-c", "user.email=ci@example.com", "-c", "user.name=ci"]
+    for command in (["init", "-q"], ["add", "."], ["commit", "-qm", "base"]):
+        subprocess.run(git + command, check=True)
+    (tmp_path / STEP_YAML).write_text(_edit("h100", "h200"))
+    amd.changed_step_keys_in_file.cache_clear()
+
+    assert amd.changed_step_keys_in_file(STEP_YAML, "HEAD") == {"kimi", "amd-kimi"}
+    assert "redefined: amd-kimi, kimi" in capsys.readouterr().out
+    assert amd.changed_step_keys_in_file("new.yaml", "HEAD") is None
+    assert "not pinned to steps (no base:" in capsys.readouterr().out
+    amd.changed_step_keys_in_file.cache_clear()
+
+
+def _load(tmp_path, monkeypatch, text=STEPS):
+    (tmp_path / ".buildkite/test_areas").mkdir(parents=True, exist_ok=True)
+    (tmp_path / STEP_YAML).write_text(text)
+    monkeypatch.chdir(tmp_path)
+    steps = {s.key: s for s in read_steps_from_job_dir(".buildkite/test_areas")}
+    kimi = steps["kimi"]
+    steps["amd-kimi"] = buildkite_step._get_amd_mirror_effective_step(
+        kimi, kimi.mirror["amd"]
+    )
+    return steps
+
+
+def _redefined(monkeypatch, keys):
+    keys = None if keys is None else frozenset(keys)
+    monkeypatch.setattr(amd, "changed_step_keys_in_file", lambda path, base: keys)
+
+
+@pytest.mark.parametrize(
+    ("redefined", "runs"),
+    [
+        ({"kimi"}, {"kimi"}),
+        ({"kimi", "amd-kimi"}, {"kimi", "amd-kimi"}),
+        (None, {"kimi", "amd-kimi", "kimi-decode-amd"}),
+    ],
+    ids=["other-step", "own-entry", "not-pinned"],
+)
+def test_amd_steps_count_their_yaml_only_if_redefined(
+    tmp_path, monkeypatch, redefined, runs
+):
+    steps = _load(tmp_path, monkeypatch)
+    _redefined(monkeypatch, redefined)
+    assert {
+        k for k, s in steps.items() if buildkite_step._step_should_run(s, [STEP_YAML])
+    } == runs
+
+
+def test_an_optional_amd_step_runs_only_on_its_own_entry(tmp_path, monkeypatch):
+    steps = _load(tmp_path, monkeypatch)
+    optional = steps["kimi-decode-amd"].model_copy(update={"optional": True})
+    for redefined, runs in (({"kimi-decode-amd"}, True), (None, False)):
+        _redefined(monkeypatch, redefined)
+        assert buildkite_step._step_should_run(optional, [STEP_YAML]) is runs
+
+
+def test_a_step_that_lists_its_own_yaml_counts_every_edit(tmp_path, monkeypatch):
+    text = _edit("[vllm/models/kimi/amd/]", f"[vllm/models/kimi/amd/, {STEP_YAML}]")
+    text = _edit(
+        "{device: mi355_1}",
+        f"{{device: mi355_1, source_file_dependencies: [{STEP_YAML}]}}",
+        text,
+    )
+    steps = _load(tmp_path, monkeypatch, text)
+    _redefined(monkeypatch, set())
+
+    assert "source_file" not in steps["kimi"].model_dump()
+    assert all(buildkite_step._step_should_run(s, [STEP_YAML]) for s in steps.values())
+
+
+def test_diff_base_ref_follows_the_diff(fake_global_config, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", MagicMock())
+    git_diff = MagicMock(return_value="")
+    monkeypatch.setattr(subprocess, "check_output", git_diff)
+    fake_global_config["merge_base_commit"] = "abc\n"
+    for branch, base in (("test-branch", "abc"), ("main", "HEAD~1")):
+        fake_global_config["branch"] = branch
+        git_utils.get_list_file_diff(branch, "abc\n")
+        assert git_diff.call_args.args[0][-1] == amd._diff_base_ref() == base
