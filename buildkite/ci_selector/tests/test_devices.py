@@ -24,7 +24,7 @@ from ci_selector.codemap.pipeline.step import DEFAULT_WORKING_DIR, LoadReport, S
 import buildkite_step
 import selector_gate
 import step as step_mod
-from amd import is_amd_device
+from amd import changed_step_keys, is_amd_device
 from step_vendors import expand_document
 
 CONFIG = """\
@@ -332,3 +332,59 @@ def test_edits_to_a_devices_step_land_on_the_jobs_they_change(
     assert added == {}
     assert set(got_changed) == changed
     assert set(got_mirror_only) == mirror_only
+
+
+@pytest.mark.parametrize(
+    ("head", "keys"),
+    [
+        # NVIDIA-only: the AMD jobs (the exact mirror included) are untouched.
+        (
+            _edit('NVIDIA_ONLY: "1"', 'NVIDIA_ONLY: "2"'),
+            {"lora", "lora-eager", "lora-b200"},
+        ),
+        (_edit('EAGER: "1"', 'EAGER: "2"'), {"lora-eager"}),
+        # Shared: every job, the exact mirror too.
+        (
+            _edit("    - pytest lora\n", "    - pytest lora -x\n"),
+            {"lora", "lora-eager", "lora-b200", "amd-lora", "amd-lora-mi300"},
+        ),
+        # AMD-only: the mirror (changed alone) and the device copying it.
+        (
+            _edit("      optional: true\n", "      optional: false\n"),
+            {"amd-lora", "amd-lora-mi300"},
+        ),
+        (_edit("timeout_in_minutes: 20", "timeout_in_minutes: 25"), {"amd-lora-mi300"}),
+    ],
+    ids=[
+        "nvidia-env",
+        "variant-env",
+        "shared-commands",
+        "mirror-optional",
+        "amd-other",
+    ],
+)
+def test_changed_steps_name_an_exact_mirror_only_when_its_block_changed(
+    tmp_path, monkeypatch, head, keys
+):
+    """classify._changed_steps (a modified step yaml claims the steps whose
+    definition changed): an edit to a `devices:` step's NVIDIA job must not
+    claim its AMD job, which inherits nothing from it."""
+    from types import SimpleNamespace
+
+    from ci_selector.codemap import classify
+    from ci_selector.codemap.state import DiffContext
+
+    path = ".buildkite/test_areas/lora.yaml"
+    steps = _ours(_repo(tmp_path, {"lora.yaml": HEADER + TWO_DEVICES}))
+    state = SimpleNamespace(pipelines=[SimpleNamespace(steps=steps)])
+    docs = {
+        "base": yaml.safe_load(HEADER + TWO_DEVICES),
+        "head": yaml.safe_load(HEADER + head),
+    }
+    monkeypatch.setattr(classify, "_yaml_at", lambda st, p, ref: docs[ref])
+    ctx = DiffContext(base="base", head="head", status={path: "M"})
+    ids, got = classify._changed_steps(state, path, ctx, {s.step_id for s in steps})
+    assert got == keys
+    assert {s.buildkite_key for s in steps if s.step_id in ids} == keys
+    # The generator's own answer for the same edit.
+    assert set(changed_step_keys(HEADER + TWO_DEVICES, HEADER + head)) == keys
