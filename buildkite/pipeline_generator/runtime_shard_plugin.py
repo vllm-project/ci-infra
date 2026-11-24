@@ -304,6 +304,7 @@ class ShardPlugin:
         self._active_nodeid = None
         self._subtest_failed = set()
         self.record_path = None
+        self._prev_excepthook = None
 
     def pytest_ignore_collect(self, collection_path, config):
         """A directory-discovered file planned whole for another shard, or
@@ -366,16 +367,25 @@ class ShardPlugin:
                     grew = True
                     break
             if grew:
-                self.retry_passed = set()
+                self.retry_has_expected = False
+                self.records_expected = (
+                    bool(self.coverage_dir)
+                    and not self.single_job
+                    and self.shard == self.fallback
+                )
                 if not self.retry_skipped_files:
+                    self.retry_passed = set()
                     self.mode = "full"
                     self.retry_base_planned = None
-                    self.retry_has_expected = False
-                    self.records_expected = (
-                        bool(self.coverage_dir)
-                        and not self.single_job
-                        and self.shard == self.fallback
-                    )
+                else:
+                    # Keep passed IDs only for files already excluded in
+                    # pytest_ignore_collect so missing-test checks don't flag
+                    # them; run every collected item in non-excluded files.
+                    self.retry_passed = {
+                        nodeid
+                        for nodeid in self.retry_passed
+                        if nodeid.split("::")[0] in self.retry_skipped_files
+                    }
         if (
             self.records_expected
             and not self.collection_failed
@@ -572,6 +582,16 @@ class ShardPlugin:
             expected=self.expected,
             planned=self.planned,
         )
+        if self.record_path and self._prev_excepthook is None:
+            prev = sys.excepthook
+            self._prev_excepthook = prev
+            record_path = self.record_path
+
+            def _record_uncaught(exc_type, exc_value, exc_tb):
+                pytest_retry.append_jsonl_event(record_path, {"event": "hook_error"})
+                prev(exc_type, exc_value, exc_tb)
+
+            sys.excepthook = _record_uncaught
 
     def _finish_record(self, finished, exitstatus=None, hook_error=False):
         """Flush any unfinished phase records and append the `finish` trailer."""
@@ -686,10 +706,17 @@ class ShardPlugin:
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtestloop(self, session):
         yield
+        pytest_retry.append_jsonl_event(self.record_path, {"event": "loop_done"})
         if not self.single_job and self.reporter is not None and self.current is not None:
             # The failures and the summary get their own open group, not the
             # last file's.
             self._say(f"+++ :test_tube: {self.label}: results")
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_unconfigure(self, config):
+        outcome = yield
+        if outcome.excinfo is not None:
+            pytest_retry.append_jsonl_event(self.record_path, {"event": "hook_error"})
 
     @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_sessionfinish(self, session, exitstatus):

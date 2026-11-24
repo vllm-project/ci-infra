@@ -92,6 +92,7 @@ def _parse_legacy_json(data: Any) -> Optional[Dict[str, Any]]:
         "finished": data["finished"],
         "finished_at": float(data["finished_at"]),
         "has_finish": bool(data.get("has_finish", data["finished"])),
+        "loop_done": bool(data.get("loop_done", data["finished"])),
         "hook_error": bool(data.get("hook_error", False)),
         "exitstatus": data.get("exitstatus") if _is_int(data.get("exitstatus")) else None,
         "process_exit": (
@@ -153,6 +154,7 @@ def _parse_record_with_reason(path: str) -> tuple:
     finished = False
     finished_at = 0.0
     has_finish = False
+    loop_done = False
     hook_error = False
     exitstatus: Optional[int] = None
     process_exit: Optional[int] = None
@@ -187,6 +189,10 @@ def _parse_record_with_reason(path: str) -> tuple:
                 passed_counts.pop(nodeid, None)
                 if event.get("outcome") in ("failed", "error"):
                     failed.add(nodeid)
+        elif kind == "loop_done":
+            loop_done = True
+        elif kind == "hook_error":
+            hook_error = True
         elif kind == "finish":
             if not isinstance(event.get("finished"), bool) or not _is_number(
                 event.get("finished_at")
@@ -201,7 +207,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             has_finish = True
             finished = event["finished"]
             finished_at = float(event["finished_at"])
-            hook_error = raw_hook_error
+            hook_error = hook_error or raw_hook_error
             exitstatus = raw_exit
         elif kind == "exit":
             raw_exit = event.get("exitstatus")
@@ -220,6 +226,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             "finished": finished,
             "finished_at": finished_at,
             "has_finish": has_finish,
+            "loop_done": loop_done,
             "hook_error": hook_error,
             "exitstatus": exitstatus,
             "process_exit": process_exit,
@@ -455,15 +462,21 @@ def build_retry_plan(
     for index, record in enumerate(chain):
         exitstatus = record.get("exitstatus")
         process_exit = record.get("process_exit")
-        # A completed pytest session (has_finish=True) must also carry proof
-        # that the process actually exited (`process_exit` recorded by the
-        # command wrapper) and did not fail at the session/cleanup layer
-        # (`pytest_sessionfinish`, `pytest_unconfigure`, `atexit`, or a hang
-        # killed during unconfigure). Explicit `skipped_command` records never
-        # launch pytest, and mid-run crashes (os._exit/SIGKILL) never write a
-        # `finish` event (has_finish=False) so their flushed passes stay usable.
-        if not record.get("skipped_command") and record.get("has_finish", True):
-            if record.get("hook_error"):
+        # Any recorded hook/cleanup exception invalidates the chain regardless
+        # of whether tests also failed.
+        if record.get("hook_error"):
+            return empty
+        # If the test loop completed (`loop_done=True`) or `finish` was written
+        # (`has_finish=True`), require both `finish` and explicit `process_exit`
+        # confirmation, and reject finalization/cleanup failures (including an
+        # outer sessionfinish wrapper raising before yield or a hang killed
+        # during unconfigure). Mid-test crashes (`os._exit`/SIGKILL) stop
+        # inside `pytest_runtestloop` (both `loop_done` and `has_finish` are
+        # False), so their flushed pre-crash passes stay reusable.
+        if not record.get("skipped_command") and (
+            record.get("has_finish", True) or record.get("loop_done", False)
+        ):
+            if not record.get("has_finish", True):
                 return empty
             if not _is_int(process_exit):
                 return empty

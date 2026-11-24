@@ -89,6 +89,7 @@ def test_parse_jsonl_complete_record(tmp_path):
         "finished": True,
         "finished_at": 123.5,
         "has_finish": True,
+        "loop_done": False,
         "hook_error": False,
         "exitstatus": None,
         "process_exit": None,
@@ -2945,6 +2946,144 @@ def test_review9_session_hook_exception_with_failed_test_and_multishard_growth_i
     assert result["unexpected"] == []
     assert result["missed"] == []
     assert coverage.report([result])[0] == "success"
+
+
+def test_review10_outer_pre_yield_raise_unconfigure_with_failed_test_and_tier2_growth(
+    tmp_path,
+):
+    # Finding 1: Outer tryfirst pytest_sessionfinish raises BEFORE yield so our
+    # finish event is never written, while loop_done WAS written. Next retry
+    # MUST NOT treat this as a mid-test crash or skip the passed test.
+    pre_dir = tmp_path / "pre-yield"
+    _make_project(
+        pre_dir,
+        {
+            "pkg/conftest.py": (
+                "import os, pytest\n"
+                "class _Outer:\n"
+                "    @pytest.hookimpl(hookwrapper=True, tryfirst=True)\n"
+                "    def pytest_sessionfinish(self, session, exitstatus):\n"
+                "        if os.environ.get('BUILDKITE_RETRY_COUNT') == '0':\n"
+                "            raise RuntimeError('pre-yield boom')\n"
+                "        yield\n"
+                "def pytest_collection_finish(session):\n"
+                "    session.config.pluginmanager.register(_Outer(), 'outer_pre_yield')\n"
+            ),
+            "pkg/test_ok.py": "def test_a(): pass\n",
+        },
+    )
+    plan_ok = _simple_plan({"tests/pkg/test_ok.py": 0}, shards=1, single_job=True)
+    art1 = pre_dir / "artifacts"
+    cov1 = art1 / ".runtime-shard-coverage"
+    r0, rec0 = _run_plugin_pytest(
+        pre_dir, plan_ok, ["-v", "pkg"], shard=0, job_id="j0", coverage_dir=cov1, retry=0
+    )
+    assert r0.returncode != 0
+    assert rec0["loop_done"] is True
+    assert rec0["has_finish"] is False
+    p1 = pr.build_retry_plan([rec0], "k", 0, 0, build_id="b1", current_retry=1)
+    assert p1["active"] is False
+    assert p1["passed"] == set()
+    r1, rec1 = _run_plugin_pytest(
+        pre_dir,
+        plan_ok,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="j1",
+        coverage_dir=cov1,
+        retry=1,
+        retry_in=art1,
+    )
+    assert r1.returncode == 0
+    assert rec1["mode"] == "full"
+    assert rec1["ran"] == ["tests/pkg/test_ok.py::test_a"]
+
+    # Finding 2: A passes, B fails, AND pytest_unconfigure raises (exiting 1).
+    # hook_error event MUST invalidate the chain so A reruns on Attempt 1.
+    unconf_dir = tmp_path / "unconf-with-fail"
+    _make_project(
+        unconf_dir,
+        {
+            "pkg/conftest.py": (
+                "import os\n"
+                "def pytest_unconfigure(config):\n"
+                "    if os.environ.get('BUILDKITE_RETRY_COUNT') == '0':\n"
+                "        raise RuntimeError('unconfigure boom after fail')\n"
+            ),
+            "pkg/test_mix.py": (
+                "import os\n"
+                "def test_a(): pass\n"
+                "def test_b():\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') != '0'\n"
+            ),
+        },
+    )
+    plan_mix = _simple_plan({"tests/pkg/test_mix.py": 0}, shards=1, single_job=True)
+    art2 = unconf_dir / "artifacts"
+    cov2 = art2 / ".runtime-shard-coverage"
+    u0, urec0 = _run_plugin_pytest(
+        unconf_dir, plan_mix, ["-v", "pkg"], shard=0, job_id="u0", coverage_dir=cov2, retry=0
+    )
+    assert u0.returncode != 0
+    assert urec0["hook_error"] is True
+    assert urec0["failed"] == ["tests/pkg/test_mix.py::test_b"]
+    u1, urec1 = _run_plugin_pytest(
+        unconf_dir,
+        plan_mix,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="u1",
+        coverage_dir=cov2,
+        retry=1,
+        retry_in=art2,
+    )
+    assert u1.returncode == 0
+    assert urec1["mode"] == "full"
+    assert urec1["ran"] == ["tests/pkg/test_mix.py::test_a", "tests/pkg/test_mix.py::test_b"]
+
+    # Finding 3: Tier 2 skips fully-passed file test_a.py, while test_b.py
+    # gains a new parametrized test on Attempt 1. Retry MUST NOT falsely fail
+    # reporting test_a as missing, MUST run all tests in test_b.py, and MUST
+    # pass cleanly!
+    t2_dir = tmp_path / "tier2-growth"
+    _make_project(
+        t2_dir,
+        {
+            "pkg/test_a.py": "def test_a(): pass\n",
+            "pkg/test_b.py": (
+                "import os, pytest\n"
+                "cases = ['1'] if os.environ.get('BUILDKITE_RETRY_COUNT') == '0' else ['1', '2']\n"
+                "@pytest.mark.parametrize('x', cases)\n"
+                "def test_b(x):\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') != '0'\n"
+            ),
+        },
+    )
+    plan_t2 = _simple_plan(
+        {"tests/pkg/test_a.py": 0, "tests/pkg/test_b.py": 0}, shards=1, single_job=True
+    )
+    art3 = t2_dir / "artifacts"
+    cov3 = art3 / ".runtime-shard-coverage"
+    g0, grec0 = _run_plugin_pytest(
+        t2_dir, plan_t2, ["-v", "pkg"], shard=0, job_id="g0", coverage_dir=cov3, retry=0
+    )
+    assert g0.returncode != 0
+    assert grec0["passed"] == ["tests/pkg/test_a.py::test_a"]
+    g1, grec1 = _run_plugin_pytest(
+        t2_dir,
+        plan_t2,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="g1",
+        coverage_dir=cov3,
+        retry=1,
+        retry_in=art3,
+    )
+    assert g1.returncode == 0, g1.stdout + g1.stderr
+    assert grec1["ran"] == [
+        "tests/pkg/test_b.py::test_b[1]",
+        "tests/pkg/test_b.py::test_b[2]",
+    ]
 
 
 def test_review7_extra_occurrence_of_previously_passed_test_invalidates_skip_before_deselect(
