@@ -183,6 +183,19 @@ def has_vendors(raw: Any) -> bool:
     return isinstance(raw, dict) and VENDORS_FIELD in raw
 
 
+def check_written_step(raw: Any) -> None:
+    """Reject a hand-written `mirror.amd` marked `_exact`: only a compiled
+    `vendors:` step may cut its AMD job loose from the step."""
+    mirror = raw.get("mirror") if isinstance(raw, dict) else None
+    amd = mirror.get(MIRROR_HARDWARE) if isinstance(mirror, dict) else None
+    if isinstance(amd, dict) and EXACT_MIRROR in amd:
+        raise VendorStepError(
+            f"step {raw.get('key') or raw.get('label')!r}: `{EXACT_MIRROR}` is set "
+            f"when a `{VENDORS_FIELD}:` step is compiled; write the step with "
+            f"`{VENDORS_FIELD}:` instead"
+        )
+
+
 def expand_vendor_steps(raw_steps: List[Any]) -> List[Any]:
     """The yaml's steps with every `vendors:` step compiled into the step
     dicts it stands for. Other steps are returned as they are; nothing is
@@ -192,6 +205,7 @@ def expand_vendor_steps(raw_steps: List[Any]) -> List[Any]:
         if has_vendors(raw):
             expanded.extend(compile_vendor_step(raw))
         else:
+            check_written_step(raw)
             expanded.append(raw)
     return expanded
 

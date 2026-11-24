@@ -11,6 +11,7 @@ from step_vendors import (
     EXACT_MIRROR,
     MIRROR_HARDWARE,
     VendorStepError,
+    check_written_step,
     compile_vendor_step,
     has_vendors,
 )
@@ -95,6 +96,7 @@ def parse_steps_from_yaml(yaml_data: dict):
                 step._from_vendors = True
                 steps.append(step)
         else:
+            check_written_step(raw)
             steps.append(Step.from_yaml(raw))
     if group:
         for step in steps:

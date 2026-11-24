@@ -141,8 +141,8 @@ it runs on, instead of a `device` plus a `mirror.amd` copy:
   also takes `num_gpus`, `autorun_on_main`, `if` and
   `allow_dependency_failure`, which only the vendor-neutral tools read),
   `retry` or `mount_buildkite_agent` under `amd` (AMD jobs ignore them), a
-  second device without a `key`, and a key a `vendors:` job shares with any
-  other job.
+  second device without a `key`, a key a `vendors:` job shares with any
+  other job, and `_exact` written by hand in a `mirror.amd` block.
 
 The yaml is compiled when it is loaded (`step_vendors.py`): the first non-AMD
 job becomes the step, the first AMD job its `mirror.amd`, marked `_exact` so

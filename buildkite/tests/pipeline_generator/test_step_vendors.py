@@ -376,6 +376,27 @@ def test_an_invalid_vendor_step_fails_loading(tmp_path, monkeypatch):
         _load(tmp_path, monkeypatch, SPEC.replace("mi300_dpx", "h200"))
 
 
+HAND_WRITTEN_EXACT = """
+- key: attention
+  label: Attention
+  device: h100
+  commands:
+    - pytest -v -s v1/attention
+  mirror:
+    amd:
+      device: mi300_dpx
+      _exact: true
+"""
+
+
+def test_a_hand_written_exact_mirror_fails_loading(tmp_path, monkeypatch):
+    # Only a compiled `vendors:` step may cut the AMD job loose from its step.
+    with pytest.raises(VendorStepError, match="write the step with `vendors:`"):
+        _load(tmp_path, monkeypatch, HAND_WRITTEN_EXACT)
+    with pytest.raises(VendorStepError):
+        expand_vendor_steps(yaml.safe_load(HAND_WRITTEN_EXACT))
+
+
 # ---- rendering: the same jobs as the mirror form ----------------------------
 
 LEGACY = """\
