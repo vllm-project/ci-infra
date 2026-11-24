@@ -2558,6 +2558,188 @@ def test_review4_session_level_failure_with_passing_tests_forces_full_rerun(tmp_
     assert pr.build_retry_plan(skipped_mid, "k", 0, 0, build_id="b1", current_retry=2)["skip_command"] is True
 
 
+# --- Peer review round 5 regression tests ---
+
+
+def test_review5_sessionfinish_exception_is_recorded_as_failure_and_blocks_skip(tmp_path):
+    # Finding 1: Another plugin's pytest_sessionfinish hook raises an exception
+    # after every test passes (leaving session.exitstatus == 0). The hookwrapper
+    # MUST inspect outcome.excinfo, record INTERNAL_ERROR / finished=False, and
+    # prevent Tier 1 from skipping the command on retry.
+    _make_project(
+        tmp_path,
+        {
+            "pkg/conftest.py": (
+                "import os\n"
+                "def pytest_sessionfinish(session, exitstatus):\n"
+                "    if os.environ.get('RAISE_FINALIZER') == '1':\n"
+                "        raise RuntimeError('finalizer boom')\n"
+            ),
+            "pkg/test_ok.py": "def test_passes(): pass\n",
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_ok.py": 0}, shards=1, single_job=True)
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-0",
+        coverage_dir=cov_dir,
+        retry=0,
+        extra_env={"RAISE_FINALIZER": "1"},
+    )
+    assert run0.returncode != 0
+    assert rec0 is not None
+    assert rec0["finished"] is False
+    assert rec0["exitstatus"] == int(pytest.ExitCode.INTERNAL_ERROR)
+
+    env1 = {"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-1", "BUILDKITE_RETRY_COUNT": "1"}
+    assert pr.maybe_skip_command("k", 0, 0, str(artifacts_root), str(cov_dir), env=env1) is False
+
+
+def test_review5_shrinking_collection_losing_unpassed_test_fails_retry_instead_of_false_green(
+    tmp_path,
+):
+    # Finding 2: Attempt 0 collects [a, b], a passes and b fails. Attempt 1
+    # shrinks collection to only [a]. After deselecting a, pytest must NOT
+    # convert NO_TESTS_COLLECTED to OK — and even when another unpassed test c
+    # remains and passes, losing b must still fail the retry!
+    _make_project(
+        tmp_path,
+        {
+            "pkg/test_shrink.py": (
+                "import os, pytest\n"
+                "cases = os.environ.get('CASES', 'a,b').split(',')\n"
+                "@pytest.mark.parametrize('x', cases)\n"
+                "def test_case(x):\n"
+                "    if os.environ.get('BUILDKITE_RETRY_COUNT') == '0' and x != 'a':\n"
+                "        assert False\n"
+            )
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_shrink.py": 0}, shards=1, single_job=True)
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    # Case 1: Attempt 0 runs [a, b] (a passes, b fails); Attempt 1 collects only [a].
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-0",
+        coverage_dir=cov_dir,
+        retry=0,
+        extra_env={"CASES": "a,b"},
+    )
+    assert run0.returncode != 0
+    assert rec0["passed"] == ["tests/pkg/test_shrink.py::test_case[a]"]
+
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-1",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+        extra_env={"CASES": "a"},
+    )
+    assert run1.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
+    assert "disappeared from collection" in run1.stderr
+    assert "test_case[b]" in run1.stderr
+
+    # Case 2: Attempt 0 runs [a, b, c] (a passes, b & c fail); Attempt 1 collects [a, c] (c passes, b vanished!).
+    artifacts2 = tmp_path / "artifacts2"
+    cov_dir2 = artifacts2 / ".runtime-shard-coverage"
+    run2_0, _ = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job2-0",
+        coverage_dir=cov_dir2,
+        retry=0,
+        extra_env={"CASES": "a,b,c"},
+    )
+    assert run2_0.returncode != 0
+    run2_1, rec2_1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job2-1",
+        coverage_dir=cov_dir2,
+        retry=1,
+        retry_in=artifacts2,
+        extra_env={"CASES": "a,c"},
+    )
+    assert run2_1.returncode == pytest.ExitCode.TESTS_FAILED
+    assert rec2_1["exitstatus"] == int(pytest.ExitCode.TESTS_FAILED)
+    assert "test_case[b]" in run2_1.stderr
+
+    # Case 3: Two missing unpassed tests join with ", ", and shrinking a
+    # duplicate unpassed test from 2 occurrences down to 1 also fails.
+    run3_1, _ = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job2-2",
+        coverage_dir=cov_dir2,
+        retry=1,
+        retry_in=artifacts2,
+        extra_env={"CASES": "a"},
+    )
+    assert run3_1.returncode == pytest.ExitCode.NO_TESTS_COLLECTED
+    assert (
+        "tests/pkg/test_shrink.py::test_case[b], tests/pkg/test_shrink.py::test_case[c]"
+        in run3_1.stderr
+    )
+
+    dup_dir = tmp_path / "dup-shrink"
+    _make_project(
+        dup_dir,
+        {
+            "pkg/test_d.py": (
+                "import os\n"
+                "def test_d():\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') != '0'\n"
+            )
+        },
+    )
+    dup_args = ["-v", "--keep-duplicates", "pkg/test_d.py", "pkg/test_d.py"]
+    dup_plan = _simple_plan({"tests/pkg/test_d.py": 0}, shards=1, single_job=True)
+    dup_plan["commands"][0]["args"] = dup_args
+    dup_art = dup_dir / "artifacts"
+    dup_cov = dup_art / ".runtime-shard-coverage"
+    r0, _ = _run_plugin_pytest(
+        dup_dir, dup_plan, dup_args, shard=0, job_id="d0", coverage_dir=dup_cov, retry=0
+    )
+    assert r0.returncode != 0
+    # Attempt 1 collects only 1 occurrence instead of 2 -> must fail despite test_d passing!
+    dup_plan_one = _simple_plan({"tests/pkg/test_d.py": 0}, shards=1, single_job=True)
+    dup_plan_one["commands"][0]["args"] = ["-v", "pkg/test_d.py"]
+    r1, _ = _run_plugin_pytest(
+        dup_dir,
+        dup_plan_one,
+        ["-v", "pkg/test_d.py"],
+        shard=0,
+        job_id="d1",
+        coverage_dir=dup_cov,
+        retry=1,
+        retry_in=dup_art,
+    )
+    assert r1.returncode == pytest.ExitCode.TESTS_FAILED
+    assert "test_d" in r1.stderr
+
+
+
 
 
 

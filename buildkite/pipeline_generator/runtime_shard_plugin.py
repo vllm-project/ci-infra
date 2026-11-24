@@ -261,6 +261,8 @@ class ShardPlugin:
         self.retry_skipped_files = set()
         self.retry_skipped_tests = 0
         self.retry_has_expected = False
+        self.retry_base_planned = None
+        self.retry_missing_outstanding = []
         if (
             retry_in
             and os.path.isdir(retry_in)
@@ -282,6 +284,7 @@ class ShardPlugin:
                 self.retry_passed = retry_plan["passed"]
                 self.retry_skip_files = retry_plan["skip_files"]
                 self.retry_has_expected = retry_plan["has_expected"]
+                self.retry_base_planned = retry_plan["base_planned"]
         # The least-loaded owner that runs the command says what the command
         # should run: listed by a separate pytest it starts
         # (_expected_inventory), on the job's hardware, at the job's commit.
@@ -372,6 +375,19 @@ class ShardPlugin:
         if not self.collection_failed:
             # An empty assignment is meaningful only when collection completed.
             self.planned = [item.nodeid for item in items]
+            if self.mode == "test-retry" and isinstance(self.retry_base_planned, list):
+                required_counts = {}
+                for nodeid in self.retry_base_planned:
+                    if nodeid not in self.retry_passed:
+                        required_counts[nodeid] = required_counts.get(nodeid, 0) + 1
+                kept_counts = {}
+                for nodeid in self.planned:
+                    kept_counts[nodeid] = kept_counts.get(nodeid, 0) + 1
+                self.retry_missing_outstanding = sorted(
+                    nodeid
+                    for nodeid, count in required_counts.items()
+                    if kept_counts.get(nodeid, 0) < count
+                )
 
     def pytest_collectreport(self, report):
         if report.failed:
@@ -648,15 +664,27 @@ class ShardPlugin:
     def pytest_sessionfinish(self, session, exitstatus):
         # Every test of the command went to other shards or already passed on an
         # earlier attempt: nothing to run here is not a failure. A command that
-        # collects nothing at all (or failed collection) still is.
+        # collects nothing at all, failed collection, or lost an outstanding
+        # unpassed test from the retry chain still fails.
         if (
             exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED
             and self.dropped
             and not self.collection_failed
+            and not self.retry_missing_outstanding
         ):
             session.exitstatus = pytest.ExitCode.OK
-        yield
+        if self.retry_missing_outstanding:
+            print(
+                "pytest-retry: outstanding unpassed test(s) disappeared from collection: "
+                + ", ".join(self.retry_missing_outstanding),
+                file=sys.stderr,
+            )
+            if session.exitstatus == pytest.ExitCode.OK:
+                session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        outcome = yield
         final_status = int(session.exitstatus)
+        if outcome.excinfo is not None and final_status == int(pytest.ExitCode.OK):
+            final_status = int(pytest.ExitCode.INTERNAL_ERROR)
         # -x, --maxfail or a Ctrl-C stopped the run: tests here may not have run.
         stopped = session.shouldstop or session.shouldfail or final_status in (
             int(pytest.ExitCode.INTERRUPTED),
