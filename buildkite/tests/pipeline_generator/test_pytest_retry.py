@@ -84,6 +84,7 @@ def test_parse_jsonl_complete_record(tmp_path):
         "mode": "full",
         "finished": True,
         "finished_at": 123.5,
+        "has_finish": True,
         "exitstatus": None,
         "expected": ["a.py::t1", "a.py::t2"],
         "planned": ["a.py::t1", "a.py::t2"],
@@ -2405,10 +2406,13 @@ def test_review4_later_attempt_introducing_new_tests_or_extra_duplicates_invalid
         retry_in=artifacts_root,
     )
     assert run1.returncode != 0
+    # Attempt 1 immediately detects the new test before deselection and records
+    # itself as a fresh `full` base covering [a, b].
+    assert rec1["mode"] == "full"
     assert rec1["passed"] == ["tests/pkg/test_dyn.py::test_dyn[a]"]
     assert rec1["failed"] == ["tests/pkg/test_dyn.py::test_dyn[b]"]
 
-    # Attempt 2: Tier 1 must NOT skip; plugin invalidates chain and runs full!
+    # Attempt 2: Tier 1 must NOT skip; builds on Attempt 1's fresh full base and reruns only b!
     env2 = {"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-2", "BUILDKITE_RETRY_COUNT": "2"}
     assert pr.maybe_skip_command("k", 0, 0, str(artifacts_root), str(cov_dir), env=env2) is False
     run2, rec2 = _run_plugin_pytest(
@@ -2422,11 +2426,8 @@ def test_review4_later_attempt_introducing_new_tests_or_extra_duplicates_invalid
         retry_in=artifacts_root,
     )
     assert run2.returncode == 0, run2.stdout + run2.stderr
-    assert rec2["mode"] == "full"
-    assert rec2["ran"] == [
-        "tests/pkg/test_dyn.py::test_dyn[a]",
-        "tests/pkg/test_dyn.py::test_dyn[b]",
-    ]
+    assert rec2["mode"] == "test-retry"
+    assert rec2["ran"] == ["tests/pkg/test_dyn.py::test_dyn[b]"]
 
     # Extra duplicate occurrence or failed collection (planned=None) or unexpected ran in retry also invalidates:
     dup_extra = [
@@ -2618,10 +2619,20 @@ def test_review5_sessionfinish_exception_is_recorded_as_failure_and_blocks_skip(
 
 
 def test_review6_outer_tryfirst_sessionfinish_wrapper_failure_is_captured(tmp_path):
-    # Round 6 Finding 2: A conftest pytest_sessionfinish hookwrapper with
-    # tryfirst=True resumes AFTER our wrapper. Both mutating session.exitstatus
-    # and raising after yield MUST be recorded and prevent skipping on retry.
-    for mode in ("exitstatus", "raise"):
+    # Round 6 & 7: Both an outer `tryfirst=True` sessionfinish wrapper AND a
+    # failing `pytest_unconfigure` hook are captured by `guard()`'s `record-exit`
+    # wrapper after pytest exits, preventing Tier 1/2/3 skipping on retry —
+    # while a mid-run `os._exit(137)` (no finish trailer) still preserves
+    # flushed pre-crash passes!
+    import runtime_shard as rs
+
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    for mod in ("runtime_shard_plugin.py", "pytest_retry.py"):
+        src = Path(pr.__file__).parent / mod
+        (plugin_dir / mod).write_text(src.read_text())
+
+    for mode in ("exitstatus", "raise", "unconfigure"):
         case_dir = tmp_path / mode
         _make_project(
             case_dir,
@@ -2636,6 +2647,9 @@ def test_review6_outer_tryfirst_sessionfinish_wrapper_failure_is_captured(tmp_pa
                     "        session.exitstatus = 1\n"
                     "    elif fail == 'raise':\n"
                     "        raise RuntimeError('outer wrapper boom')\n"
+                    "def pytest_unconfigure(config):\n"
+                    "    if os.environ.get('WRAPPER_FAIL') == 'unconfigure':\n"
+                    "        raise RuntimeError('unconfigure boom')\n"
                 ),
                 "pkg/test_ok.py": "def test_passes(): pass\n",
             },
@@ -2643,23 +2657,121 @@ def test_review6_outer_tryfirst_sessionfinish_wrapper_failure_is_captured(tmp_pa
         plan = _simple_plan({"tests/pkg/test_ok.py": 0}, shards=1, single_job=True)
         artifacts_root = case_dir / "artifacts"
         cov_dir = artifacts_root / ".runtime-shard-coverage"
+        cmd = f"{pr.sys.executable} -m pytest -v pkg"
+        old_dir = rs.PLUGIN_DIR
+        try:
+            rs.PLUGIN_DIR = str(plugin_dir)
+            script = rs.guard(cmd, plan["commands"][0], 1, step_key="k", enable_retry=True).replace("$$", "$")
+        finally:
+            rs.PLUGIN_DIR = old_dir
 
-        run0, rec0 = _run_plugin_pytest(
-            case_dir,
-            plan,
-            ["-v", "pkg"],
-            shard=0,
-            job_id="job-0",
-            coverage_dir=cov_dir,
-            retry=0,
-            extra_env={"WRAPPER_FAIL": mode},
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+        env.update(
+            PYTEST_ADDOPTS="-p runtime_shard_plugin",
+            PYTHONPATH=str(plugin_dir),
+            RUNTIME_SHARD_PLAN=rs.pack(plan),
+            RUNTIME_SHARD_COVERAGE_DIR=str(cov_dir),
+            BUILDKITE_PARALLEL_JOB="0",
+            BUILDKITE_JOB_ID="job-0",
+            BUILDKITE_BUILD_ID="b1",
+            BUILDKITE_RETRY_COUNT="0",
+            WRAPPER_FAIL=mode,
+        )
+        run0 = subprocess.run(
+            ["sh", "-ec", script],
+            cwd=case_dir / "tests",
+            env=env,
+            capture_output=True,
+            text=True,
         )
         assert run0.returncode != 0
+        rec0 = pr.parse_record_file(str(cov_dir / "job-0" / "0.jsonl"))
+        assert rec0["has_finish"] is True
         assert rec0["exitstatus"] != 0
         plan1 = pr.build_retry_plan([rec0], "k", 0, 0, build_id="b1", current_retry=1)
         assert plan1["active"] is False
         assert plan1["skip_command"] is False
         assert plan1["passed"] == set()
+
+    # Verify record-exit after a mid-run os._exit(137) (has_finish=False) STILL
+    # preserves flushed pre-crash passes!
+    crash_dir = tmp_path / "crash"
+    _make_project(
+        crash_dir,
+        {
+            "pkg/test_c.py": (
+                "import os\n"
+                "def test_1(): pass\n"
+                "def test_2(): os._exit(137)\n"
+            )
+        },
+    )
+    crash_plan = _simple_plan({"tests/pkg/test_c.py": 0}, shards=1, single_job=True)
+    crash_cov = crash_dir / "artifacts" / ".runtime-shard-coverage"
+    run_c, _ = _run_plugin_pytest(
+        crash_dir, crash_plan, ["-v", "pkg"], shard=0, job_id="jc", coverage_dir=crash_cov, retry=0
+    )
+    assert run_c.returncode == 137
+    pr.record_command_exit(str(crash_cov), 0, 137, env={"BUILDKITE_JOB_ID": "jc"})
+    rec_c = pr.parse_record_file(str(crash_cov / "jc" / "0.jsonl"))
+    assert rec_c["has_finish"] is False
+    assert rec_c["exitstatus"] == 137
+    plan_c = pr.build_retry_plan([rec_c], "k", 0, 0, build_id="b1", current_retry=1)
+    assert plan_c["active"] is True
+    assert plan_c["passed"] == {"tests/pkg/test_c.py::test_1"}
+
+
+def test_review7_extra_occurrence_of_previously_passed_test_invalidates_skip_before_deselect(
+    tmp_path,
+):
+    # Round 7 Finding 2: Attempt 0 collects [A, B] (A passes, B fails).
+    # Attempt 1 collects [A, A, B] where both copies of A fail!
+    # The plugin MUST detect count(A) == 2 > base_count(A) == 1 BEFORE
+    # deselecting A and execute both copies of A instead of silently skipping.
+    _make_project(
+        tmp_path,
+        {
+            "pkg/conftest.py": (
+                "import os, pytest\n"
+                "def pytest_collection_modifyitems(session, config, items):\n"
+                "    if os.environ.get('DUP_A') == '1':\n"
+                "        a = [i for i in items if i.name == 'test_a'][0]\n"
+                "        items.insert(0, a)\n"
+            ),
+            "pkg/test_dup_pass.py": (
+                "import os\n"
+                "def test_a():\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') == '0'\n"
+                "def test_b():\n"
+                "    assert os.environ.get('BUILDKITE_RETRY_COUNT') != '0'\n"
+            ),
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_dup_pass.py": 0}, shards=1, single_job=True)
+    artifacts_root = tmp_path / "artifacts"
+    cov_dir = artifacts_root / ".runtime-shard-coverage"
+
+    run0, rec0 = _run_plugin_pytest(
+        tmp_path, plan, ["-v", "pkg"], shard=0, job_id="job-0", coverage_dir=cov_dir, retry=0
+    )
+    assert run0.returncode != 0
+    assert rec0["passed"] == ["tests/pkg/test_dup_pass.py::test_a"]
+
+    run1, rec1 = _run_plugin_pytest(
+        tmp_path,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-1",
+        coverage_dir=cov_dir,
+        retry=1,
+        retry_in=artifacts_root,
+        extra_env={"DUP_A": "1"},
+    )
+    assert run1.returncode != 0
+    assert rec1["mode"] == "full"
+    assert "tests/pkg/test_dup_pass.py::test_a" in rec1["failed"]
+    assert rec1["passed"] == ["tests/pkg/test_dup_pass.py::test_b"]
 
 
 def test_review5_shrinking_collection_losing_unpassed_test_fails_retry_instead_of_false_green(

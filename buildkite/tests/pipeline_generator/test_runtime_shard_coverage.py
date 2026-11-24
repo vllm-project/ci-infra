@@ -1194,6 +1194,7 @@ def _normalized(record):
         **record,
         "build_id": record.get("build_id"),
         "mode": record.get("mode", "full"),
+        "has_finish": bool(record.get("has_finish", record["finished"])),
         "exitstatus": record.get("exitstatus"),
         "passed": list(record.get("passed", [])),
         "passed_counts": {nodeid: 1 for nodeid in record.get("passed", [])},

@@ -1015,7 +1015,11 @@ def guard(
     # outer braces keep it one command in AMD's `&&`-joined list.
     command = (
         f"{{ export {COMMAND_ENV}={position} {APPLIED_ENV}={applied};"
-        f" rm -f {applied} || exit $$?; {{\n{command}\n}} || exit $$?;"
+        f" rm -f {applied} || exit $$?; _rs_rc=0; {{\n{command}\n}} || _rs_rc=$$?;"
+        f' if [ -n "$${{{COVERAGE_DIR_ENV}:-}}" ]; then'
+        f" python3 {PLUGIN_DIR}/{RETRY_HELPER_MODULE}.py"
+        f' record-exit {position} "$$_rs_rc" || true; fi;'
+        f' if [ "$$_rs_rc" -ne 0 ]; then exit "$$_rs_rc"; fi;'
         f' [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
         " applying the shard plan (the plugin didn't load, or didn't match the"
         ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
