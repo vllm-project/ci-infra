@@ -446,11 +446,32 @@ def test_variant_keys_and_labels_can_be_pinned():
     raw["devices"]["mi300_1"]["variants"] = {"aiter": {"env": {"AITER": "1"}}}
     jobs = _jobs(raw)
     eager = jobs["attention-eager-legacy"]
-    assert eager.label == ":nvidia: (H100) Attention (eager)"
+    # The label replaces the title only; the variant's name stays.
+    assert eager.label == ":nvidia: (H100) Attention (eager) [eager]"
     # A pinned device's variants derive from its pinned key.
     assert jobs["amd-attention-pinned-aiter"].label == (
         ":amd: (MI300) V1 Attention [aiter]"
     )
+
+
+def test_a_variant_label_replaces_only_the_title():
+    # Spec section 5: `<icon> (<TAG>) [Nightly ]<title>[ [<variant>]]`, and
+    # `label:` replaces <title> alone, on a device or on a variant.
+    raw = _spec()
+    raw["devices"]["h100"]["label"] = "Attention (CUDA)"
+    raw["devices"]["h100"]["variants"]["eager"]["optional"] = True
+    raw["devices"]["h100"]["variants"]["extended"]["label"] = "Attention Slow"
+    jobs = _jobs(raw)
+    assert jobs["v1-attention"].label == ":nvidia: (H100) Attention (CUDA)"
+    # A variant without a label takes its device's title.
+    assert jobs["v1-attention-eager"].label == (
+        ":nvidia: (H100) [Nightly] Attention (CUDA) [eager]"
+    )
+    assert jobs["v1-attention-extended"].label == (
+        ":nvidia: (H100) Attention Slow [extended]"
+    )
+    raw["devices"]["h100"]["variants"]["extended"]["label"] = "[Nightly] Slow"
+    _raises("E2", "write the bare title", raw)
 
 
 # ---- keys --------------------------------------------------------------------------

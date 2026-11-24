@@ -158,8 +158,11 @@ This is four jobs: `v1-attention` (`:nvidia: (H100) V1 Attention`),
 
 **Labels** are `<icon> (<TAG>) [Nightly ]<title>`, the icon and tag from the
 device (`:nvidia: (H200 MIG 35GB)`, `:amd: (MI355 DPX)`, `:computer: (CPU)`),
-`[Nightly]` when the job is `optional: true`. A variant's title is its
-device's plus ` [<name>]`, unless it sets `label:`.
+`[Nightly]` when the job is `optional: true`, and ` [<name>]` after the
+title of a variant. A `label:` on a device or variant replaces the title
+only: a variant's title is its device's, or its own `label:`, and its
+` [<name>]` stays either way, so its label (and the GitHub status named
+after it) never reads like its device job's.
 
 **Keys**, with K the step's `key`, in map order: the first non-AMD device is
 K and any other `K-<key_tag>`; the first AMD device is `amd-K` and any other

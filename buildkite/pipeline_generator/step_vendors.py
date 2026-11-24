@@ -426,11 +426,13 @@ def resolve_step(raw: Any, group_depends_on: Optional[List[str]] = None) -> List
             variant_where = f"{device_where}, variant {name}"
             _check_machine(info, device, body, variant_where)
             variant_fields = _variant_fields(device_job.fields, body, variant_where)
+            # `label:` replaces the title only; the ` [<name>]` that tells
+            # the variant from its device job stays.
             variant_title = (
                 _title(body["label"], variant_where)
                 if "label" in body
-                else f"{device_title} [{name}]"
-            )
+                else device_title
+            ) + f" [{name}]"
             jobs.append(
                 Job(
                     key=body.get("key") or f"{device_job.key}-{name}",
@@ -459,7 +461,8 @@ def resolve_step(raw: Any, group_depends_on: Optional[List[str]] = None) -> List
 
 
 def job_label(info: DeviceInfo, title: str, fields: Mapping[str, Any]) -> str:
-    """`<icon> (<TAG>) [Nightly ]<title>`."""
+    """`<icon> (<TAG>) [Nightly ]<title>`; a variant's title ends in
+    ` [<name>]`."""
     nightly = "[Nightly] " if fields.get("optional") else ""
     return f"{VENDOR_ICONS[info.vendor]} ({info.tag}) {nightly}{title}"
 
