@@ -62,7 +62,7 @@ def _job_fields(
     return fields
 
 
-def _option_label(label: str) -> str:
+def plain_label(label: str) -> str:
     """The step label as plain text: the input dialog shows emoji codes like
     `:nvidia:` and parallel job placeholders like `%N` as they are."""
     label = re.sub(r":[a-z0-9_+-]+:", "", label)
@@ -104,7 +104,7 @@ def more_jobs_group(
                 "required": False,
                 "options": [
                     {
-                        "label": _option_label(entry["step"]["label"]),
+                        "label": plain_label(entry["step"]["label"]),
                         "value": entry["step"]["key"],
                     }
                 ],

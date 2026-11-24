@@ -287,7 +287,7 @@ def test_amd_steps_are_listed_under_their_nvidia_group(tmp_path, monkeypatch):
 
 
 def test_option_labels_drop_emoji_codes_and_job_placeholders():
-    label = unblock_jobs._option_label
+    label = unblock_jobs.plain_label
     assert label(":nvidia: (H200) Basic Correctness Models %N") == (
         "(H200) Basic Correctness Models"
     )
