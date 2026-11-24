@@ -548,6 +548,20 @@ def test_duplicate_keys_across_files_are_e8(tmp_path):
     assert "amd-v1-spec-decode" in findings[0].message
 
 
+def test_duplicate_github_statuses_across_files_are_e8(tmp_path):
+    _write(tmp_path, "a.yaml", CLEAN)
+    _write(
+        tmp_path,
+        "b.yaml",
+        '- label: ":nvidia: (H200 MIG 35GB) V1 Spec Decode"\n  key: other\n'
+        "  device: h200_35gb\n",
+    )
+    findings = lint_paths([str(tmp_path)])
+    assert [f.code for f in findings] == ["E8"]
+    assert "'ci/step: (H200 MIG 35GB) V1 Spec Decode'" in findings[0].message
+    assert "a.yaml" in findings[0].message and "b.yaml" in findings[0].message
+
+
 def test_lint_command_exits_1_until_fixed(tmp_path):
     path = _write(tmp_path, "a.yaml", HOIST)
     runner = CliRunner()

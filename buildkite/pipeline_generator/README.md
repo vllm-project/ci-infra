@@ -169,7 +169,9 @@ K and any other `K-<key_tag>`; the first AMD device is `amd-K` and any other
 `amd-K-<key_tag>`; a variant is `<its device job's key>-<name>`. A `key:` is
 used verbatim, and a pinned device's variants derive from it. Two devices of
 one key tag (`mi355_1` and `mi355_4`) need a pin on one of them, and every
-key must be unique across the pipeline.
+key must be unique across the pipeline. So must every label, less its emoji
+and `Shard %N/%t`: it names the job's GitHub status (`ci/step: <label>`).
+Two devices of one tag also share a label, so one of them sets `label:`.
 
 **Errors** (when the yaml is loaded):
 
@@ -182,7 +184,7 @@ key must be unique across the pipeline.
 | E5 | a bad `same_as`: another vendor, a later device, a chain, a variant |
 | E6 | an empty variant, or a no-op override (`same_as` or variant) |
 | E7 | `num_devices` on an AMD (or CPU) device |
-| E8 | a duplicate key, or two devices of one key tag without a pin |
+| E8 | a duplicate key (a keyless step counts under the key derived from its label), a duplicate GitHub status name (`ci/step: <label>` without emoji or `Shard %N/%t`, so two jobs would overwrite each other's status), or two devices of one key tag without a pin |
 | E9 | a flow-style list or map (`[a, b]`, `{a: b}`) in a `devices:` step |
 
 **How it compiles.** The rest of the generator, and ci_selector, read the

@@ -1,8 +1,9 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from pydantic import PrivateAttr, ValidationError, model_validator
 from typing_extensions import Self
 from collections import defaultdict
+from amd import get_amd_label, is_amd_gpu_device
 from global_config import get_global_config
 import os
 import yaml
@@ -213,25 +214,70 @@ def steps_from_document(
     return file_steps
 
 
-def check_device_step_keys(steps: List[Step]) -> None:
-    """E8: fail on a key that a `devices:` step's job shares with any other
-    job, in any file: Buildkite rejects the upload. Keys only legacy steps
-    share are left alone, as before."""
-    owners: Dict[str, List[Step]] = defaultdict(list)
-    for step in steps:
-        if step.key:
-            owners[step.key].append(step)
-        if step.key and (step.mirror or {}).get(MIRROR_HARDWARE):
-            owners[f"amd-{step.key}"].append(step)
-    for key, keyed in owners.items():
-        if len(keyed) > 1 and any(step._from_devices for step in keyed):
-            files = sorted({step.source_file or "?" for step in keyed})
-            raise DeviceStepError(
-                "E8",
-                ", ".join(files),
-                f"duplicate CI step key {key} (a `devices:` step's job); pin "
-                "a different `key:` on it",
+def uploaded_jobs(step: Step) -> List[Tuple[str, str]]:
+    """(key, label) of every job the generator may upload for a step: the
+    step itself and its AMD mirror, labelled as buildkite_step.py labels them.
+    A step without a `key` is uploaded under one derived from its label."""
+    # Not at the top: buildkite_step imports this module.
+    from buildkite_step import _generate_step_key
+
+    key = step.key or _generate_step_key(step.label)
+    label = (
+        get_amd_label(step.label, step.device)
+        if is_amd_gpu_device(step.device)
+        else step.label
+    )
+    jobs = [(key, label)]
+    amd = (step.mirror or {}).get(MIRROR_HARDWARE)
+    if amd:
+        jobs.append(
+            (
+                f"amd-{key}",
+                amd.get("label") or get_amd_label(step.label, amd.get("device")),
             )
+        )
+    return jobs
+
+
+def duplicate_jobs(steps: List[Step]) -> List[Tuple[str, str, List[str]]]:
+    """E8: ("key" or "status", the value, its files) for every key and every
+    GitHub status name (`ci/step: <plain label>`, unblock_jobs.plain_label)
+    that a `devices:` step's job shares with another job, in any file.
+    Buildkite rejects a repeated key; a repeated status name lets one job's
+    result overwrite the other's on the PR. What only legacy steps share is
+    left alone, as before."""
+    from unblock_jobs import plain_label
+
+    owners: Dict[Tuple[str, str], List[Step]] = defaultdict(list)
+    for step in steps:
+        for key, label in uploaded_jobs(step):
+            owners[("key", key)].append(step)
+            owners[("status", plain_label(label))].append(step)
+    return [
+        (kind, value, sorted({step.source_file or "?" for step in owned}))
+        for (kind, value), owned in owners.items()
+        if len(owned) > 1 and any(step._from_devices for step in owned)
+    ]
+
+
+def duplicate_message(kind: str, value: str) -> str:
+    if kind == "key":
+        return (
+            f"duplicate CI step key {value} (a `devices:` step's job); pin a "
+            "different `key:` on it"
+        )
+    return (
+        f"two jobs post the GitHub status 'ci/step: {value}' (a `devices:` "
+        "step's job), so one would overwrite the other's; give one a "
+        "different `label:`"
+    )
+
+
+def check_device_step_keys(steps: List[Step]) -> None:
+    """E8: fail on a key or a GitHub status name that a `devices:` step's job
+    shares with any other job (duplicate_jobs)."""
+    for kind, value, files in duplicate_jobs(steps):
+        raise DeviceStepError("E8", ", ".join(files), duplicate_message(kind, value))
 
 
 def exact_mirror(step: Step) -> Optional[Dict[str, Any]]:

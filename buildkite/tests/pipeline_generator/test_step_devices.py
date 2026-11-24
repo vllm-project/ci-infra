@@ -921,6 +921,66 @@ def test_a_devices_job_key_may_not_repeat_another_jobs(tmp_path, monkeypatch):
     check_device_step_keys(_load(tmp_path / "ok", monkeypatch, SPEC))
 
 
+def test_a_devices_job_may_not_repeat_another_jobs_github_status(tmp_path, monkeypatch):
+    # Every job posts `ci/step: <plain label>` (emoji and shards stripped).
+    legacy = """\
+- label: ":nvidia: (H100) V1 Attention [eager] Shard %N/%t"
+  key: legacy-eager
+  device: h100
+"""
+    steps = _load(tmp_path, monkeypatch, SPEC + legacy)
+    with pytest.raises(
+        DeviceStepError,
+        match=r"E8 .*GitHub status 'ci/step: \(H100\) V1 Attention \[eager\]'",
+    ):
+        check_device_step_keys(steps)
+    # A legacy mirror's label is get_amd_label's, unless it writes one.
+    mirror = """\
+- label: V1 Attention
+  key: legacy
+  device: h100
+  mirror:
+    amd:
+      device: mi300_dpx
+      label: ":amd: (MI300) V1 Attention"
+"""
+    steps = _load(tmp_path / "mirror", monkeypatch, SPEC + mirror)
+    with pytest.raises(DeviceStepError, match=r"'ci/step: \(MI300\) V1 Attention'"):
+        check_device_step_keys(steps)
+    # Two AMD devices of one tag: the pin keeps keys apart, not labels.
+    same_tag = """\
+- label: T
+  key: t
+  devices:
+    mi355_1:
+      timeout_in_minutes: 10
+    mi355_4:
+      key: amd-t-4
+  commands:
+    - x
+"""
+    steps = _load(tmp_path / "tag", monkeypatch, same_tag)
+    with pytest.raises(DeviceStepError, match=r"'ci/step: \(MI355\) T'"):
+        check_device_step_keys(steps)
+    relabelled = same_tag.replace("key: amd-t-4\n", "key: amd-t-4\n      label: T 4\n")
+    check_device_step_keys(_load(tmp_path / "tag2", monkeypatch, relabelled))
+    # Only legacy steps sharing a status: left alone, as before.
+    check_device_step_keys(_load(tmp_path / "legacy", monkeypatch, legacy + legacy))
+
+
+def test_a_devices_key_may_not_repeat_a_keyless_steps_derived_one(
+    tmp_path, monkeypatch
+):
+    # The generator keys a step without `key:` by its label.
+    keyless = '- label: "V1 Attention Eager"\n  device: l4\n'
+    steps = _load(tmp_path, monkeypatch, SPEC.replace("eager:", "x:") + keyless)
+    check_device_step_keys(steps)
+    keyless = '- label: "V1-Attention-x"\n  device: l4\n'
+    steps = _load(tmp_path / "k", monkeypatch, SPEC.replace("eager:", "x:") + keyless)
+    with pytest.raises(DeviceStepError, match="duplicate CI step key v1-attention-x"):
+        check_device_step_keys(steps)
+
+
 CONCURRENCY_ALONE = """\
 - label: T
   key: t

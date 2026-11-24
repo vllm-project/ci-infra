@@ -39,7 +39,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import yaml
 
-from step import compile_device_jobs
+from step import (
+    compile_device_jobs,
+    duplicate_jobs,
+    duplicate_message,
+    steps_from_document,
+)
 from step_vendors import (
     DEPENDENCIES_FIELD,
     DEVICE_ORDER,
@@ -129,45 +134,25 @@ def lint_text(text: str, path: str = "<yaml>") -> List[Finding]:
 
 
 def lint_keys(texts: Dict[str, str]) -> List[Finding]:
-    """E8 across files: a `devices:` job's key that another job also has."""
-    owners: Dict[str, List[Tuple[str, bool]]] = {}
+    """E8 across files, as loading checks it (step.duplicate_jobs): a
+    `devices:` job's key or GitHub status name that another job also has."""
+    steps = []
     for path, text in texts.items():
         try:
             doc = yaml.safe_load(text)
-            steps = doc.get("steps") if isinstance(doc, dict) else None
-            if not isinstance(steps, list):
-                continue
-            for raw in steps:
-                device_step = is_device_step(raw)
-                compiled = (
-                    compile_device_step(raw, doc.get("depends_on"))
-                    if device_step
-                    else [raw]
-                )
-                for step in compiled:
-                    if not isinstance(step, dict) or not step.get("key"):
-                        continue
-                    owners.setdefault(step["key"], []).append((path, device_step))
-                    if (step.get("mirror") or {}).get(MIRROR_HARDWARE):
-                        owners.setdefault(f"amd-{step['key']}", []).append(
-                            (path, device_step)
-                        )
-        except (yaml.YAMLError, DeviceStepError):
+            if isinstance(doc, dict):
+                steps.extend(steps_from_document(doc, path, "vllm-project/vllm"))
+        except (yaml.YAMLError, ValueError, TypeError, AttributeError):
             continue  # reported per file
-    findings = []
-    for key, where in sorted(owners.items()):
-        if len(where) > 1 and any(device_step for _, device_step in where):
-            files = sorted({path for path, _ in where})
-            findings.append(
-                Finding(
-                    files[0],
-                    1,
-                    "E8",
-                    f"duplicate CI step key {key} (a `devices:` step's job), in "
-                    + ", ".join(files),
-                )
-            )
-    return findings
+    return [
+        Finding(
+            files[0],
+            1,
+            "E8",
+            f"{duplicate_message(kind, value)}, in {', '.join(files)}",
+        )
+        for kind, value, files in sorted(duplicate_jobs(steps))
+    ]
 
 
 def step_findings(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
