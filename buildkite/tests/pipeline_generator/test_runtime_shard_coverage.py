@@ -1196,6 +1196,7 @@ def _normalized(record):
         "mode": record.get("mode", "full"),
         "has_finish": bool(record.get("has_finish", record["finished"])),
         "exitstatus": record.get("exitstatus"),
+        "process_exit": record.get("process_exit"),
         "passed": list(record.get("passed", [])),
         "passed_counts": {nodeid: 1 for nodeid in record.get("passed", [])},
         "failed": list(record.get("failed", [])),

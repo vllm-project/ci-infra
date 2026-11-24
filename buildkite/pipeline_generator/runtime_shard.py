@@ -1013,16 +1013,27 @@ def guard(
     # which ignores a failure inside a `&&` chain and goes on to the next line.
     # The command sits on its own line, so a trailing comment ends there. The
     # outer braces keep it one command in AMD's `&&`-joined list.
+    continue_suffix = " || CI_OVERALL_STATUS=1"
+    continue_on_failure = command.endswith(continue_suffix)
+    inner_command = (
+        command[: -len(continue_suffix)] if continue_on_failure else command
+    )
+    applied_check = (
+        f' [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
+        " applying the shard plan (the plugin didn't load, or didn't match the"
+        ' command); failing rather than run the wrong tests" >&2; exit 1; }'
+    )
+    if continue_on_failure:
+        tail = f' if [ "$$_rs_rc" -ne 0 ]; then CI_OVERALL_STATUS=1; else{applied_check}; fi;'
+    else:
+        tail = f' if [ "$$_rs_rc" -ne 0 ]; then exit "$$_rs_rc"; fi;{applied_check};'
     command = (
         f"{{ export {COMMAND_ENV}={position} {APPLIED_ENV}={applied};"
-        f" rm -f {applied} || exit $$?; _rs_rc=0; {{\n{command}\n}} || _rs_rc=$$?;"
+        f" rm -f {applied} || exit $$?; _rs_rc=0; {{\n{inner_command}\n}} || _rs_rc=$$?;"
         f' if [ -n "$${{{COVERAGE_DIR_ENV}:-}}" ]; then'
         f" python3 {PLUGIN_DIR}/{RETRY_HELPER_MODULE}.py"
         f' record-exit {position} "$$_rs_rc" || true; fi;'
-        f' if [ "$$_rs_rc" -ne 0 ]; then exit "$$_rs_rc"; fi;'
-        f' [ -f {applied} ] || {{ echo "runtime-shard: pytest ran without'
-        " applying the shard plan (the plugin didn't load, or didn't match the"
-        ' command); failing rather than run the wrong tests" >&2; exit 1; }; }'
+        f"{tail} }}"
     )
     if enable_retry and step_key:
         fallback = planned.get("fallback", 0)

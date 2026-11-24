@@ -59,6 +59,10 @@ def _finish(finished: bool = True, at: float = 10.0):
     return {"event": "finish", "finished": finished, "finished_at": at}
 
 
+def _exit(exitstatus: int = 0):
+    return {"event": "exit", "exitstatus": exitstatus}
+
+
 # --- JSONL & legacy JSON parsing ---
 
 
@@ -86,6 +90,7 @@ def test_parse_jsonl_complete_record(tmp_path):
         "finished_at": 123.5,
         "has_finish": True,
         "exitstatus": None,
+        "process_exit": None,
         "expected": ["a.py::t1", "a.py::t2"],
         "planned": ["a.py::t1", "a.py::t2"],
         "ran": ["a.py::t1", "a.py::t2"],
@@ -189,6 +194,9 @@ def _rec(retry, mode="full", finished=True, passed=(), ran=None, planned=None, e
         "mode": mode,
         "finished": finished,
         "finished_at": float(retry + 1),
+        "has_finish": finished,
+        "exitstatus": 0 if finished else None,
+        "process_exit": 0 if finished else None,
         "expected": expected,
         "planned": list(planned) if planned is not None else None,
         "ran": list(passed) if ran is None else list(ran),
@@ -299,6 +307,7 @@ def test_maybe_skip_command_writes_skipped_jsonl_record_with_0777_dirs(tmp_path)
             _start(planned=["a.py::t1"], expected=["a.py::t1"]),
             _test("a.py::t1", True),
             _finish(True),
+            _exit(0),
         ],
     )
     env = {"BUILDKITE_BUILD_ID": "b1", "BUILDKITE_JOB_ID": "job-1", "BUILDKITE_RETRY_COUNT": "1"}
@@ -431,6 +440,7 @@ def _run_plugin_pytest(
     build_id: str = "b1",
     retry_in: Path = None,
     extra_env: dict = None,
+    record_exit: bool = True,
 ):
     import runtime_shard as rs
 
@@ -457,6 +467,10 @@ def _run_plugin_pytest(
         text=True,
         check=False,
     )
+    if record_exit:
+        pr.record_command_exit(
+            str(coverage_dir), 0, run.returncode, env={"BUILDKITE_JOB_ID": job_id}
+        )
     rec_path = coverage_dir / job_id / "0.jsonl"
     rec = pr.parse_record_file(str(rec_path)) if rec_path.exists() else None
     return run, rec
@@ -869,6 +883,7 @@ def test_tier1_shell_guard_skips_passed_command_without_launching_pytest(tmp_pat
             _start(step="my-step", position=0, shard=0, retry=0, planned=["a.py::t1"]),
             _test("a.py::t1", True),
             _finish(True),
+            _exit(0),
         ],
     )
     planned = {"position": 0, "files": {"a.py": 0}, "split": {}}
@@ -1021,6 +1036,7 @@ def test_constants_and_cli_exit_codes(tmp_path, monkeypatch, capsys):
             _start(step="k", position=1, shard=0, retry=0, planned=["a.py::t1"]),
             _test("a.py::t1", True),
             _finish(True),
+            _exit(0),
         ],
     )
     monkeypatch.setenv(pr.RETRY_IN_ENV, str(retry_in))
@@ -1292,7 +1308,7 @@ def test_maybe_skip_command_edge_cases(tmp_path, capsys):
         retry_in,
         "job-0",
         0,
-        [_start(build_id="b1", planned=["a.py::t1"]), _test("a.py::t1", True), _finish(True)],
+        [_start(build_id="b1", planned=["a.py::t1"]), _test("a.py::t1", True), _finish(True), _exit(0)],
     )
     assert pr.maybe_skip_command("k", 0, 0, str(retry_in), str(cov_out), env={"BUILDKITE_RETRY_COUNT": "0", "BUILDKITE_BUILD_ID": "b1"}) is False
     assert pr.maybe_skip_command("k", 0, 0, str(retry_in), str(cov_out), env={"BUILDKITE_RETRY_COUNT": "1", "BUILDKITE_BUILD_ID": "other"}) is False
@@ -2290,6 +2306,7 @@ def test_review3_tier1_does_not_skip_inventory_owner_when_expected_is_missing(tm
             _start(shard=0, retry=0, mode="full", expected=None, planned=["tests/pkg/test_a.py::test_a"]),
             _test("tests/pkg/test_a.py::test_a", True),
             _finish(True),
+            _exit(0),
         ],
     )
     _write_jsonl(
@@ -2300,6 +2317,7 @@ def test_review3_tier1_does_not_skip_inventory_owner_when_expected_is_missing(tm
             _start(shard=1, retry=0, mode="full", expected=None, planned=["tests/pkg/test_b.py::test_b"]),
             _test("tests/pkg/test_b.py::test_b", True),
             _finish(True),
+            _exit(0),
         ],
     )
 
@@ -2687,7 +2705,7 @@ def test_review6_outer_tryfirst_sessionfinish_wrapper_failure_is_captured(tmp_pa
         assert run0.returncode != 0
         rec0 = pr.parse_record_file(str(cov_dir / "job-0" / "0.jsonl"))
         assert rec0["has_finish"] is True
-        assert rec0["exitstatus"] != 0
+        assert rec0["process_exit"] != 0
         plan1 = pr.build_retry_plan([rec0], "k", 0, 0, build_id="b1", current_retry=1)
         assert plan1["active"] is False
         assert plan1["skip_command"] is False
@@ -2712,13 +2730,102 @@ def test_review6_outer_tryfirst_sessionfinish_wrapper_failure_is_captured(tmp_pa
         crash_dir, crash_plan, ["-v", "pkg"], shard=0, job_id="jc", coverage_dir=crash_cov, retry=0
     )
     assert run_c.returncode == 137
-    pr.record_command_exit(str(crash_cov), 0, 137, env={"BUILDKITE_JOB_ID": "jc"})
     rec_c = pr.parse_record_file(str(crash_cov / "jc" / "0.jsonl"))
     assert rec_c["has_finish"] is False
-    assert rec_c["exitstatus"] == 137
+    assert rec_c["process_exit"] == 137
     plan_c = pr.build_retry_plan([rec_c], "k", 0, 0, build_id="b1", current_retry=1)
     assert plan_c["active"] is True
     assert plan_c["passed"] == {"tests/pkg/test_c.py::test_1"}
+
+
+def test_review8_continue_on_failure_and_unconfirmed_process_exit(tmp_path):
+    # Round 8 Finding 1: Under CONTINUE_ON_FAILURE=1, the command handed to
+    # guard() ends with `|| CI_OVERALL_STATUS=1`. guard() MUST record the real
+    # pytest exit code BEFORE setting CI_OVERALL_STATUS=1 so a failing
+    # pytest_unconfigure hook is recorded as non-zero and NOT skipped on retry.
+    import runtime_shard as rs
+
+    plugin_dir = tmp_path / "plugin"
+    plugin_dir.mkdir()
+    for mod in ("runtime_shard_plugin.py", "pytest_retry.py"):
+        src = Path(pr.__file__).parent / mod
+        (plugin_dir / mod).write_text(src.read_text())
+
+    case_dir = tmp_path / "cof"
+    _make_project(
+        case_dir,
+        {
+            "pkg/conftest.py": (
+                "def pytest_unconfigure(config):\n"
+                "    raise RuntimeError('unconfigure boom under continue_on_failure')\n"
+            ),
+            "pkg/test_ok.py": "def test_passes(): pass\n",
+        },
+    )
+    plan = _simple_plan({"tests/pkg/test_ok.py": 0}, shards=1, single_job=True)
+    cov_dir = case_dir / "artifacts" / ".runtime-shard-coverage"
+    cof_cmd = f"{{ {pr.sys.executable} -m pytest -v pkg\n}} || CI_OVERALL_STATUS=1"
+    old_dir = rs.PLUGIN_DIR
+    try:
+        rs.PLUGIN_DIR = str(plugin_dir)
+        guarded = rs.guard(
+            cof_cmd, plan["commands"][0], 1, step_key="k", enable_retry=True
+        ).replace("$$", "$")
+    finally:
+        rs.PLUGIN_DIR = old_dir
+
+    script = f"CI_OVERALL_STATUS=0\n{guarded}\necho OVERALL=$CI_OVERALL_STATUS\nexit $CI_OVERALL_STATUS"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env.update(
+        PYTEST_ADDOPTS="-p runtime_shard_plugin",
+        PYTHONPATH=str(plugin_dir),
+        RUNTIME_SHARD_PLAN=rs.pack(plan),
+        RUNTIME_SHARD_COVERAGE_DIR=str(cov_dir),
+        BUILDKITE_PARALLEL_JOB="0",
+        BUILDKITE_JOB_ID="job-cof",
+        BUILDKITE_BUILD_ID="b1",
+        BUILDKITE_RETRY_COUNT="0",
+    )
+    run = subprocess.run(
+        ["sh", "-ec", script],
+        cwd=case_dir / "tests",
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert run.returncode == 1
+    assert "OVERALL=1" in run.stdout
+    rec = pr.parse_record_file(str(cov_dir / "job-cof" / "0.jsonl"))
+    assert rec["has_finish"] is True
+    assert rec["process_exit"] != 0
+    plan1 = pr.build_retry_plan([rec], "k", 0, 0, build_id="b1", current_retry=1)
+    assert plan1["active"] is False
+    assert plan1["skip_command"] is False
+
+    # Round 8 Finding 2: A session that wrote `finish` (exitstatus=0) but was
+    # process-group killed during `pytest_unconfigure` BEFORE the shell ran
+    # `record-exit` has `has_finish=True, process_exit=None` -> MUST invalidate
+    # the skip plan and force a full rerun!
+    hang_dir = tmp_path / "hang"
+    _make_project(hang_dir, {"pkg/test_ok.py": "def test_passes(): pass\n"})
+    hang_cov = hang_dir / "artifacts" / ".runtime-shard-coverage"
+    run_h, rec_h = _run_plugin_pytest(
+        hang_dir,
+        plan,
+        ["-v", "pkg"],
+        shard=0,
+        job_id="job-hang",
+        coverage_dir=hang_cov,
+        retry=0,
+        record_exit=False,
+    )
+    assert run_h.returncode == 0
+    assert rec_h["has_finish"] is True
+    assert rec_h["process_exit"] is None
+    plan_h = pr.build_retry_plan([rec_h], "k", 0, 0, build_id="b1", current_retry=1)
+    assert plan_h["active"] is False
+    assert plan_h["skip_command"] is False
+    assert plan_h["passed"] == set()
 
 
 def test_review7_extra_occurrence_of_previously_passed_test_invalidates_skip_before_deselect(

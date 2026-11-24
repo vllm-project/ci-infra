@@ -93,6 +93,9 @@ def _parse_legacy_json(data: Any) -> Optional[Dict[str, Any]]:
         "finished_at": float(data["finished_at"]),
         "has_finish": bool(data.get("has_finish", data["finished"])),
         "exitstatus": data.get("exitstatus") if _is_int(data.get("exitstatus")) else None,
+        "process_exit": (
+            data.get("process_exit") if _is_int(data.get("process_exit")) else None
+        ),
         "expected": data.get("expected"),
         "planned": data.get("planned"),
         "ran": sorted(set(data["ran"])),
@@ -150,6 +153,7 @@ def _parse_record_with_reason(path: str) -> tuple:
     finished_at = 0.0
     has_finish = False
     exitstatus: Optional[int] = None
+    process_exit: Optional[int] = None
 
     for index, line in enumerate(lines[1:], start=1):
         if not line.strip():
@@ -197,7 +201,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             raw_exit = event.get("exitstatus")
             if not _is_int(raw_exit):
                 return None, None
-            exitstatus = raw_exit
+            process_exit = raw_exit
 
     return (
         {
@@ -211,6 +215,7 @@ def _parse_record_with_reason(path: str) -> tuple:
             "finished_at": finished_at,
             "has_finish": has_finish,
             "exitstatus": exitstatus,
+            "process_exit": process_exit,
             "expected": header.get("expected"),
             "planned": header.get("planned"),
             "ran": sorted(ran),
@@ -442,18 +447,21 @@ def build_retry_plan(
     #    relative to the base full attempt's `planned` list.
     for index, record in enumerate(chain):
         exitstatus = record.get("exitstatus")
-        # A completed pytest session (has_finish=True, or synthetic record with
-        # explicit non-zero exitstatus) that exited non-zero without any failed
-        # test indicates a session/cleanup failure (sessionfinish, unconfigure,
-        # atexit). True mid-run crashes (os._exit/SIGKILL) never write a finish
-        # event (has_finish=False), so their flushed pre-crash passes stay usable.
-        if (
-            record.get("has_finish", True)
-            and _is_int(exitstatus)
-            and exitstatus != 0
-            and not record.get("failed")
-        ):
-            return empty
+        process_exit = record.get("process_exit")
+        # A completed pytest session (has_finish=True) must also carry proof
+        # that the process actually exited (`process_exit` recorded by the
+        # command wrapper) and did not fail at the session/cleanup layer
+        # (`pytest_sessionfinish`, `pytest_unconfigure`, `atexit`, or a hang
+        # killed during unconfigure). Explicit `skipped_command` records never
+        # launch pytest, and mid-run crashes (os._exit/SIGKILL) never write a
+        # `finish` event (has_finish=False) so their flushed passes stay usable.
+        if not record.get("skipped_command") and record.get("has_finish", True):
+            if not _is_int(process_exit):
+                return empty
+            if process_exit != 0 and not record.get("failed"):
+                return empty
+            if _is_int(exitstatus) and exitstatus != 0 and not record.get("failed"):
+                return empty
         if index == 0 or record.get("skipped_command"):
             continue
         rec_planned = record.get("planned")
@@ -731,6 +739,7 @@ def maybe_skip_command(
                 "exitstatus": 0,
             },
         )
+        append_jsonl_event(path, {"event": "exit", "exitstatus": 0})
     count = len(plan["base_planned"] or [])
     print(
         f"pytest-retry: command {position + 1} already passed ({count} tests); skipping"
