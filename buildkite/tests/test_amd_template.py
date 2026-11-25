@@ -336,6 +336,8 @@ def test_mi300_dpx_expected_gpu_count_follows_pool_without_num_gpus(pool, expect
     pod_env = step["plugins"][0]["kubernetes"]["podSpecPatch"]["containers"][0]["env"]
     values = {e["name"]: e.get("value") for e in pod_env}
     assert values["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_count
+
+
 @pytest.mark.parametrize(
     "env",
     [{"BUILDKITE_SOURCE": "trigger_job"}, {"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "1"}],
