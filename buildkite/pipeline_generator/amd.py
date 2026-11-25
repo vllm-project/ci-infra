@@ -212,7 +212,13 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4, "gfx942"),
     DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8, "gfx942"),
     DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI355_DPX, 1, "gfx950", uses_dra=True
+        AgentQueue.AMD_MI355_DPX, 1, "gfx950", uses_dra=True, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI355_DPX_2.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355_DPX, 2, "gfx950", uses_dra=True, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI355_DPX_4.value: AmdDeviceConfig(
+        AgentQueue.AMD_MI355_DPX, 4, "gfx950", uses_dra=True, gpu_size_tag=True
     ),
     DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1, "gfx950"),
     DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2, "gfx950"),
@@ -281,15 +287,17 @@ _LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
 
 
 def get_amd_label_tag(device: Optional[str]) -> str:
-    """The hardware tag of an AMD GPU label: "<FAMILY> DPX" for a *_dpx device
-    ("mi300_dpx" -> "MI300 DPX"), else the pool's family ("mi300_1" -> "MI300");
-    empty for non-GPU devices."""
+    """The hardware tag of an AMD GPU label: "<FAMILY> DPX" for any *_dpx*
+    device ("mi300_dpx" -> "MI300 DPX", "mi355_dpx" -> "MI355 DPX",
+    "mi355_dpx_2" -> "MI355 DPX"), else the pool's family
+    ("mi300_1" -> "MI300"); empty for non-GPU devices."""
     value = _device_value(device) or ""
     if not value.startswith("mi"):
         return ""
-    if value.endswith("_dpx"):
-        return f"{value.removesuffix('_dpx').upper()} DPX"
-    return value.split("_", 1)[0].upper()
+    parts = value.split("_")
+    if "dpx" in parts:
+        return f"{parts[0].upper()} DPX"
+    return parts[0].upper()
 
 
 def get_amd_label(label: str, device: Optional[str]) -> str:

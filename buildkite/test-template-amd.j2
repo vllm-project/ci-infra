@@ -372,6 +372,15 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           {% if "mi250" in step.agent_pool %}
           queue: amd_mi250
           gpu_size: "{{ step.agent_pool | split('_') | last }}"
+          {% elif step.agent_pool == "mi355_dpx" %}
+          queue: amd_mi355_dpx
+          gpu_size: "1"
+          {% elif "mi355_dpx" in step.agent_pool %}
+          queue: amd_mi355_dpx
+          gpu_size: "{{ step.agent_pool | split('_') | last }}"
+          {% elif "mi355" in step.agent_pool and "dpx" not in step.agent_pool %}
+          queue: amd_mi355
+          gpu_size: "{{ step.agent_pool | split('_') | last }}"
           {% else %}
           queue: amd_{{ step.agent_pool }}
           {% endif %}

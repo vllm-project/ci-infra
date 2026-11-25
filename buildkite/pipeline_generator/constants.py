@@ -35,6 +35,8 @@ class DeviceType(str, Enum):
     AMD_MI325_4 = "mi325_4"
     AMD_MI325_8 = "mi325_8"
     AMD_MI355_DPX = "mi355_dpx"
+    AMD_MI355_DPX_2 = "mi355_dpx_2"
+    AMD_MI355_DPX_4 = "mi355_dpx_4"
     AMD_MI355_1 = "mi355_1"
     AMD_MI355_2 = "mi355_2"
     AMD_MI355_4 = "mi355_4"
