@@ -55,6 +55,11 @@ run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"
 
+# Optional. run_all_patterns matches that only the CUDA build reads: they run
+# every CUDA step but not every AMD step.
+cuda_only_run_all_patterns:
+  - "docker/Dockerfile$"
+
 # Optional. List of regex patterns to trigger all AMD tests, on top of
 # run_all_patterns (which already triggers AMD too). For files that matter to
 # AMD but are excluded or left out above, e.g. docker/Dockerfile.rocm_base.
@@ -81,7 +86,10 @@ repositories:
 A step runs when its `source_file_dependencies` match the change (or on
 nightly / `RUN_ALL` builds); optional steps never run on their own, except
 that a change to the ROCm stack image (`docker/Dockerfile.rocm_base` or
-`tools/vllm-rocm/therock_wheels.py`) runs every AMD step. Every
+`tools/vllm-rocm/therock_wheels.py`) runs every AMD step. An AMD step counts
+an edit to its own yaml only if the edit changes the step's entry, or can't be
+tied to single steps. An optional AMD step whose entry changes runs too, as
+ci-selector does for the steps it picks. Every
 other step is left out of the uploaded pipeline. One input step, **Run more
 jobs**, near the top of the build lists them all as checkboxes under their
 group names (AMD steps under "AMD - <group of their NVIDIA step>"). Buildkite

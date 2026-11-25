@@ -27,6 +27,17 @@ else
 fi
 ethtool --version
 
+# Older Amazon Linux 2023 cloud-init gives up when the IMDSv2 token request gets
+# an HTTP 503, boots without user-data and never starts the agent, so the
+# instance holds a scaler slot with no agent. Retrying the 503 shipped in
+# cloud-init-22.2.2-1.amzn2023.1.15. dnf is locked to the base AMI's release,
+# so take cloud-init from the latest one.
+echo "=== Upgrading cloud-init (IMDS 503 retry) ==="
+sudo dnf upgrade -y --releasever=latest cloud-init
+rpm -q cloud-init
+# grep without -q: an early exit would SIGPIPE rpm and fail under pipefail.
+rpm -q --changelog cloud-init | grep -F "Retry upon IMDS 503" >/dev/null
+
 # -----------------------------------------------------------------------------
 # Install BuildKit binary
 # Extract buildkitd from the official moby/buildkit image

@@ -336,3 +336,27 @@ def test_mi300_dpx_expected_gpu_count_follows_pool_without_num_gpus(pool, expect
     pod_env = step["plugins"][0]["kubernetes"]["podSpecPatch"]["containers"][0]["env"]
     values = {e["name"]: e.get("value") for e in pod_env}
     assert values["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_count
+@pytest.mark.parametrize(
+    "env",
+    [{"BUILDKITE_SOURCE": "trigger_job"}, {"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "1"}],
+)
+def test_bootstrap_trust_rule_excludes_triggered_builds(env):
+    # A PR job can upload a trigger step that builds main with any commit.
+    bootstrap = (BUILDKITE_DIR / "bootstrap-amd.sh").read_text()
+    rule = re.search(
+        r"ROCM_CI_REPO=rocm/vllm-dev\n.*?export ROCM_CI_REPO\n", bootstrap, re.S
+    )
+    trusted = {
+        "BUILDKITE_PULL_REQUEST": "false",
+        "BUILDKITE_REPO": VLLM,
+        "AITER_NIGHTLY": "0",
+        "BUILDKITE_BRANCH": "main",
+    }
+    out = subprocess.run(
+        ["bash", "-c", rule.group(0) + 'echo "$ROCM_CI_REPO"'],
+        env={**os.environ, **trusted, **env},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.strip() == "rocm/vllm-dev"

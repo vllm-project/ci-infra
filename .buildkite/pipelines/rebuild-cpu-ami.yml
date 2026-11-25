@@ -9,11 +9,25 @@
 # Automation Flow:
 #   1. Build AMI in us-east-1
 #   2. Update SSM parameter with new AMI ID
-#   3. Update Launch Templates and ASGs directly
-#   4. Cleanup old AMIs
+#   3. Update Launch Templates and ASGs directly (CI build queues only;
+#      release queues use an AMI promoted by hand)
+#   4. Cleanup old AMIs, keeping the one promoted to the release queues
+#
+# Canary mode: setting CANARY_STACK_VERSION (e.g. "7.2.0") on a manual build
+# builds the AMI from that Elastic CI Stack base, keeps the base image's
+# agent, and names the AMI so the cleanup step's filter cannot match it.
+# The publish steps (update-ssm, update-launch-templates, cleanup-amis) are
+# skipped, so a canary build never rolls anything out.
+#
+# v7 line: AMI_LINE=v7 (set on its own daily schedule) builds from the
+# Elastic CI Stack v7.2.0 base and publishes to its own SSM parameter and
+# stack, so the v6 and v7 AMIs never reach each other's queues. build-ami
+# records the line's SSM parameter, target stacks and AMI name prefix as
+# meta-data; the publish steps read them from there.
 
 env:
   SSM_PARAM_US_EAST_1: "/buildkite/cpu-build-ami/us-east-1"
+  SSM_PARAM_RELEASE_US_EAST_1: "/buildkite/release-cpu-build-ami/us-east-1"
   SSM_PARAM_SECURITY_GROUP: "/buildkite/packer/security-group-id"
   SSM_PARAM_SUBNET: "/buildkite/packer/subnet-id"
   STACK_VERSION: "6.21.0"
@@ -21,14 +35,45 @@ env:
 steps:
   - label: ":packer: Build CPU AMI"
     key: build-ami
-    if: build.branch == "main" || build.env("AGENT_ONLY") == "1"
+    if: build.branch == "main" || build.env("AGENT_ONLY") == "1" || (build.env("CANARY_STACK_VERSION") != null && build.env("CANARY_STACK_VERSION") != "")
     command:
       - |
         set -euo pipefail
+        if [[ "$${AGENT_ONLY:-0}" == 1 && -n "$${AMI_LINE:-}" ]]; then
+          echo "Error: AGENT_ONLY bakes the release-worker agent AMI; unset AMI_LINE"
+          exit 1
+        fi
         if [[ "$${AGENT_ONLY:-0}" == 1 ]]; then
           bash packer/agent/build.sh
           exit 0
         fi
+
+        AMI_NAME_PREFIX="vllm-buildkite-stack-linux-cpu-build"
+        TARGET_STACKS="bk-cpu-queue-postmerge-us-east-1"
+        if [[ -n "$${CANARY_STACK_VERSION:-}" && -n "$${AMI_LINE:-}" ]]; then
+          echo "Error: set CANARY_STACK_VERSION or AMI_LINE, not both"
+          exit 1
+        fi
+        if [[ -n "$${CANARY_STACK_VERSION:-}" ]]; then
+          echo "--- :warning: Canary build against Elastic CI Stack v$${CANARY_STACK_VERSION} (publish steps are skipped)"
+          if [[ ! "$$CANARY_STACK_VERSION" =~ ^[0-9]+[.][0-9]+[.][0-9]+$$ ]]; then
+            echo "Error: CANARY_STACK_VERSION must be a stack version like 7.2.0, got: '$$CANARY_STACK_VERSION'"
+            exit 1
+          fi
+          STACK_VERSION="$$CANARY_STACK_VERSION"
+          AMI_NAME_PREFIX="vllm-buildkite-stack-canary-linux-cpu-build"
+        elif [[ "$${AMI_LINE:-}" == "v7" ]]; then
+          # Only the image-build queue runs Elastic CI Stack v7 so far.
+          echo "--- :package: v7 AMI line (Elastic CI Stack v7.2.0)"
+          STACK_VERSION="7.2.0"
+          AMI_NAME_PREFIX="vllm-buildkite-stack-v7-linux-cpu-build"
+          SSM_PARAM_US_EAST_1="/buildkite/cpu-build-ami/v7/us-east-1"
+          TARGET_STACKS="bk-cpu-queue-premerge-us-east-1"
+        elif [[ -n "$${AMI_LINE:-}" ]]; then
+          echo "Error: AMI_LINE must be v7 or unset, got: '$$AMI_LINE'"
+          exit 1
+        fi
+
         cd packer/cpu
 
         # Install a pinned standalone yq if not available. The PyPI yq package
@@ -192,6 +237,7 @@ steps:
           -var "subnet_id=$$SUBNET_ID" \
           -var "ecr_token=$$ECR_TOKEN" \
           -var "vllm_commit=$$VLLM_COMMIT" \
+          -var "ami_name_prefix=$$AMI_NAME_PREFIX" \
           buildkite-cpu-ami.pkr.hcl
 
         echo "--- :aws: Extracting AMI ID"
@@ -216,6 +262,9 @@ steps:
 
         echo "us-east-1 AMI: $$US_EAST_1_AMI"
         buildkite-agent meta-data set "ami-us-east-1" "$$US_EAST_1_AMI"
+        buildkite-agent meta-data set "ssm-param" "$$SSM_PARAM_US_EAST_1"
+        buildkite-agent meta-data set "target-stacks" "$$TARGET_STACKS"
+        buildkite-agent meta-data set "ami-name-prefix" "$$AMI_NAME_PREFIX"
     agents:
       queue: packer_build_queue
     timeout_in_minutes: 60
@@ -226,16 +275,18 @@ steps:
 
   - label: ":aws: Update SSM Parameter"
     key: update-ssm
-    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1" && (build.env("CANARY_STACK_VERSION") == null || build.env("CANARY_STACK_VERSION") == "")
     command:
       - |
         echo "--- :ssm: Updating SSM parameter with new AMI ID"
 
+        set -euo pipefail
         US_EAST_1_AMI=$$(buildkite-agent meta-data get "ami-us-east-1")
+        SSM_PARAM=$$(buildkite-agent meta-data get "ssm-param")
 
-        echo "Updating $${SSM_PARAM_US_EAST_1} -> $$US_EAST_1_AMI"
+        echo "Updating $$SSM_PARAM -> $$US_EAST_1_AMI"
         aws ssm put-parameter \
-          --name "$${SSM_PARAM_US_EAST_1}" \
+          --name "$$SSM_PARAM" \
           --value "$$US_EAST_1_AMI" \
           --type String \
           --overwrite \
@@ -248,7 +299,7 @@ steps:
 
   - label: ":rocket: Update Launch Templates"
     key: update-launch-templates
-    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1" && (build.env("CANARY_STACK_VERSION") == null || build.env("CANARY_STACK_VERSION") == "")
     command:
       - |
         set -euo pipefail
@@ -265,18 +316,22 @@ steps:
 
         echo "--- :rocket: Direct Launch Template Update"
 
+        SSM_PARAM=$$(buildkite-agent meta-data get "ssm-param")
+        TARGET_STACKS=$$(buildkite-agent meta-data get "target-stacks")
+
         # Read new AMI from SSM
         NEW_AMI=$$(aws ssm get-parameter \
-          --name "$${SSM_PARAM_US_EAST_1}" \
+          --name "$$SSM_PARAM" \
           --query 'Parameter.Value' \
           --output text \
           --region us-east-1)
 
         echo "New AMI ID: $$NEW_AMI"
 
-        # bk-cpu-queue-premerge-us-east-1 runs Elastic CI Stack v7 on its own
-        # AMI; this v6 AMI must not reach its launch template.
-        for STACK_NAME in bk-cpu-queue-postmerge-us-east-1 bk-small-cpu-queue-release bk-cpu-queue-release; do
+        # Each AMI line updates only its own stacks (see build-ami). Release
+        # stacks are never updated here: they boot an AMI promoted by hand
+        # (see packer/cpu/README.md).
+        for STACK_NAME in $$TARGET_STACKS; do
           echo ""
           echo "--- Processing stack: $$STACK_NAME"
 
@@ -359,12 +414,13 @@ steps:
 
   - label: ":broom: Cleanup Old AMIs"
     key: cleanup-amis
-    if: build.branch == "main" && build.env("AGENT_ONLY") != "1"
+    if: build.branch == "main" && build.env("AGENT_ONLY") != "1" && (build.env("CANARY_STACK_VERSION") == null || build.env("CANARY_STACK_VERSION") == "")
     command:
       - |
         set -euo pipefail
+        AMI_NAME_PREFIX=$$(buildkite-agent meta-data get "ami-name-prefix")
 
-        echo "--- :aws: Cleaning up old AMIs (keeping latest 3 that are older than 3 days)"
+        echo "--- :aws: Cleaning up old $$AMI_NAME_PREFIX AMIs (keeping latest 3 that are older than 3 days)"
 
         # Get cutoff date (3 days ago)
         CUTOFF_DATE=$$(date -u -d '3 days ago' '+%Y-%m-%dT%H:%M:%S')
@@ -372,7 +428,7 @@ steps:
         # Get all CPU build AMIs older than 3 days, sorted by creation date (newest first)
         AMIS=$$(aws ec2 describe-images \
           --owners self \
-          --filters "Name=name,Values=vllm-buildkite-stack-linux-cpu-build-*" \
+          --filters "Name=name,Values=$${AMI_NAME_PREFIX}-*" \
           --query "sort_by(Images[?CreationDate<'$$CUTOFF_DATE'], &CreationDate) | reverse(@) | [*].ImageId" \
           --output text \
           --region us-east-1)
@@ -393,8 +449,46 @@ steps:
         DELETE_COUNT=$$((TOTAL - KEEP))
         echo "Keeping $$KEEP AMIs for rollback, deleting $$DELETE_COUNT older AMIs"
 
+        # The release queues boot the AMI promoted to this parameter by hand;
+        # never delete it, however old it is.
+        RELEASE_AMI=$$(aws ssm get-parameter \
+          --name "$${SSM_PARAM_RELEASE_US_EAST_1}" \
+          --query 'Parameter.Value' --output text --region us-east-1)
+        if [[ ! "$$RELEASE_AMI" =~ ^ami-[a-fA-F0-9]+$$ ]]; then
+          echo "Error: cannot read the release AMI from $${SSM_PARAM_RELEASE_US_EAST_1} (got: $$RELEASE_AMI); not deleting anything"
+          exit 1
+        fi
+        echo "Keeping release AMI: $$RELEASE_AMI"
+
+        # Never delete an AMI an Auto Scaling group can still launch: after a
+        # promotion the release stacks boot the old AMI until Terraform applies.
+        IN_USE_AMIS=$$(aws autoscaling describe-auto-scaling-groups --region us-east-1 \
+          --query 'AutoScalingGroups[].[MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId || LaunchTemplate.LaunchTemplateId, MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version || LaunchTemplate.Version]' \
+          --output text | while read -r LT_ID LT_VERSION; do
+            # errexit is off inside $$(...): fail each lookup explicitly, or a
+            # later success would hide it.
+            IMAGE=$$(aws ec2 describe-launch-template-versions --region us-east-1 \
+              --launch-template-id "$$LT_ID" --versions "$$LT_VERSION" \
+              --query 'LaunchTemplateVersions[0].LaunchTemplateData.ImageId' --output text) || exit 1
+            [[ "$$IMAGE" =~ ^ami-[a-fA-F0-9]+$$ ]] || exit 1
+            echo "$$IMAGE"
+          done)
+        if [[ -z "$$IN_USE_AMIS" ]]; then
+          echo "Error: found no AMIs in use by Auto Scaling groups; not deleting anything"
+          exit 1
+        fi
+        echo "AMIs in use by Auto Scaling groups:" $$IN_USE_AMIS
+
         for ((i=KEEP; i<TOTAL; i++)); do
           AMI_ID=$${AMI_ARRAY[$$i]}
+          if [[ "$$AMI_ID" == "$$RELEASE_AMI" ]]; then
+            echo "Skipping $$AMI_ID: promoted to the release queues"
+            continue
+          fi
+          if [[ " $$(echo $$IN_USE_AMIS) " == *" $$AMI_ID "* ]]; then
+            echo "Skipping $$AMI_ID: an Auto Scaling group still launches it"
+            continue
+          fi
           echo "Deleting AMI: $$AMI_ID"
 
           # Get snapshot ID before deregistering

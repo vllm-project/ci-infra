@@ -1,4 +1,6 @@
+import subprocess
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -7,7 +9,8 @@ import buildkite_step
 import pipeline_generator
 from amd import is_amd_device
 from constants import AgentQueue
-from step import Step
+from step import Step, read_steps_from_job_dir
+from utils_lib import git_utils
 
 pytestmark = pytest.mark.usefixtures("fake_global_config")
 
@@ -106,6 +109,8 @@ def build_sh_layout(tmp_path, monkeypatch):
     monkeypatch.setenv("BUILDKITE_PULL_REQUEST", "false")
     monkeypatch.setenv("BUILDKITE_BRANCH", "main")
     monkeypatch.delenv("AITER_NIGHTLY", raising=False)
+    monkeypatch.delenv("BUILDKITE_SOURCE", raising=False)
+    monkeypatch.delenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID", raising=False)
     return monkeypatch
 
 
@@ -117,6 +122,9 @@ def build_sh_layout(tmp_path, monkeypatch):
         ({"BUILDKITE_REPO": "git@github.com:someone/vllm.git"}, "rocm/vllm-dev"),
         ({"AITER_NIGHTLY": "1"}, "rocm/vllm-dev"),
         ({"BUILDKITE_BRANCH": "releases/v0.99"}, "rocm/vllm-dev"),
+        # A trigger step uploaded by a PR job can build main with any commit.
+        ({"BUILDKITE_SOURCE": "trigger_job"}, "rocm/vllm-dev"),
+        ({"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "1"}, "rocm/vllm-dev"),
     ],
 )
 def test_build_sh_layout_build_steps_get_trusted_repo(build_sh_layout, env, expected):
@@ -1074,3 +1082,154 @@ def test_amd_run_all_off_keeps_dependency_rules(fake_global_config):
     assert not buildkite_step._step_should_run(
         native, fake_global_config["list_file_diff"]
     )
+
+
+def test_cuda_only_run_all_runs_cuda_steps_and_leaves_amd_to_its_own_rules(
+    fake_global_config,
+):
+    fake_global_config.update(run_all=True, cuda_only_run_all=True)
+    mirrored, native = _mirrored_and_native()
+    effective = buildkite_step._get_amd_mirror_effective_step(
+        mirrored, mirrored.mirror["amd"]
+    )
+    run = buildkite_step._step_should_run
+
+    assert run(mirrored, ["requirements/cuda.txt"]), "CUDA: run_all"
+    assert not run(effective, ["requirements/cuda.txt"]), "AMD mirror: its own deps"
+    assert run(native, ["tests/amd/test_x.py"]), "native AMD: deps still match"
+
+    fake_global_config["amd_run_all"] = True
+    assert run(native, ["requirements/cuda.txt"]), "amd_run_all still applies"
+
+
+STEP_YAML = ".buildkite/test_areas/models.yaml"
+HEADER = "group: Models\ndepends_on: [image-build]\nsteps:\n"
+KIMI = """\
+- label: Kimi
+  key: kimi
+  device: h100
+  source_file_dependencies: [vllm/models/kimi/]
+  commands: [pytest models/kimi]
+  mirror:
+    amd: {device: mi355_1}
+"""
+DECODE = """\
+- label: Kimi Decode
+  key: kimi-decode-amd
+  device: mi355_8
+  source_file_dependencies: [vllm/models/kimi/amd/]
+  commands: [pytest models/kimi/amd]
+"""
+STEPS = HEADER + KIMI + DECODE
+NEW_STEP = "- {label: New, key: new, commands: [pytest]}\n"
+
+
+def _edit(old, new, text=STEPS):
+    assert old in text
+    return text.replace(old, new, 1)
+
+
+@pytest.mark.parametrize(
+    ("base", "head", "expected"),
+    [
+        pytest.param(
+            STEPS, _edit("h100", "h200"), {"kimi", "amd-kimi"}, id="parent-and-mirror"
+        ),
+        pytest.param(
+            STEPS, _edit("mi355_1", "mi355_2"), {"amd-kimi"}, id="mirror-only"
+        ),
+        pytest.param(STEPS, STEPS + NEW_STEP, {"new"}, id="added"),
+        pytest.param(STEPS, _edit("group: Models", "group: Kimi"), None, id="group"),
+        pytest.param(STEPS, _edit("kimi-decode-amd", "kimi"), None, id="duplicate-key"),
+        pytest.param("steps: [unclosed\n", STEPS, None, id="unparsable-base"),
+    ],
+)
+def test_changed_step_keys(base, head, expected):
+    keys = amd.changed_step_keys(base, head)
+    assert keys == (None if expected is None else frozenset(expected))
+
+
+def test_changed_step_keys_in_file_diffs_against_git(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".buildkite/test_areas").mkdir(parents=True)
+    (tmp_path / STEP_YAML).write_text(STEPS)
+    git = ["git", "-c", "user.email=ci@example.com", "-c", "user.name=ci"]
+    for command in (["init", "-q"], ["add", "."], ["commit", "-qm", "base"]):
+        subprocess.run(git + command, check=True)
+    (tmp_path / STEP_YAML).write_text(_edit("h100", "h200"))
+    amd.changed_step_keys_in_file.cache_clear()
+
+    assert amd.changed_step_keys_in_file(STEP_YAML, "HEAD") == {"kimi", "amd-kimi"}
+    assert "redefined: amd-kimi, kimi" in capsys.readouterr().out
+    assert amd.changed_step_keys_in_file("new.yaml", "HEAD") is None
+    assert "not pinned to steps (no base:" in capsys.readouterr().out
+    amd.changed_step_keys_in_file.cache_clear()
+
+
+def _load(tmp_path, monkeypatch, text=STEPS):
+    (tmp_path / ".buildkite/test_areas").mkdir(parents=True, exist_ok=True)
+    (tmp_path / STEP_YAML).write_text(text)
+    monkeypatch.chdir(tmp_path)
+    steps = {s.key: s for s in read_steps_from_job_dir(".buildkite/test_areas")}
+    kimi = steps["kimi"]
+    steps["amd-kimi"] = buildkite_step._get_amd_mirror_effective_step(
+        kimi, kimi.mirror["amd"]
+    )
+    return steps
+
+
+def _redefined(monkeypatch, keys):
+    keys = None if keys is None else frozenset(keys)
+    monkeypatch.setattr(amd, "changed_step_keys_in_file", lambda path, base: keys)
+
+
+@pytest.mark.parametrize(
+    ("redefined", "runs"),
+    [
+        ({"kimi"}, {"kimi"}),
+        ({"kimi", "amd-kimi"}, {"kimi", "amd-kimi"}),
+        (None, {"kimi", "amd-kimi", "kimi-decode-amd"}),
+    ],
+    ids=["other-step", "own-entry", "not-pinned"],
+)
+def test_amd_steps_count_their_yaml_only_if_redefined(
+    tmp_path, monkeypatch, redefined, runs
+):
+    steps = _load(tmp_path, monkeypatch)
+    _redefined(monkeypatch, redefined)
+    assert {
+        k for k, s in steps.items() if buildkite_step._step_should_run(s, [STEP_YAML])
+    } == runs
+
+
+def test_an_optional_amd_step_runs_only_on_its_own_entry(tmp_path, monkeypatch):
+    steps = _load(tmp_path, monkeypatch)
+    optional = steps["kimi-decode-amd"].model_copy(update={"optional": True})
+    for redefined, runs in (({"kimi-decode-amd"}, True), (None, False)):
+        _redefined(monkeypatch, redefined)
+        assert buildkite_step._step_should_run(optional, [STEP_YAML]) is runs
+
+
+def test_a_step_that_lists_its_own_yaml_counts_every_edit(tmp_path, monkeypatch):
+    text = _edit("[vllm/models/kimi/amd/]", f"[vllm/models/kimi/amd/, {STEP_YAML}]")
+    text = _edit(
+        "{device: mi355_1}",
+        f"{{device: mi355_1, source_file_dependencies: [{STEP_YAML}]}}",
+        text,
+    )
+    steps = _load(tmp_path, monkeypatch, text)
+    _redefined(monkeypatch, set())
+
+    assert "source_file" not in steps["kimi"].model_dump()
+    assert all(buildkite_step._step_should_run(s, [STEP_YAML]) for s in steps.values())
+
+
+def test_diff_base_ref_follows_the_diff(fake_global_config, monkeypatch):
+    monkeypatch.setattr(subprocess, "run", MagicMock())
+    git_diff = MagicMock(return_value="")
+    monkeypatch.setattr(subprocess, "check_output", git_diff)
+    fake_global_config["merge_base_commit"] = "abc\n"
+    for branch, base in (("test-branch", "abc"), ("main", "HEAD~1")):
+        fake_global_config["branch"] = branch
+        git_utils.get_list_file_diff(branch, "abc\n")
+        assert git_diff.call_args.args[0][-1] == amd._diff_base_ref() == base

@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import gzip
 import json
+import platform
 import subprocess
 from pathlib import Path
 
 ROOT = "/usr/local/lib/python3.12/dist-packages/vllm/"
+# The recording Python: the running one, since a row recorded by another
+# minor cannot be read (coverage/table.py `_interpreter_mismatch`).
+PY = platform.python_version()
 
 MODULE_SOURCE = """\
 CONSTANT = 1
@@ -67,7 +71,7 @@ def process_file(
     counter: int | None = None,
     clean_exit: bool = True,
     after_end: list[tuple[str, str]] | None = None,
-    py: str = "3.12.13",
+    py: str = PY,
     job: str = "job-1",
     step_key: str | None = None,
     label: str | None = None,

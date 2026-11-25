@@ -1,0 +1,64 @@
+name: Reusable pipeline generator tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  auth-check:
+    if: github.repository == 'vllm-project/ci-infra' && github.event_name == 'pull_request'
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 5
+    steps:
+      - name: Check PR authorization
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.payload.pull_request.number,
+            });
+            const sameRepo = pr.head.repo && pr.head.repo.full_name === 'vllm-project/ci-infra';
+            const trustedAssoc = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association);
+            const approvedLabels = ['ready', 'verified'];
+            const hasLabel = pr.labels.some(l => approvedLabels.includes(l.name));
+            if (sameRepo || trustedAssoc || hasLabel) {
+              core.info(`Authorized: sameRepo=${sameRepo}, author_association=${pr.author_association}, hasLabel=${hasLabel}`);
+            } else {
+              core.setFailed(`Fork PRs require a maintainer to add the 'ready' or 'verified' label before running tests on vllm-runners (author_association=${pr.author_association}).`);
+            }
+
+  test:
+    needs: auth-check
+    if: >-
+      ${{ !cancelled() &&
+      github.repository == 'vllm-project/ci-infra' &&
+      github.event_name == 'pull_request' &&
+      needs.auth-check.result == 'success' }}
+    runs-on: [self-hosted, linux, x64, vllm-runners]
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip install pytest ./buildkite/pipeline_generator
+
+      - name: Check installed generator
+        run: python -I -c 'import runtime_shard, runtime_shard_plugin, runtime_shard_coverage'
+
+      - name: Run tests
+        run: python -m pytest buildkite/tests
