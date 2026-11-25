@@ -38,6 +38,20 @@ Every other Pod                                 → default scheduler, whole car
   `registry.k8s.io/ingress-nginx/kube-webhook-certgen`.
 - Approval to take the node out of normal CI. From step 1 until step 5 its GPUs
   serve no CI jobs.
+- **Pick a worker node, not a Kubernetes control-plane node:** packing many
+  shared CI Pods onto an `etcd` member risks control-plane contention and ties
+  control-plane maintenance to sharing capacity.
+- **Plan for at least two sharing nodes before production scale:** enrolled
+  steps pin to `gpu=on` with no fallback, so with one sharing node a cordon,
+  quarantine, or reboot stalls every enrolled step until it returns or the
+  generator change is reverted.
+- **Buildkite controller (`agent-stack-k8s`) ≥ 0.44.0 and queue headroom:**
+  older versions lack `pod-pending-timeout` and `reservation-expiry-seconds`.
+  If shared and ordinary jobs share one Buildkite queue, `max-in-flight` counts
+  both Running and Pending Pods in FIFO queue order, so a large ordinary
+  backlog starves the sharing node (and vice versa). Before scaling beyond a
+  small pilot, run a second `agent-stack-k8s` Helm release on a dedicated
+  shared queue.
 
 ## Step 1: take the node out of CI
 
@@ -67,12 +81,18 @@ has no Pods on it.
    applies to every sharing node in the cluster; the operator's hook exists on
    all GPU Operator nodes, so it is safe on the others too.
 2. If `kubectl get pods -n hami-system` already lists `hami-scheduler` Pods,
-   HAMi is installed: skip the install below. When check 1 needs
-   `nvidiaHookPath` and the installed release lacks it
-   (`helm get values hami -n hami-system`), add it with
-   `helm upgrade hami hami --repo https://project-hami.github.io/HAMi --version 2.11.0 -n hami-system -f values.yaml --wait`.
+   HAMi is installed: skip the install below. Compare `helm get values hami -n hami-system`
+   against [`values.yaml`](values.yaml) (with `nvidiaHookPath` uncommented if
+   check 1 needed it). When any required setting differs — such as
+   `nvidiaHookPath`, `devicePlugin.tolerations` (including `vllm.ci/quarantine`),
+   or container `resources` — run:
+   ```bash
+   helm upgrade hami hami --repo https://project-hami.github.io/HAMi --version 2.11.0 -n hami-system -f values.yaml --wait
+   ```
    The upgrade restarts HAMi's device plugin on every sharing node, so run it
-   while no shared job is running. Then go to step 3.
+   while no shared job is running, and verify both `nvidia.com/gpu` and
+   `vllm.ci/quarantine` tolerations appear on `ds/hami-device-plugin`. Then go
+   to step 3.
 3. First sharing node in the cluster: copy `values.yaml` to the control plane
    and install:
    ```bash
@@ -192,7 +212,7 @@ A step runs on the sharing node when its Pod spec has all four:
 | Pod field | Value |
 |---|---|
 | `metadata.labels` | `vllm.ci/gpu-sharing: hami` |
-| container `resources.limits` | `nvidia.com/gpu: 1` and `nvidia.com/gpumem: <MiB per GPU>` |
+| container `resources.limits` | `nvidia.com/gpu: <N>` and `nvidia.com/gpumem: <MiB per GPU>` |
 | `nodeSelector` | `gpu: "on"` |
 | `tolerations` | `{key: nvidia.com/gpu, operator: Equal, value: hami, effect: NoSchedule}` |
 
@@ -231,6 +251,12 @@ Rules learned from the first trials:
 - A quota that is too small usually fails loudly: a torch OOM, or a HAMi-core
   line `OOM <used> / <limit>`. The used figure is a better quota guess than the
   traced peak.
+- Size quotas against the actual MiB HAMi registers in
+  `hami.io/node-nvidia-register` (`devmem`), not rounded GB: a nominal
+  "half-card" value like `40960` MiB on an `81,559` MiB card or `92160` MiB on
+  a `183,359` MiB card fails 2-per-card packing by a few hundred MiB, whereas
+  `40000` MiB and `90000` MiB pack two per card. Never opt in a step whose
+  quota leaves less free memory than the smallest co-located step.
 
 **Done when** each listed step has a measured quota and a staging build
 compared test by test against `main` shows no lost or newly skipped test.
@@ -248,9 +274,12 @@ kubectl uncordon "$NODE"
 helm uninstall hami -n hami-system && kubectl delete ns hami-system
 ```
 
-Remove the step opt-ins from the generator first, or their Pods wait Pending
-for a node that no longer exists. HAMi leaves `/usr/local/vgpu/` and
-`/var/run/hami` on the node's disk; both are inert.
+Remove the step opt-ins from the generator first **and wait for (or cancel)
+every already-uploaded build whose pipeline still carries the HAMi Pod spec**
+before removing the last sharing node: a job behind a dependency step can
+become runnable later and stay Pending for a node that no longer exists. HAMi
+leaves `/usr/local/vgpu/` and `/var/run/hami` on the node's disk; both are
+inert.
 
 ## What changes for monitoring
 

@@ -2,6 +2,12 @@
 # Operator. Tested on the B200 and H100 Kubernetes clusters. See RUNBOOK.md.
 scheduler:
   replicas: 2                        # leader election is on by default; with one replica, quota Pods created while it is down stay Pending for good
+  kubeScheduler:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}  # Burstable QoS so node pressure does not evict the scheduler first
+  extender:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
   defaultSchedulerPolicy:
     nodeSchedulerPolicy: binpack
     gpuSchedulerPolicy: binpack      # default is spread; binpack keeps whole cards free for multi-GPU steps
@@ -14,6 +20,11 @@ devicePlugin:
   nvidiaNodeSelector:
     gpu: "on"                        # HAMi's device plugin runs only on nodes labelled gpu=on
   deviceListStrategy: cdi-annotations  # the default envvar cannot start Pods under the GPU Operator's CDI-mode nvidia runtime class
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+  monitor:
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
   tolerations:                       # replaces the chart's list, so it repeats its nvidia.com/gpu entry
     - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
     - {key: vllm.ci/quarantine, operator: Exists, effect: NoSchedule}  # a plugin Pod restarted during a quarantine can return
