@@ -388,13 +388,45 @@ HAMI_GPUMEM_MIB = {
     "fusion-e2e-tp2-b200": 90000,
 }
 
+# The same for H100 (80 GB cards). A quota is measured on one device type, so
+# each device has its own table: a step that moves keeps whole cards.
+HAMI_GPUMEM_MIB_H100 = {
+    "v1-attention-h100-mi300": 32768,
+    "deepseek-v4-kernel-test-h100": 16384,
+    "kernels-deepgemm-test-h100": 20480,
+    "kernels-minimax-m3-sparse-prefill-h100": 8192,
+    "kernels-bf16x3-router-gemm-h100": 8192,
+    "kernels-attention-diffkv-test-h100": 8192,
+    "kernels-fusedmoe-layer-test-2-h100s": 20480,
+    "distributed-compile-unit-tests-2xh100": 12288,
+    "kernels-minimax-reduce-rms-test-2-gpus": 12288,
+    "kernels-fp8-moe-test-2xh100": 16384,
+    "fusion-e2e-tp2-quick-h100": 40000,
+    "fault-tolerance-e2e-4xh100": 40000,
+    "dsv41-nvidia-sm80-sm90-decode-8xh100": 12288,
+}
+
 # Steps whose quota was staged on more than one GPU, with that GPU count. Every
 # other listed step was staged on one. A step whose GPU count changes keeps
 # whole cards until it is staged again.
 HAMI_GPUS = {
     "kernels-fusedmoe-layer-test-2-b200s": 2,
     "fusion-e2e-tp2-b200": 2,
+    "kernels-fusedmoe-layer-test-2-h100s": 2,
+    "distributed-compile-unit-tests-2xh100": 2,
+    "kernels-minimax-reduce-rms-test-2-gpus": 2,
+    "kernels-fp8-moe-test-2xh100": 2,
+    "fusion-e2e-tp2-quick-h100": 2,
+    "fault-tolerance-e2e-4xh100": 4,
+    "dsv41-nvidia-sm80-sm90-decode-8xh100": 8,
 }
+
+# Per-GPU CPU sizing for H100 HAMi pods (160 cores / 8 GPUs = 20 cores/GPU).
+# Prevents a single CPU-heavy test pod from starving co-located pods on the
+# shared node while keeping total requests low enough not to block GPU packing.
+H100_HAMI_CPU_REQUEST_PER_GPU = 4
+H100_HAMI_CPU_LIMIT_PER_GPU = 20
+H100_HAMI_MAX_CPU_LIMIT = 80
 
 
 def get_k8s_plugin(step: Step, image: str):
@@ -440,11 +472,11 @@ def get_k8s_plugin(step: Step, image: str):
         "nvidia.com/gpu"
     ] = step.num_devices or 1
 
-    if (
-        step.device == DeviceType.B200_K8S
-        and step.key in HAMI_GPUMEM_MIB
-        and (step.num_devices or 1) == HAMI_GPUS.get(step.key, 1)
-    ):
+    quotas = {
+        DeviceType.B200_K8S: HAMI_GPUMEM_MIB,
+        DeviceType.H100: HAMI_GPUMEM_MIB_H100,
+    }.get(step.device, {})
+    if step.key in quotas and (step.num_devices or 1) == HAMI_GPUS.get(step.key, 1):
         # HAMi's webhook only handles Pods carrying this label.
         metadata = plugin["kubernetes"].setdefault("metadata", {})
         metadata.setdefault("labels", {})["vllm.ci/gpu-sharing"] = "hami"
@@ -459,12 +491,20 @@ def get_k8s_plugin(step: Step, image: str):
                 "effect": "NoSchedule",
             }
         )
-        quota_mib = HAMI_GPUMEM_MIB[step.key]
+        quota_mib = quotas[step.key]
         container = pod_spec["containers"][0]
         container["resources"]["limits"]["nvidia.com/gpumem"] = quota_mib
         container.setdefault("env", []).append(
             {"name": "VLLM_CI_HAMI_GPUMEM_MIB", "value": str(quota_mib)}
         )
+        if step.device == DeviceType.H100:
+            num_gpus = step.num_devices or 1
+            container["resources"].setdefault("requests", {})["cpu"] = str(
+                num_gpus * H100_HAMI_CPU_REQUEST_PER_GPU
+            )
+            container["resources"]["limits"]["cpu"] = str(
+                min(num_gpus * H100_HAMI_CPU_LIMIT_PER_GPU, H100_HAMI_MAX_CPU_LIMIT)
+            )
 
     if step.device == DeviceType.L4:
         num_gpus = step.num_devices or 1
