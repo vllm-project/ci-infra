@@ -25,7 +25,9 @@ would still drop a comment is refused. A fix never changes a
 job: every fixed step is compiled before and after, and a step whose jobs
 would differ (a key, say) is left alone and reported. When the fixed order
 would change a default key (a CPU device moved after an NVIDIA one), the old
-key is pinned with `key:`.
+key is pinned with `key:`. A step that holds a YAML anchor or alias is not
+fixed (each step is fixed on its own text, where an alias has no anchor) and
+is reported instead.
 """
 
 from __future__ import annotations
@@ -868,6 +870,7 @@ def fix_text(text: str, path: str = "<yaml>") -> Tuple[str, List[Finding]]:
     lines = text.splitlines(keepends=True)
     refused: List[Finding] = []
     flow = {line for line, _ in flow_style_nodes(text)}
+    linked = _anchor_and_alias_lines(text)
     # From the last step up, so earlier line numbers stay put.
     for index in reversed(range(len(steps))):
         raw = steps[index]
@@ -883,6 +886,18 @@ def fix_text(text: str, path: str = "<yaml>") -> Tuple[str, List[Finding]]:
         end = _step_end(lines, starts, index)
         if any(start < line <= end for line in flow):
             continue
+        # A step is fixed on its own text, where an alias has no anchor, and
+        # moving an anchor could leave a later alias before it.
+        if any(start < line <= end for line in linked):
+            refused.append(
+                Finding(
+                    path,
+                    start + 1,
+                    "L0",
+                    "the step uses a YAML anchor or alias; fix it by hand",
+                )
+            )
+            continue
         region = lines[start:end]
         fixed, why = fix_step_lines(region, doc.get("depends_on"))
         if why:
@@ -890,6 +905,15 @@ def fix_text(text: str, path: str = "<yaml>") -> Tuple[str, List[Finding]]:
             continue
         lines[start:end] = fixed
     return "".join(lines), refused
+
+
+def _anchor_and_alias_lines(text: str) -> set:
+    """The 1-based lines that hold a YAML anchor or alias."""
+    lines = set()
+    for event in yaml.parse(text):
+        if isinstance(event, yaml.AliasEvent) or getattr(event, "anchor", None):
+            lines.add(event.start_mark.line + 1)
+    return lines
 
 
 def _step_end(lines: List[str], starts: List[int], index: int) -> int:

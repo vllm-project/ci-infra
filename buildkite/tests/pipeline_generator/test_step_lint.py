@@ -493,6 +493,75 @@ def test_l4_and_its_fix_keep_every_key():
     assert _codes(fixed) == []
 
 
+def test_a_fix_that_would_change_a_job_is_refused(monkeypatch):
+    import step_lint
+
+    # A reorder that forgets to pin the keys it changes: the CPU job would
+    # lose `t` to the H100 one.
+    keys_of = step_lint._keys_of
+    monkeypatch.setattr(
+        step_lint,
+        "_keys_of",
+        lambda raw, order: keys_of(raw, sorted(order, key=step_lint._device_rank)),
+    )
+    fixed, refused = fix_text(HEADER + UNORDERED, "t.yaml")
+    assert fixed == HEADER + UNORDERED
+    assert [r.message for r in refused] == [
+        "the fix would change a job; fix it by hand"
+    ]
+
+
+def test_a_fix_that_would_not_compile_is_refused(monkeypatch):
+    import step_lint
+
+    order_fix = step_lint._order_fix
+
+    def broken_order_fix(step, raw):
+        order_fix(step, raw)
+        step.block.entries.append(step_lint.Entry("bogus", [], ["  bogus: 1\n"]))
+
+    monkeypatch.setattr(step_lint, "_order_fix", broken_order_fix)
+    fixed, refused = fix_text(HEADER + UNORDERED, "t.yaml")
+    assert fixed == HEADER + UNORDERED
+    assert len(refused) == 1
+    assert refused[0].message.startswith("the fix would not compile")
+
+
+ALIASED = """\
+- label: First
+  key: first
+  devices:
+    h100:
+  source_file_dependencies: &shared-deps
+    - vllm/
+  commands:
+    - pytest -v -s a
+- label: Second
+  key: second
+  devices:
+    h100:
+      commands:
+        - pytest -v -s b
+    mi300_1:
+      commands:
+        - pytest -v -s b
+  source_file_dependencies: *shared-deps
+"""
+
+
+def test_a_step_with_an_anchor_or_alias_is_refused_not_crashed():
+    # The fixer reads one step's text, where an alias has no anchor.
+    text = ALIASED + HOIST
+    fixed, refused = fix_text(HEADER + text, "t.yaml")
+    assert fixed == HEADER + ALIASED + HOISTED
+    assert [(r.code, r.line) for r in refused] == [("L0", 13)]
+    assert "anchor or alias" in refused[0].message
+    anchored = ALIASED.replace("*shared-deps", "&other-deps\n    - vllm/")
+    fixed, refused = fix_text(HEADER + anchored, "t.yaml")
+    assert fixed == HEADER + anchored
+    assert [r.code for r in refused] == ["L0"]
+
+
 def test_errors_are_reported_and_never_fixed():
     text = CLEAN.replace("mi300_dpx", "mi999_dpx")
     findings = lint_text(HEADER + text, "t.yaml")
