@@ -135,10 +135,16 @@ def test_listed_step_gets_a_hami_share_on_the_sharing_node(
         }
     ]
     container = pod_spec["containers"][0]
-    assert container["resources"]["limits"] == {
+    expected_limits = {
         "nvidia.com/gpu": gpus,
         "nvidia.com/gpumem": gpumem_mib,
     }
+    if device == "h100":
+        expected_limits["cpu"] = str(min(gpus * 20, 80))
+        assert container["resources"]["requests"] == {"cpu": str(gpus * 4)}
+    else:
+        assert "requests" not in container["resources"]
+    assert container["resources"]["limits"] == expected_limits
     env = {entry["name"]: entry["value"] for entry in container["env"] if "value" in entry}
     assert env["VLLM_CI_HAMI_GPUMEM_MIB"] == str(gpumem_mib)
 
@@ -270,6 +276,31 @@ def test_listed_step_without_a_gpu_count_is_a_one_gpu_share(fake_global_config):
 
     limits = plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]["limits"]
     assert limits == {"nvidia.com/gpu": 1, "nvidia.com/gpumem": 32768}
+
+
+def test_h100_hami_step_without_a_gpu_count_gets_one_gpu_cpu_sizing(
+    fake_global_config, monkeypatch
+):
+    import copy
+
+    template = copy.deepcopy(k8s_plugin.h100_plugin_template)
+    template["kubernetes"]["podSpec"]["containers"][0]["resources"]["requests"] = {
+        "memory": "16Gi"
+    }
+    monkeypatch.setattr(k8s_plugin, "h100_plugin_template", template)
+
+    step = Step(
+        label="DeepSeek v4", key="deepseek-v4-kernel-test-h100", device="h100"
+    )
+    plugin = k8s_plugin.get_k8s_plugin(step, "example/image:latest")
+
+    resources = plugin["kubernetes"]["podSpec"]["containers"][0]["resources"]
+    assert resources["requests"] == {"memory": "16Gi", "cpu": "4"}
+    assert resources["limits"] == {
+        "nvidia.com/gpu": 1,
+        "nvidia.com/gpumem": 16384,
+        "cpu": "20",
+    }
 
 
 def test_b200_quota_never_applies_to_the_same_key_on_h100(fake_global_config):

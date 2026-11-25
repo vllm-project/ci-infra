@@ -421,6 +421,13 @@ HAMI_GPUS = {
     "dsv41-nvidia-sm80-sm90-decode-8xh100": 8,
 }
 
+# Per-GPU CPU sizing for H100 HAMi pods (160 cores / 8 GPUs = 20 cores/GPU).
+# Prevents a single CPU-heavy test pod from starving co-located pods on the
+# shared node while keeping total requests low enough not to block GPU packing.
+H100_HAMI_CPU_REQUEST_PER_GPU = 4
+H100_HAMI_CPU_LIMIT_PER_GPU = 20
+H100_HAMI_MAX_CPU_LIMIT = 80
+
 
 def get_k8s_plugin(step: Step, image: str):
     if step.device == DeviceType.INTEL_GPU_K8S:
@@ -490,6 +497,14 @@ def get_k8s_plugin(step: Step, image: str):
         container.setdefault("env", []).append(
             {"name": "VLLM_CI_HAMI_GPUMEM_MIB", "value": str(quota_mib)}
         )
+        if step.device == DeviceType.H100:
+            num_gpus = step.num_devices or 1
+            container["resources"].setdefault("requests", {})["cpu"] = str(
+                num_gpus * H100_HAMI_CPU_REQUEST_PER_GPU
+            )
+            container["resources"]["limits"]["cpu"] = str(
+                min(num_gpus * H100_HAMI_CPU_LIMIT_PER_GPU, H100_HAMI_MAX_CPU_LIMIT)
+            )
 
     if step.device == DeviceType.L4:
         num_gpus = step.num_devices or 1
