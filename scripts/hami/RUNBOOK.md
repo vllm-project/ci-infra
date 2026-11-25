@@ -254,11 +254,26 @@ for a node that no longer exists. HAMi leaves `/usr/local/vgpu/` and
 
 ## What changes for monitoring
 
-Readings taken by exec into the GPU Operator's device-plugin Pod (driver, Xid
-and NVLink fabric checks) have nothing to exec into on a sharing node, so they
-go missing for it. A check that starts an unlabelled Pod on the node to verify
-it is refused there. Account for both before trusting quarantine or GPU alerts
-for that node.
+A sharing node has no GPU Operator device-plugin Pod, which the GPU reporter
+execs into for driver, Xid, NVLink fabric and network readings, and HAMi's
+device plugin refuses the quarantine return check's unlabelled Pod. Both are
+handled by vllm-dashboard (#386 and #387); set them up once per cluster, before
+trusting quarantine or GPU alerts for the node:
+
+1. Apply `scripts/gpu-reporter/gpu-driver-reader-daemonset.yaml` from
+   vllm-dashboard with its image tag set to the cluster's GPU Operator
+   device-plugin version
+   (`kubectl -n gpu-operator get ds nvidia-device-plugin-daemonset -o jsonpath='{.spec.template.spec.containers[0].image}'`).
+   It runs one Pod on each node labelled `nvidia.com/gpu.deploy.device-plugin=false`;
+   the reporter execs into it there.
+2. Apply vllm-dashboard's updated `scripts/gpu-reporter/quarantine-actuator-k8s-rbac.yaml`
+   (server-side dry run first): its admission policy admits the return check
+   that the actuator sends through HAMi's scheduler on a `gpu=on` node.
+3. Deploy the reporter and actuator from vllm-dashboard on the cluster's
+   control plane.
+
+**Done when** the node's dashboard rows carry fabric and network-probe readings
+like its peers, and a drilled quarantine on the node ends `returned`.
 
 ## Troubleshooting
 
@@ -273,7 +288,7 @@ for that node.
 | `Free memory on device cuda:0 (<free>/<quota> GiB) on startup is less than desired GPU memory utilization` | earlier tests in the process still hold memory | quota at least (quota - free) / 0.08 (step 6) |
 | `No available memory for the cache blocks` | the test sizes its engine as a fraction of the visible memory | keep the step near a whole card |
 | `NCCL split failed` with a HAMi-core OOM line | quota too tight for NCCL setup | raise the quota or keep the step whole |
-| A test fails only on a memory-release check reading near the whole card (`Current: <N> GB`) | HAMi reports NVML memory wrongly after release | keep that step on whole cards |
+| A test fails only on a memory-release check reading near the whole card (`Current: <N> GB`) | HAMi-core counts exited processes in NVML `used` (Project-HAMi/HAMi-core#432, fixed by #433) | keep that step on whole cards until a HAMi release carries the fix |
 
 ## Quick checklist
 
@@ -283,3 +298,4 @@ for that node.
 - [ ] Smoke Pod saw its 40000 MiB quota (step 4)
 - [ ] Needed DaemonSets tolerate the taint; taint `nvidia.com/gpu=hami:NoSchedule` on, then uncordoned (step 5)
 - [ ] Steps opted in with measured quotas, staging build compared with `main` (step 6)
+- [ ] Reader DaemonSet and admission policy applied; the node reports fabric and probe readings (What changes for monitoring)
