@@ -269,6 +269,75 @@ def test_bootstrap_trust_rule(pr, repo, aiter, expected, branch):
     assert out.stdout.strip() == expected
 
 
+def test_mi300_dpx_pools_render_unified_queue_with_gpu_size():
+    pools = ["mi300_dpx", "mi300_dpx_2", "mi300_dpx_4"]
+    rendered = minijinja.render_str(
+        TEMPLATE,
+        branch="main",
+        list_file_diff="",
+        mirror_hw="amdproduction",
+        run_all="0",
+        nightly="0",
+        aiter_nightly="0",
+        amd_build_steps=BUILD_STEPS,
+        ci_repo="rocm/vllm-ci",
+        steps=[
+            {
+                "label": f"DPX {pool}",
+                "agent_pool": pool,
+                "mirror_hardwares": ["amdproduction"],
+                "dind": False,
+                "commands": ["true"],
+            }
+            for pool in pools
+        ],
+    )
+    steps = yaml.safe_load(rendered)[0]["steps"]
+    by_label = {s["label"]: s for s in steps if "label" in s}
+    expected = {"mi300_dpx": "1", "mi300_dpx_2": "2", "mi300_dpx_4": "4"}
+    for pool, size in expected.items():
+        agents = by_label[f"DPX {pool}"]["agents"]
+        assert agents == {"queue": "amd_mi300_dpx", "gpu_size": size}, pool
+
+
+@pytest.mark.parametrize(
+    "pool,expected_count",
+    [("mi300_dpx", "1"), ("mi300_dpx_2", "2"), ("mi300_dpx_4", "4")],
+)
+def test_mi300_dpx_expected_gpu_count_follows_pool_without_num_gpus(pool, expected_count):
+    """Without num_gpus, the render-device check must expect the pool's partition
+    count. mi300_dpx_4 used to fall back to 1 and fail the exact-count check."""
+    rendered = minijinja.render_str(
+        TEMPLATE,
+        branch="main",
+        list_file_diff="",
+        mirror_hw="amdproduction",
+        run_all="0",
+        nightly="0",
+        aiter_nightly="0",
+        amd_build_steps=BUILD_STEPS,
+        ci_repo="rocm/vllm-ci",
+        steps=[
+            {
+                "label": f"DPX {pool}",
+                "agent_pool": pool,
+                "mirror_hardwares": ["amdproduction"],
+                "dind": False,
+                "commands": ["true"],
+            }
+        ],
+    )
+    (step,) = [
+        s
+        for s in yaml.safe_load(rendered)[0]["steps"]
+        if s.get("label") == f"DPX {pool}"
+    ]
+    assert step["env"]["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_count
+    pod_env = step["plugins"][0]["kubernetes"]["podSpecPatch"]["containers"][0]["env"]
+    values = {e["name"]: e.get("value") for e in pod_env}
+    assert values["VLLM_CI_EXPECTED_GPU_COUNT"] == expected_count
+
+
 @pytest.mark.parametrize(
     "env",
     [{"BUILDKITE_SOURCE": "trigger_job"}, {"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "1"}],

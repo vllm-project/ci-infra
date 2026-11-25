@@ -50,6 +50,18 @@
 rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
 {%- endmacro %}
 
+{% macro amd_expected_gpu_count(step) -%}
+{%- if step.no_gpu -%}
+0
+{%- elif step.num_gpus -%}
+{{ step.num_gpus }}
+{%- elif (step.agent_pool or "") in ["mi300_dpx_2", "mi300_dpx_4"] -%}
+{{ step.agent_pool | split('_') | last }}
+{%- else -%}
+1
+{%- endif -%}
+{%- endmacro %}
+
 {% macro amd_native_k8s_plugin(step) %}
         plugins:
           - kubernetes:
@@ -107,7 +119,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
                       - name: VLLM_CI_DOCKER_DISABLED
                         value: "1"
                       - name: VLLM_CI_EXPECTED_GPU_COUNT
-                        value: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+                        value: "{{ amd_expected_gpu_count(step) | trim }}"
                       {% if not amd_build_steps %}
                       - name: VLLM_CI_WORKSPACE
                         value: /vllm-workspace
@@ -372,6 +384,12 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           {% if "mi250" in step.agent_pool %}
           queue: amd_mi250
           gpu_size: "{{ step.agent_pool | split('_') | last }}"
+          {% elif step.agent_pool == "mi300_dpx" %}
+          queue: amd_mi300_dpx
+          gpu_size: "1"
+          {% elif "mi300_dpx" in step.agent_pool %}
+          queue: amd_mi300_dpx
+          gpu_size: "{{ step.agent_pool | split('_') | last }}"
           {% else %}
           queue: amd_{{ step.agent_pool }}
           {% endif %}
@@ -438,7 +456,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           VLLM_CI_RESULTS_ROOT: "/home/buildkite-agent/huggingface/amd-ci-results"
           # Keep failure diagnostics out of shared HF/NFS storage.
           VLLM_CI_DIAGNOSTICS_DIR: "artifacts/amd-gpu-diagnostics"
-          VLLM_CI_EXPECTED_GPU_COUNT: "{{ 0 if step.no_gpu else (step.num_gpus or 1) }}"
+          VLLM_CI_EXPECTED_GPU_COUNT: "{{ amd_expected_gpu_count(step) | trim }}"
           {% if container_timeout_s %}
           CONTAINER_TIMEOUT_S: "{{ container_timeout_s }}"
           {% endif %}
