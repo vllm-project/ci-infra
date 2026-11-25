@@ -47,12 +47,14 @@ import unblock_jobs
 EARLY_IMAGE_UPLOAD_ENV_VAR = "VLLM_CI_EARLY_IMAGE_UPLOAD"
 EARLY_IMAGE_PIPELINE_FILE = "pipeline-images.yaml"
 # The images that go up before the test selector answers: the CUDA image (the
-# selector's floor, so every non-docs build needs it) with its smoke test, and
-# the AMD image with the AMD base steps, which keep today's always-run rules.
-# The other images (CPU, XPU, HPU, arm64, ...) go up with the pipeline, and
-# only when a selected step depends on them.
+# selector's floor, so every non-docs build needs it) with its smoke test, the
+# AMD image with the AMD base steps, which keep today's always-run rules, and
+# the CPU image, which most builds need. The other images (Arm CPU, XPU, HPU,
+# ...) go up with the pipeline, and only when a selected step depends on them.
 EARLY_IMAGE_KEYS = (
-    frozenset({"image-build", "image-build-smoke-test", "image-build-amd"})
+    frozenset(
+        {"image-build", "image-build-smoke-test", "image-build-amd", "image-build-cpu"}
+    )
     | AMD_ALWAYS_RUN_STEP_KEYS
 )
 # Set on the bootstrap step to the key of a step that runs

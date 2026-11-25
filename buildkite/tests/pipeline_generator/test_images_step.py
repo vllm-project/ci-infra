@@ -31,7 +31,7 @@ def _steps():
             commands=["smoke"],
         ),
         # A secondary image: it goes up with the pipeline, when selected.
-        Step(label="CPU image", key="image-build-cpu", commands=["build-cpu"]),
+        Step(label="XPU image", key="image-build-xpu", commands=["build-xpu"]),
         Step(
             label="A",
             key="test-a",
@@ -40,11 +40,11 @@ def _steps():
             commands=["a"],
         ),
         Step(
-            label="CPU test",
-            key="test-cpu",
-            depends_on=["image-build-cpu"],
+            label="XPU test",
+            key="test-xpu",
+            depends_on=["image-build-xpu"],
             source_file_dependencies=["vllm/"],
-            commands=["cpu"],
+            commands=["xpu"],
         ),
     ]
 
@@ -187,14 +187,24 @@ def test_cli_images_only_runs_the_images_step(monkeypatch, tmp_path):
     assert calls == [("init", ".buildkite/pipeline.yaml"), "images"]
 
 
-# Only the CUDA and AMD images go up early
+# The CUDA, AMD and CPU images go up early; the others with the pipeline
+
+
+def test_the_cpu_image_goes_up_early(agent, tmp_path, monkeypatch):
+    steps = _steps() + [
+        Step(label="CPU image", key="image-build-cpu", commands=["cpu"])
+    ]
+    monkeypatch.setattr(pg, "read_steps_from_job_dir", lambda _: steps)
+    final = _bootstrap(tmp_path)
+    assert _uploads(agent) == [EARLY | {"image-build-cpu"}]
+    assert "image-build-cpu" not in final
 
 
 def test_secondary_images_go_up_with_the_pipeline(agent, tmp_path):
     final = _bootstrap(tmp_path)
     assert _uploads(agent) == [EARLY]
     assert not final & EARLY
-    assert {"image-build-cpu", "test-cpu", "test-a"} <= final
+    assert {"image-build-xpu", "test-xpu", "test-a"} <= final
 
 
 # Bootstrap beside an images step
@@ -208,7 +218,7 @@ def test_bootstrap_leaves_out_what_the_images_step_uploaded(
     final = _bootstrap(tmp_path)
     assert _uploads(agent) == []
     assert not final & EARLY
-    assert {"test-a", "image-build-cpu"} <= final
+    assert {"test-a", "image-build-xpu"} <= final
     # It asks only after the selector, so the selector never waits for it.
     kinds = [kind for kind, _ in agent.events]
     assert kinds.index("selector") < kinds.index("meta-exists")
@@ -279,7 +289,7 @@ def test_outside_a_job_the_images_step_is_ignored(agent, tmp_path, monkeypatch):
 
 
 def test_an_unselected_secondary_image_is_not_built(agent, tmp_path):
-    # The selector picked a CUDA test: the CPU image is left to "Run more
+    # The selector picked a CUDA test: the XPU image is left to "Run more
     # jobs" with its test, instead of going up early with the CUDA image.
     agent.config["selector_step_keys"] = frozenset(
         {"test-a", "image-build", "image-build-smoke-test"}
@@ -287,7 +297,7 @@ def test_an_unselected_secondary_image_is_not_built(agent, tmp_path):
     final = _bootstrap(tmp_path)
     assert _uploads(agent) == [EARLY]
     assert "test-a" in final
-    assert not {"image-build-cpu", "test-cpu"} & final
+    assert not {"image-build-xpu", "test-xpu"} & final
     deferred = json.load(open(tmp_path / "deferred" / "deferred_steps.json"))
     keys = {entry["step"]["key"] for entry in deferred["steps"]}
-    assert {"image-build-cpu", "test-cpu"} <= keys
+    assert {"image-build-xpu", "test-xpu"} <= keys
