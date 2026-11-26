@@ -15,7 +15,7 @@ H200s with MIG, see [`../buildkite-agent/MIG_RUNBOOK.md`](../buildkite-agent/MIG
 ```
 CI Pod with label vllm.ci/gpu-sharing=hami and limit nvidia.com/gpumem
    └─ HAMi webhook (sees only labelled Pods)   → routes the Pod to hami-scheduler
-   └─ hami-scheduler (2 replicas, binpack)     → picks a card with enough free quota
+   └─ hami-scheduler (2 replicas)              → least-busy sharing node, then a card with enough free quota
    └─ sharing node: label gpu=on, taint nvidia.com/gpu=hami:NoSchedule
         └─ HAMi device plugin (replaces the GPU Operator's on this node)
              advertises each GPU 10 times and enforces the quota in the container

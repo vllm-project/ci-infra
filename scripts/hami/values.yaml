@@ -9,7 +9,7 @@ scheduler:
     resources:
       requests: {cpu: 100m, memory: 128Mi}
   defaultSchedulerPolicy:
-    nodeSchedulerPolicy: binpack
+    nodeSchedulerPolicy: spread       # binpack fills one sharing node before the next, so its jobs slow down while added nodes sit idle
     gpuSchedulerPolicy: binpack      # default is spread; binpack keeps whole cards free for multi-GPU steps
   admissionWebhook:
     failurePolicy: Fail              # a labelled Pod is refused at creation when HAMi is down, instead of hanging Pending
