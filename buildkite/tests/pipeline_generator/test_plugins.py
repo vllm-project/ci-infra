@@ -95,6 +95,26 @@ def test_arm_cpu_plugin_has_no_gpus_and_mounts_the_agent_hf_cache(
         ("fusion-and-compile-unit-tests-2xb200", 1, 8192),
         ("kernels-fusedmoe-layer-test-2-b200s", 2, 24576),
         ("fusion-e2e-tp2-b200", 2, 90000),
+        ("kernels-fla-ops-test-b200", 1, 32768),
+        ("qwen4-exp-kernels-b200", 1, 40960),
+        ("kernels-gate-linear-cutedsl-b200", 1, 8192),
+        ("minimax-m3-model-tests-b200", 1, 49152),
+        ("mistral-large-4-unit-tests-b200", 1, 8192),
+        ("minimax-m3-mega-moe-test-b200", 1, 8192),
+        ("shardq-metadata-b200", 1, 4096),
+        ("fusion-e2e-config-sweep-b200", 1, 90000),
+        ("kernels-fp4-moe-test-b200", 1, 73728),
+        ("weight-reload-refit-nightly", 1, 90000),
+        ("spec-decode-draft-model-nightly-b200", 1, 90000),
+        ("spec-decode-speculators-mtp-nightly-b200", 1, 90000),
+        ("spec-decode-eagle-nightly-b200", 1, 90000),
+        ("spec-decode-dflash2-nightly-b200", 1, 90000),
+        ("preload-mooncake-store-2xb200", 2, 90000),
+        ("qwen3-5-unit-tests-b200", 2, 16384),
+        ("gemm-rs-ar-2xb200", 2, 12288),
+        ("multi-modal-flashinfer-autotuning", 2, 122880),
+        ("dsv41-nvidia-kernels-4xb200", 4, 16384),
+        ("glm5next-nvidia-specialized-decode-4xb200", 4, 24576),
         ("v1-attention-h100-mi300", 1, 32768),
         ("deepseek-v4-kernel-test-h100", 1, 16384),
         ("kernels-deepgemm-test-h100", 1, 20480),
@@ -206,7 +226,7 @@ def test_hami_merges_existing_pod_metadata_selector_and_tolerations(
 
 
 def test_every_listed_step_has_a_test_row():
-    assert len(k8s_plugin.HAMI_GPUMEM_MIB) == 10
+    assert len(k8s_plugin.HAMI_GPUMEM_MIB) == 30
     assert len(k8s_plugin.HAMI_GPUMEM_MIB_H100) == 13
 
 
