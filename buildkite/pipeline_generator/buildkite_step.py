@@ -827,7 +827,9 @@ def fnrec_collect_group(groups: "List[BuildkiteGroupStep]") -> "BuildkiteGroupSt
 
 def _kernrec_backend(step: "BuildkiteCommandStep") -> str:
     """The backend the kernel recorder prelude exports on this rendered step."""
-    text = " ".join(list(step.commands or []) + [str(v) for v in (step.env or {}).values()])
+    text = " ".join(
+        list(step.commands or []) + [str(v) for v in (step.env or {}).values()]
+    )
     return "rocm" if "KERNREC_BACKEND=rocm" in text else "cuda"
 
 
@@ -927,7 +929,11 @@ def _collect_step(
             # since #685, and the step passed.
             for backend in ("cuda", "rocm"):
                 env[f"KERNREC_EXPECTED_JOBS_{backend.upper()}"] = str(
-                    sum(s.parallelism or 1 for s in armed if _kernrec_backend(s) == backend)
+                    sum(
+                        s.parallelism or 1
+                        for s in armed
+                        if _kernrec_backend(s) == backend
+                    )
                 )
         env["CI_SELECTOR_MIN_DELIVERED_SHARE"] = str(COLLECT_MIN_DELIVERED_SHARE)
     branch = os.getenv("VLLM_CI_BRANCH") or "main"
@@ -1780,7 +1786,9 @@ def convert_group_step_to_buildkite_step(
     return buildkite_group_steps
 
 
-def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
+def _step_should_run(
+    step: Step, list_file_diff: List[str], *, honor_includes: bool = True
+) -> bool:
     global_config = get_global_config()
     if global_config["aiter_nightly"] == "1":
         # Scheduled: nobody would unblock its steps, so NOAUTO does not apply.
@@ -1789,6 +1797,8 @@ def _step_should_run(step: Step, list_file_diff: List[str]) -> bool:
         return False
     if global_config["only_step_keys"] is not None:
         return step.key in global_config["only_step_keys"]
+    if honor_includes and step.key in (global_config.get("include_step_keys") or ()):
+        return True
     # The test selector's choice (selector_gate.py), prerequisites included.
     # Unlike only_step_keys it removes nothing: the rest are deferred, so
     # "Run more jobs" still offers them.

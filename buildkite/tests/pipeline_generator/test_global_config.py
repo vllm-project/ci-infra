@@ -7,7 +7,7 @@ import pytest
 from buildkite.pipeline_generator.global_config import (
     ONLY_STEP_KEYS_ENV_VAR,
     _matches_run_all_patterns,
-    _parse_only_step_keys,
+    _parse_step_keys,
     _parse_platform,
     _validate_pipeline_config,
     init_global_config,
@@ -92,8 +92,8 @@ def test_init_global_config_fork_branch(
         # Should succeed
 
 
-def test_parse_only_step_keys():
-    assert _parse_only_step_keys(
+def test_parse_step_keys():
+    assert _parse_step_keys(
         '["basic-models-test-other-cpu", "image-build-cpu"]'
     ) == frozenset(
         {
@@ -112,9 +112,9 @@ def test_parse_only_step_keys():
         ('["same", "same"]', "contains duplicate step keys"),
     ],
 )
-def test_parse_only_step_keys_rejects_invalid_values(value, message):
+def test_parse_step_keys_rejects_invalid_values(value, message):
     with pytest.raises(ValueError, match=message):
-        _parse_only_step_keys(value)
+        _parse_step_keys(value)
 
 
 @patch(
@@ -327,3 +327,10 @@ def test_cuda_only_run_all_is_set_only_by_cuda_only_files(
 ):
     config = _init_with(CUDA_ONLY_CONFIG + key, diff, labels)
     assert (config["run_all"], config["cuda_only_run_all"]) == (True, cuda_only_run_all)
+
+
+def test_parse_step_keys_names_the_include_variable():
+    from buildkite.pipeline_generator.global_config import INCLUDE_STEP_KEYS_ENV_VAR
+
+    with pytest.raises(ValueError, match=INCLUDE_STEP_KEYS_ENV_VAR):
+        _parse_step_keys("[]", INCLUDE_STEP_KEYS_ENV_VAR)

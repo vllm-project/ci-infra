@@ -125,6 +125,25 @@ class PipelineGenerator:
 
     def generate(self):
         global_config = get_global_config()
+        included = global_config.get("include_step_keys")
+        if included and global_config["only_step_keys"] is not None:
+            raise ValueError(
+                "VLLM_CI_INCLUDE_STEP_KEYS cannot be combined with VLLM_CI_ONLY_STEP_KEYS."
+            )
+
+        platform = global_config["platform"]
+        steps = []
+        for job_dir in global_config["job_dirs"]:
+            steps.extend(read_steps_from_job_dir(job_dir))
+        try:
+            _, included = select_steps_and_dependencies(steps, included, platform)
+        except ValueError as error:
+            _annotate_best_effort(
+                f"{error} Ignoring requested extra jobs; running normal CI.",
+                style="warning",
+            )
+            included = None
+        global_config["include_step_keys"] = included
 
         # Skip if changes are doc-only (unless RUN_ALL is set)
         if _skips_ci_as_docs_only(global_config):
@@ -143,7 +162,6 @@ class PipelineGenerator:
                 f.write("true")
             return
 
-        platform = global_config["platform"]
         aiter_nightly = global_config["aiter_nightly"] == "1"
         if aiter_nightly and platform == Platform.CUDA:
             # TORCH_NIGHTLY also sets the platform to cuda (global_config.py).
@@ -165,9 +183,6 @@ class PipelineGenerator:
             )
             _annotate_best_effort(f"Only {platform.value} jobs run: {reason}.")
 
-        steps = []
-        for job_dir in global_config["job_dirs"]:
-            steps.extend(read_steps_from_job_dir(job_dir))
         if aiter_nightly:
             nightly_keys = aiter_nightly_step_keys(steps)
             # A rerun (VLLM_CI_ONLY_STEP_KEYS) runs only the jobs it names.
@@ -223,6 +238,11 @@ class PipelineGenerator:
                 )
             else:
                 record["scheduled_keys"] = record["legacy_keys"]
+            if included:
+                record["included_keys"] = sorted(included)
+                record["scheduled_keys"] = sorted(
+                    set(record["scheduled_keys"]) | included
+                )
             selector_gate.write_and_upload(
                 record, os.path.dirname(self.output_file_path)
             )
@@ -314,6 +334,7 @@ def _skips_ci_as_docs_only(global_config: dict) -> bool:
         global_config["docs_only_disable"] == "0"
         and not global_config["run_all"]
         and global_config["only_step_keys"] is None
+        and not global_config.get("include_step_keys")
         and global_config["aiter_nightly"] != "1"
         and is_docs_only_change(global_config["list_file_diff"])
     )
@@ -536,13 +557,19 @@ def write_deferred_steps(
 
 def _legacy_keys(steps: List[Step], diff: List[str]) -> List[str]:
     """The keys today's rules run, AMD mirrors included, decided the way
-    convert_group_step_to_buildkite_step decides them."""
+    convert_group_step_to_buildkite_step decides them.
+
+    Steps a `/ci run --include` request added are the requester's choice,
+    not today's rules: they stay out of this baseline, which the selector is
+    compared with, and are recorded as `included_keys` instead."""
     keys = []
     for step in steps:
-        if _step_should_run(step, diff):
+        if _step_should_run(step, diff, honor_includes=False):
             keys.append(step.key)
         amd = (step.mirror or {}).get("amd")
-        if amd and _step_should_run(_get_amd_mirror_effective_step(step, amd), diff):
+        if amd and _step_should_run(
+            _get_amd_mirror_effective_step(step, amd), diff, honor_includes=False
+        ):
             keys.append(f"amd-{step.key}")
     return keys
 
