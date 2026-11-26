@@ -506,6 +506,10 @@ def get_k8s_plugin(step: Step, image: str):
         # HAMi's webhook only handles Pods carrying this label.
         metadata = plugin["kubernetes"].setdefault("metadata", {})
         metadata.setdefault("labels", {})["vllm.ci/gpu-sharing"] = "hami"
+        # With several sharing nodes, use the least-loaded node, then pack its cards.
+        annotations = metadata.setdefault("annotations", {})
+        annotations["hami.io/node-scheduler-policy"] = "spread"
+        annotations["hami.io/gpu-scheduler-policy"] = "binpack"
         pod_spec = plugin["kubernetes"]["podSpec"]
         pod_spec.setdefault("nodeSelector", {})["gpu"] = "on"
         # The GPU Operator and HAMi daemonsets already tolerate this taint key.

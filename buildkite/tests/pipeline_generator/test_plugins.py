@@ -143,7 +143,13 @@ def test_listed_step_gets_a_hami_share_on_the_sharing_node(
     plugin = k8s_plugin.get_k8s_plugin(step, "example/image:latest")
 
     k8s = plugin["kubernetes"]
-    assert k8s["metadata"] == {"labels": {"vllm.ci/gpu-sharing": "hami"}}
+    assert k8s["metadata"] == {
+        "labels": {"vllm.ci/gpu-sharing": "hami"},
+        "annotations": {
+            "hami.io/node-scheduler-policy": "spread",
+            "hami.io/gpu-scheduler-policy": "binpack",
+        },
+    }
     pod_spec = k8s["podSpec"]
     assert pod_spec["nodeSelector"] == {"gpu": "on"}
     assert pod_spec["tolerations"] == [
@@ -209,7 +215,11 @@ def test_hami_merges_existing_pod_metadata_selector_and_tolerations(
     )
 
     assert plugin["kubernetes"]["metadata"] == {
-        "annotations": {"existing": "keep"},
+        "annotations": {
+            "existing": "keep",
+            "hami.io/node-scheduler-policy": "spread",
+            "hami.io/gpu-scheduler-policy": "binpack",
+        },
         "labels": {"existing-label": "keep", "vllm.ci/gpu-sharing": "hami"},
     }
     pod_spec = plugin["kubernetes"]["podSpec"]
