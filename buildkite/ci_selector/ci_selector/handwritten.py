@@ -485,6 +485,9 @@ KNOWN_STEP_FIELDS = {
     # Runtime sharding: splits the step's own tests across jobs at build time
     # without changing which tests run, so selection needs nothing from it.
     "automatic_shard",
+    # Narrows amd_run_all for one AMD step. The gate leaves AMD steps to the
+    # generator's rules, so selection needs nothing from it.
+    "amd_run_all_exclude_patterns",
     # Buildkite built-in, absent from the generator's Step model, so it is
     # dropped before reaching a command. Governs ordering after a failure.
     "allow_dependency_failure",

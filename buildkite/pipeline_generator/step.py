@@ -36,6 +36,10 @@ class Step(BaseModel):
     # Plan this step's tests into shards from main's timings (runtime_shard.py).
     # Unset follows the pipeline config's automatic_shard_default.
     automatic_shard: Optional[bool] = None
+    # Added to the pipeline's amd_run_all_exclude_patterns for this step (or
+    # its AMD mirror): files that should run it only as its
+    # source_file_dependencies say, e.g. "csrc/".
+    amd_run_all_exclude_patterns: Optional[List[str]] = None
     # Set by read_steps_from_job_dir: the step's yaml file, and whether the step
     # lists that file itself.
     source_file: Optional[str] = Field(default=None, exclude=True)
