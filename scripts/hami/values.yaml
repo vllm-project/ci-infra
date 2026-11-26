@@ -1,0 +1,36 @@
+# HAMi Helm chart 2.11.0 values for a CI GPU cluster that runs the NVIDIA GPU
+# Operator. Tested on the B200 and H100 Kubernetes clusters. See RUNBOOK.md.
+scheduler:
+  replicas: 2                        # leader election is on by default; with one replica, quota Pods created while it is down stay Pending for good
+  kubeScheduler:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}  # Burstable QoS so node pressure does not evict the scheduler first
+  extender:
+    resources:
+      requests: {cpu: 100m, memory: 128Mi}
+  defaultSchedulerPolicy:
+    nodeSchedulerPolicy: spread       # binpack fills one sharing node before the next, so its jobs slow down while added nodes sit idle
+    gpuSchedulerPolicy: binpack      # default is spread; binpack keeps whole cards free for multi-GPU steps
+  admissionWebhook:
+    failurePolicy: Fail              # a labelled Pod is refused at creation when HAMi is down, instead of hanging Pending
+    objectSelector:
+      matchLabels:
+        vllm.ci/gpu-sharing: hami    # opt-in: Pods without this label never reach the webhook
+devicePlugin:
+  nvidiaNodeSelector:
+    gpu: "on"                        # HAMi's device plugin runs only on nodes labelled gpu=on
+  deviceListStrategy: cdi-annotations  # the default envvar cannot start Pods under the GPU Operator's CDI-mode nvidia runtime class
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+  monitor:
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+  tolerations:                       # replaces the chart's list, so it repeats its nvidia.com/gpu entry
+    - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+    - {key: vllm.ci/quarantine, operator: Exists, effect: NoSchedule}  # a plugin Pod restarted during a quarantine can return
+  # Uncomment when the host's /usr/bin/nvidia-ctk is older than the GPU
+  # Operator's toolkit (RUNBOOK.md step 2 shows the check).
+  # nvidiaHookPath: /usr/local/nvidia/toolkit/nvidia-cdi-hook
+devices:
+  nvidia:
+    runtimeClassName: nvidia         # created by the GPU Operator; CI Pods already use it
