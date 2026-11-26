@@ -386,6 +386,26 @@ HAMI_GPUMEM_MIB = {
     "fusion-and-compile-unit-tests-2xb200": 8192,
     "kernels-fusedmoe-layer-test-2-b200s": 24576,
     "fusion-e2e-tp2-b200": 90000,
+    "kernels-fla-ops-test-b200": 32768,
+    "qwen4-exp-kernels-b200": 40960,
+    "kernels-gate-linear-cutedsl-b200": 8192,
+    "minimax-m3-model-tests-b200": 49152,
+    "mistral-large-4-unit-tests-b200": 8192,
+    "minimax-m3-mega-moe-test-b200": 8192,
+    "shardq-metadata-b200": 4096,
+    "fusion-e2e-config-sweep-b200": 90000,
+    "kernels-fp4-moe-test-b200": 73728,
+    "weight-reload-refit-nightly": 90000,
+    "spec-decode-draft-model-nightly-b200": 90000,
+    "spec-decode-speculators-mtp-nightly-b200": 90000,
+    "spec-decode-eagle-nightly-b200": 90000,
+    "spec-decode-dflash2-nightly-b200": 90000,
+    "preload-mooncake-store-2xb200": 90000,
+    "qwen3-5-unit-tests-b200": 16384,
+    "gemm-rs-ar-2xb200": 12288,
+    "multi-modal-flashinfer-autotuning": 122880,
+    "dsv41-nvidia-kernels-4xb200": 16384,
+    "glm5next-nvidia-specialized-decode-4xb200": 24576,
 }
 
 # The same for H100 (80 GB cards). A quota is measured on one device type, so
@@ -419,6 +439,12 @@ HAMI_GPUS = {
     "fusion-e2e-tp2-quick-h100": 2,
     "fault-tolerance-e2e-4xh100": 4,
     "dsv41-nvidia-sm80-sm90-decode-8xh100": 8,
+    "preload-mooncake-store-2xb200": 2,
+    "qwen3-5-unit-tests-b200": 2,
+    "gemm-rs-ar-2xb200": 2,
+    "multi-modal-flashinfer-autotuning": 2,
+    "dsv41-nvidia-kernels-4xb200": 4,
+    "glm5next-nvidia-specialized-decode-4xb200": 4,
 }
 
 # Per-GPU CPU sizing for H100 HAMi pods (160 cores / 8 GPUs = 20 cores/GPU).
