@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import sys
 from pathlib import Path
 
@@ -105,6 +106,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The cycle collector is off for the run. What a run builds, chiefly the
+    # import graph and the coverage table, holds no cycles, so collecting only
+    # rescans it: a whole run's collections freed a few thousand objects. The
+    # caller's setting comes back after.
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        return _main(argv)
+    finally:
+        if enabled:
+            gc.enable()
+
+
+def _main(argv: list[str] | None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     for name, default in _DEFAULTS.items():
