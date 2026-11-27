@@ -406,6 +406,16 @@ HAMI_GPUMEM_MIB = {
     "multi-modal-flashinfer-autotuning": 122880,
     "dsv41-nvidia-kernels-4xb200": 16384,
     "glm5next-nvidia-specialized-decode-4xb200": 24576,
+    # Blocked by the HAMi v2.11.0 NVML stale-memory bug (these steps poll GPU
+    # memory after stopping a server). Needs v2.11.1 on the cluster before any
+    # build from this branch.
+    "quantized-moe-test-b200": 90000,
+    "batch-invariance-b200": 90000,
+    "lm-eval-humming-b200-act": 90000,
+    "lm-eval-humming-b200-default": 90000,
+    "lm-eval-small-models-1xb200": 90000,
+    "weight-reload-refit": 90000,
+    "weight-reload-refit-2gpu": 90000,
 }
 
 # The same for H100 (80 GB cards). A quota is measured on one device type, so
@@ -424,6 +434,8 @@ HAMI_GPUMEM_MIB_H100 = {
     "fusion-e2e-tp2-quick-h100": 40000,
     "fault-tolerance-e2e-4xh100": 40000,
     "dsv41-nvidia-sm80-sm90-decode-8xh100": 12288,
+    # Same HAMi NVML stale-memory block as the B200 steps above.
+    "lm-eval-dspark-watermark-2xh100": 40000,
 }
 
 # Steps whose quota was staged on more than one GPU, with that GPU count. Every
@@ -445,6 +457,8 @@ HAMI_GPUS = {
     "multi-modal-flashinfer-autotuning": 2,
     "dsv41-nvidia-kernels-4xb200": 4,
     "glm5next-nvidia-specialized-decode-4xb200": 4,
+    "weight-reload-refit-2gpu": 2,
+    "lm-eval-dspark-watermark-2xh100": 2,
 }
 
 # Per-GPU CPU sizing for H100 HAMi pods (160 cores / 8 GPUs = 20 cores/GPU).

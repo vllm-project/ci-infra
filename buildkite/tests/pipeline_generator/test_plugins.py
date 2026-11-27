@@ -115,6 +115,13 @@ def test_arm_cpu_plugin_has_no_gpus_and_mounts_the_agent_hf_cache(
         ("multi-modal-flashinfer-autotuning", 2, 122880),
         ("dsv41-nvidia-kernels-4xb200", 4, 16384),
         ("glm5next-nvidia-specialized-decode-4xb200", 4, 24576),
+        ("quantized-moe-test-b200", 1, 90000),
+        ("batch-invariance-b200", 1, 90000),
+        ("lm-eval-humming-b200-act", 1, 90000),
+        ("lm-eval-humming-b200-default", 1, 90000),
+        ("lm-eval-small-models-1xb200", 1, 90000),
+        ("weight-reload-refit", 1, 90000),
+        ("weight-reload-refit-2gpu", 2, 90000),
         ("v1-attention-h100-mi300", 1, 32768),
         ("deepseek-v4-kernel-test-h100", 1, 16384),
         ("kernels-deepgemm-test-h100", 1, 20480),
@@ -128,6 +135,7 @@ def test_arm_cpu_plugin_has_no_gpus_and_mounts_the_agent_hf_cache(
         ("fusion-e2e-tp2-quick-h100", 2, 40000),
         ("fault-tolerance-e2e-4xh100", 4, 40000),
         ("dsv41-nvidia-sm80-sm90-decode-8xh100", 8, 12288),
+        ("lm-eval-dspark-watermark-2xh100", 2, 40000),
     ],
 )
 def test_listed_step_gets_a_hami_share_on_the_sharing_node(
@@ -236,8 +244,8 @@ def test_hami_merges_existing_pod_metadata_selector_and_tolerations(
 
 
 def test_every_listed_step_has_a_test_row():
-    assert len(k8s_plugin.HAMI_GPUMEM_MIB) == 30
-    assert len(k8s_plugin.HAMI_GPUMEM_MIB_H100) == 13
+    assert len(k8s_plugin.HAMI_GPUMEM_MIB) == 37
+    assert len(k8s_plugin.HAMI_GPUMEM_MIB_H100) == 14
 
 
 def test_unlisted_b200_step_keeps_a_whole_card_anywhere(fake_global_config):
