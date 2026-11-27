@@ -718,9 +718,10 @@ def test_amd_label_tags_are_unchanged():
     def derived(value):
         if not value.startswith("mi"):
             return ""
-        if value.endswith("_dpx"):
-            return f"{value.removesuffix('_dpx').upper()} DPX"
-        return value.split("_", 1)[0].upper()
+        parts = value.split("_")
+        if "dpx" in parts:
+            return f"{parts[0].upper()} DPX"
+        return parts[0].upper()
 
     for name in list(amd.AMD_DEVICE_CONFIGS) + ["amd_cpu", "h100", "zen5"]:
         assert amd.get_amd_label_tag(name) == derived(name), name

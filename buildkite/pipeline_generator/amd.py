@@ -196,10 +196,16 @@ def _pool(queue, gpus, arch, family, **kwargs) -> AmdDeviceConfig:
     return AmdDeviceConfig(queue, gpus, arch, family.upper(), family, **kwargs)
 
 
-def _dpx(queue, arch, family) -> AmdDeviceConfig:
-    """A DRA pool of one partitioned GPU: tagged "MI300 DPX", keyed "mi300-dpx"."""
+def _dpx(queue, arch, family, gpus=1, **kwargs) -> AmdDeviceConfig:
+    """A DRA pool of partitioned GPUs: tagged "MI300 DPX", keyed "mi300-dpx"."""
     return AmdDeviceConfig(
-        queue, 1, arch, f"{family.upper()} DPX", f"{family}-dpx", uses_dra=True
+        queue,
+        gpus,
+        arch,
+        f"{family.upper()} DPX",
+        f"{family}-dpx",
+        uses_dra=True,
+        **kwargs,
     )
 
 
@@ -222,7 +228,15 @@ AMD_DEVICE_CONFIGS = {
     DeviceType.AMD_MI300_2.value: _pool(AgentQueue.AMD_MI300_2, 2, "gfx942", "mi300"),
     DeviceType.AMD_MI300_4.value: _pool(AgentQueue.AMD_MI300_4, 4, "gfx942", "mi300"),
     DeviceType.AMD_MI300_8.value: _pool(AgentQueue.AMD_MI300_8, 8, "gfx942", "mi300"),
-    DeviceType.AMD_MI300_DPX.value: _dpx(AgentQueue.AMD_MI300_DPX, "gfx942", "mi300"),
+    DeviceType.AMD_MI300_DPX.value: _dpx(
+        AgentQueue.AMD_MI300_DPX, "gfx942", "mi300", gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI300_DPX_2.value: _dpx(
+        AgentQueue.AMD_MI300_DPX, "gfx942", "mi300", gpus=2, gpu_size_tag=True
+    ),
+    DeviceType.AMD_MI300_DPX_4.value: _dpx(
+        AgentQueue.AMD_MI300_DPX, "gfx942", "mi300", gpus=4, gpu_size_tag=True
+    ),
     DeviceType.AMD_MI325_1.value: _pool(AgentQueue.AMD_MI325_1, 1, "gfx942", "mi325"),
     DeviceType.AMD_MI325_2.value: _pool(AgentQueue.AMD_MI325_2, 2, "gfx942", "mi325"),
     DeviceType.AMD_MI325_4.value: _pool(AgentQueue.AMD_MI325_4, 4, "gfx942", "mi325"),
