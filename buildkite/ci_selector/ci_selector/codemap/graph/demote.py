@@ -26,6 +26,7 @@ from ...handwritten import PLATFORM_GUARD_LITERALS
 from ..repo import ModuleIndex, is_test_basename
 from .factories import _leaf_consumer, _leaf_edges, _path_leaf_edges
 from .imports import LITERAL_MIN_LEN, ImportGraph, _from_base, _package_of
+from .walk import NodeVisitor, iter_child_nodes, walk
 
 CONFIG_DIR = "vllm/config/"
 
@@ -176,7 +177,7 @@ def _flag_literals(tree: ast.AST, helpers: dict[str, set[str]]) -> dict[str, set
     attribute is refused and the edge stays broad."""
     binds: Counter[str] = Counter()
     values: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
+    for node in walk(tree):
         if (
             isinstance(node, ast.Attribute)
             and isinstance(node.ctx, ast.Store)
@@ -202,7 +203,7 @@ def _flag_literals(tree: ast.AST, helpers: dict[str, set[str]]) -> dict[str, set
 def _own_scope_nodes(func: ast.AST):
     """The nodes in this function's own scope, not any nested one. Names bound
     inside a nested body are separate and must not leak out."""
-    stack = list(ast.iter_child_nodes(func))
+    stack = list(iter_child_nodes(func))
     while stack:
         n = stack.pop()
         yield n
@@ -210,7 +211,7 @@ def _own_scope_nodes(func: ast.AST):
             n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
         ):
             continue
-        stack.extend(ast.iter_child_nodes(n))
+        stack.extend(iter_child_nodes(n))
 
 
 def _local_flag_literals(
@@ -286,7 +287,7 @@ def _dotted_files(dotted: str, index: ModuleIndex) -> set[str]:
     return out
 
 
-class _Collector(ast.NodeVisitor):
+class _Collector(NodeVisitor):
     """Records, per tracked symbol, whether every value-position use is
     guarded and which literals gate it; discovers guarded LOCAL imports (the
     runner's `elif method == "ngram": from ... import NgramProposer`) and the

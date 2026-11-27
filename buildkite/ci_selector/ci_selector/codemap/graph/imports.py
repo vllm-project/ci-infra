@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ...handwritten import PACKAGE_ROOTS
 from ..repo import SKIP_DIRS, ModuleIndex
+from .walk import NodeVisitor, walk
 
 DYNAMIC_IMPORT_FUNCS = {"import_module", "__import__", "resolve_obj_by_qualname"}
 LAZY_LOADER_CLASS = "LazyLoader"
@@ -187,7 +188,7 @@ def _parse_file(repo: Path, file: str, index: ModuleIndex, graph: ImportGraph) -
     module = index.file_to_module.get(file, "")
     # One walk shared by the three scans below, each of which used to walk the
     # whole tree itself: the walks were most of a graph build's time.
-    nodes = list(ast.walk(tree))
+    nodes = list(walk(tree))
     consts = _module_string_consts(nodes)
     consts |= _private_param_consts(consts, nodes)
     options = _parametrize_options(nodes)
@@ -359,7 +360,7 @@ def _private_param_consts(
     }
 
 
-class _FileVisitor(ast.NodeVisitor):
+class _FileVisitor(NodeVisitor):
     """Import walk that tracks whether an import actually runs.
 
     `if TYPE_CHECKING:` is skipped, since those never execute. An import inside
