@@ -987,6 +987,8 @@ def shard_coverage_check_step(
             if not packed:
                 continue
             plan = runtime_shard.unpack(packed)
+            if plan.get("single_job") or plan.get("shards", 0) < 2:
+                continue
             steps[step.key] = [
                 {
                     "position": planned["position"],
@@ -1003,11 +1005,15 @@ def shard_coverage_check_step(
             ]
     if not steps:
         return None
-    source_path = os.path.join(
-        os.path.dirname(__file__), "runtime_shard_coverage.py"
-    )
-    with open(source_path) as f:
+    base_dir = os.path.dirname(__file__)
+    with open(os.path.join(base_dir, "runtime_shard_coverage.py")) as f:
         coverage_source = f.read()
+    with open(os.path.join(base_dir, "pytest_retry.py")) as f:
+        retry_source = f.read()
+    bundle = {
+        "pytest_retry.py": retry_source,
+        "runtime_shard_coverage.py": coverage_source,
+    }
     on_main = get_global_config()["branch"] == "main"
     queue = AgentQueue.SMALL_CPU_POSTMERGE if on_main else AgentQueue.SMALL_CPU_PREMERGE
     retry = ensure_infra_failure_retry(None)
@@ -1016,13 +1022,17 @@ def shard_coverage_check_step(
         key="runtime-shard-coverage-check",
         env={
             "RUNTIME_SHARD_COVERAGE_STEPS": json.dumps(steps),
-            "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(coverage_source),
+            "RUNTIME_SHARD_COVERAGE_SCRIPT": runtime_shard.pack(bundle),
         },
         agents={"queue": queue.value},
         commands=[
-            'python3 -I -c \'import base64,json,os,zlib;'
-            'exec(json.loads(zlib.decompress(base64.b64decode('
-            'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"]))))\'',
+            "python3 -I -c 'import base64,json,os,sys,tempfile,zlib;"
+            'b=json.loads(zlib.decompress(base64.b64decode('
+            'os.environ["RUNTIME_SHARD_COVERAGE_SCRIPT"])));'
+            "_d=tempfile.TemporaryDirectory();"
+            '[open(os.path.join(_d.name,k),"w").write(v) for k,v in b.items()];'
+            "sys.path.insert(0,_d.name);"
+            'exec(compile(b["runtime_shard_coverage.py"],"runtime_shard_coverage.py","exec"),globals())\'',
         ],
         depends_on=list(steps),
         allow_dependency_failure=True,
@@ -1386,20 +1396,38 @@ def _shard_at_generation(
     if mode == "shadow":
         runtime_shard.annotate(step_key, f"(shadow) {text}", "info")
         return None
+    enable_retry = runtime_shard.test_retry_enabled()
     fallback = bool(result and result.get("fallbackPlan"))
     if (result is None or (fallback and result["shards"] < 2)) and _shard_by_default():
         # One row in the one-job list, not an annotation per step.
         ONE_JOB_REASONS[step_key] = text
-        return None
-    if (
+        if not enable_retry:
+            return None
+    elif (
         result is None
         or fallback
         or result["overBudget"]
         or runtime_shard.setup_too_long(result)
     ):
         runtime_shard.annotate(step_key, text, "warning")
-    if result is None or result["shards"] < 2:
+
+    if result is not None and result["shards"] >= 2:
+        plan = {
+            "shards": result["shards"],
+            "commands": result["commands"],
+            "key": step_key,
+        }
+        shards = result["shards"]
+    elif enable_retry:
+        plan = runtime_shard.single_job_plan(
+            step_key, step.commands or [], step.working_dir, os.getcwd()
+        )
+        if plan is None:
+            return None
+        shards = 1
+    else:
         return None
+
     env = dict(env or {})
     # pytest-shard, installed in the image for fixed shards, would print its
     # own "Running N items in this shard" over this plan's selection.
@@ -1407,12 +1435,12 @@ def _shard_at_generation(
         f"{env.get('PYTEST_ADDOPTS', '')} -p no:pytest-shard"
         f" -p {runtime_shard.PLUGIN_MODULE}"
     ).strip()
-    plan = {"shards": result["shards"], "commands": result["commands"], "key": step_key}
     env[runtime_shard.PLAN_ENV] = runtime_shard.pack(plan)
     env[runtime_shard.PLUGIN_ENV] = runtime_shard.plugin_source()
+    env[runtime_shard.RETRY_HELPER_ENV] = runtime_shard.retry_helper_source()
     commands = list(commands)
     count = len(step.commands or [])
-    for planned in result["commands"]:
+    for planned in plan["commands"]:
         # The job's line for a step command follows its "Command (i/n)" header.
         header = f"+++ :test_tube: Command ({planned['position'] + 1}/{count}):"
         at = next(
@@ -1425,10 +1453,18 @@ def _shard_at_generation(
         )
         if at is not None and at + 1 < len(commands):
             commands[at + 1] = runtime_shard.guard(
-                commands[at + 1], planned, result["shards"]
+                commands[at + 1],
+                planned,
+                shards,
+                step_key=step_key,
+                enable_retry=enable_retry,
             )
     checkout = _fnrec_checkout_path(step, setup_profile)
-    return result["shards"], runtime_shard.shard_job_setup(checkout) + commands, env
+    return (
+        shards,
+        runtime_shard.shard_job_setup(checkout, enable_retry=enable_retry) + commands,
+        env,
+    )
 
 
 def convert_group_step_to_buildkite_step(
@@ -1490,8 +1526,10 @@ def convert_group_step_to_buildkite_step(
                     else None
                 )
                 if amd_sharded:
-                    amd_parallelism, amd_commands, amd_env = amd_sharded
-                    amd_label = f"{amd_label} Shard %N/%t"
+                    sharded_count, amd_commands, amd_env = amd_sharded
+                    if sharded_count > 1:
+                        amd_parallelism = sharded_count
+                        amd_label = f"{amd_label} Shard %N/%t"
                 amd_step = _create_amd_step(
                     label=amd_label,
                     key=step_key,
@@ -1633,16 +1671,26 @@ def convert_group_step_to_buildkite_step(
             )
             if sharded:
                 (
-                    buildkite_step.parallelism,
+                    sharded_count,
                     buildkite_step.commands,
                     buildkite_step.env,
                 ) = sharded
-                # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
-                buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
+                if sharded_count > 1:
+                    buildkite_step.parallelism = sharded_count
+                    # Buildkite fills in %N (from 1) and %t (the shard count): "... Shard 2/4".
+                    buildkite_step.label = f"{buildkite_step.label} Shard %N/%t"
                 buildkite_step.artifact_paths = _merge_artifact_paths(
                     buildkite_step.artifact_paths,
                     [runtime_shard.COVERAGE_ARTIFACT_PATH],
                 )
+                if runtime_shard.test_retry_enabled() and buildkite_step.plugins:
+                    for plugin_entry in buildkite_step.plugins:
+                        if isinstance(plugin_entry, dict):
+                            for plugin_name, plugin_cfg in plugin_entry.items():
+                                if plugin_name.startswith("docker#") and isinstance(
+                                    plugin_cfg, dict
+                                ):
+                                    plugin_cfg["mount_buildkite_agent"] = True
             if include_step:
                 group_steps_list.append(buildkite_step)
 
@@ -1724,12 +1772,14 @@ def convert_group_step_to_buildkite_step(
                     else None
                 )
                 if amd_sharded:
-                    amd_parallelism, amd_commands, extra_env = amd_sharded
-                    # Buildkite fills in %N (from 1) and %t (the shard count).
-                    amd_label = (
-                        f"{amd_label or get_amd_label(step.label, amd['device'])}"
-                        " Shard %N/%t"
-                    )
+                    sharded_count, amd_commands, extra_env = amd_sharded
+                    if sharded_count > 1:
+                        amd_parallelism = sharded_count
+                        # Buildkite fills in %N (from 1) and %t (the shard count).
+                        amd_label = (
+                            f"{amd_label or get_amd_label(step.label, amd['device'])}"
+                            " Shard %N/%t"
+                        )
                 amd_step = _create_amd_step(
                     label=step.label,
                     key=f"amd-{step_key}",

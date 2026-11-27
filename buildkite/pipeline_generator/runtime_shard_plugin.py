@@ -103,6 +103,11 @@ def _install():
                 timeout=60,
             ).stdout.strip()
             shutil.copy(os.path.abspath(__file__), site)
+            retry_helper = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "pytest_retry.py"
+            )
+            if os.path.isfile(retry_helper):
+                shutil.copy(retry_helper, site)
         except Exception as error:
             print(
                 f"runtime-shard: couldn't install the plugin for {python} ({error});"
@@ -116,6 +121,9 @@ if __name__ == "__main__":
     sys.exit(0)
 
 import pytest  # noqa: E402  (the install above runs without pytest)
+import pytest_retry  # noqa: E402
+
+RETRY_IN_ENV = pytest_retry.RETRY_IN_ENV
 
 
 def pytest_configure(config):
@@ -127,6 +135,7 @@ def pytest_configure(config):
         config.pluginmanager.register(_Inventory(inventory), "runtime_shard_inventory")
         return
     packed = os.environ.pop(PLAN_ENV, None)
+    retry_in = os.environ.pop(RETRY_IN_ENV, None)
     if not packed:
         return
     plan = json.loads(zlib.decompress(base64.b64decode(packed)))
@@ -142,7 +151,14 @@ def pytest_configure(config):
     )
     shard = int(os.environ.get("BUILDKITE_PARALLEL_JOB", "0"))
     config.pluginmanager.register(
-        ShardPlugin(command, shard, plan["shards"], plan.get("key")),
+        ShardPlugin(
+            command,
+            shard,
+            plan["shards"],
+            plan.get("key"),
+            retry_in=retry_in,
+            single_job=bool(plan.get("single_job")),
+        ),
         "runtime_shard_job",
     )
     applied = os.environ.get(APPLIED_ENV)
@@ -215,7 +231,9 @@ def _stop_inventory_process(process):
 
 
 class ShardPlugin:
-    def __init__(self, command, shard, shards, step_key=None):
+    def __init__(
+        self, command, shard, shards, step_key=None, retry_in=None, single_job=False
+    ):
         self.files = command["files"]  # file from rootdir -> its shard
         self.split = command["split"]  # file -> {"shards", "assign"}
         self.prefix = command["prefix"]
@@ -223,6 +241,7 @@ class ShardPlugin:
         self.fallback = command.get("fallback", 0)
         self.shard = shard
         self.shards = shards
+        self.single_job = bool(single_job) or shards <= 1
         self.reporter = None
         self.counts = {}  # file -> its tests here
         self.totals = {}  # file -> its tests in all shards
@@ -235,24 +254,74 @@ class ShardPlugin:
         self.step_key = step_key
         self.position = command.get("position")
         self.coverage_dir = os.environ.get(COVERAGE_DIR_ENV)
+        self.retry_count = int(os.environ.get("BUILDKITE_RETRY_COUNT") or 0)
+        self.mode = "full"
+        self.retry_passed = set()
+        self.retry_skip_files = set()
+        self.retry_skipped_files = set()
+        self.retry_skipped_tests = 0
+        self.retry_has_expected = False
+        self.retry_base_planned = None
+        self.retry_missing_outstanding = []
+        if (
+            retry_in
+            and os.path.isdir(retry_in)
+            and self.retry_count > 0
+            and self.step_key
+            and self.position is not None
+        ):
+            prior_records = pytest_retry.read_records(retry_in)
+            retry_plan = pytest_retry.build_retry_plan(
+                prior_records,
+                self.step_key,
+                self.position,
+                self.shard,
+                build_id=os.environ.get("BUILDKITE_BUILD_ID"),
+                current_retry=self.retry_count,
+            )
+            if retry_plan["active"]:
+                self.mode = "test-retry"
+                self.retry_passed = retry_plan["passed"]
+                self.retry_skip_files = retry_plan["skip_files"]
+                self.retry_has_expected = retry_plan["has_expected"]
+                self.retry_base_planned = retry_plan["base_planned"]
         # The least-loaded owner that runs the command says what the command
         # should run: listed by a separate pytest it starts
         # (_expected_inventory), on the job's hardware, at the job's commit.
-        self.records_expected = bool(self.coverage_dir) and shard == self.fallback
+        # Skipped on single-job steps and on test retries when the active chain
+        # already captured a valid expected list.
+        self.records_expected = (
+            bool(self.coverage_dir)
+            and not self.single_job
+            and shard == self.fallback
+            and not self.retry_has_expected
+        )
         self.expected = None
         self.planned = None  # tests kept here after collection; None if unknown
         self.collection_failed = False
         self.ran = set()  # the tests pytest reported on here
+        self._phases = {}  # nodeid -> {when: (outcome, wasxfail)}
+        self._active_nodeid = None
+        self._subtest_failed = set()
+        self.record_path = None
+        self._prev_excepthook = None
 
     def pytest_ignore_collect(self, collection_path, config):
-        """A file planned whole for another shard isn't even imported. The
-        inventory uses an isolated pytest, so the live shard does not import
-        other shards' files to build that list."""
+        """A directory-discovered file planned whole for another shard, or
+        whose tests all passed earlier in the active retry chain, isn't even
+        imported (explicit file CLI arguments bypass this hook in pytest and
+        are deselected in `pytest_collection_modifyitems`)."""
         relative = os.path.relpath(str(collection_path), str(config.rootpath))
-        shard = self.files.get(relative.replace(os.sep, "/"))
-        if shard is not None and shard != self.shard:
+        relative_posix = relative.replace(os.sep, "/")
+        if not self.single_job:
+            shard = self.files.get(relative_posix)
+            if shard is not None and shard != self.shard:
+                self.dropped += 1
+                self.elsewhere_files.setdefault(shard, set()).add(relative)
+                return True
+        if relative_posix in self.retry_skip_files:
             self.dropped += 1
-            self.elsewhere_files.setdefault(shard, set()).add(relative)
+            self.retry_skipped_files.add(relative_posix)
             return True
         return None
 
@@ -279,6 +348,44 @@ class ShardPlugin:
     @pytest.hookimpl(trylast=True)  # after -m, -k and conftest hooks
     def pytest_collection_modifyitems(self, session, config, items):
         keep, drop = [], []
+        # Before deciding whether to reuse the expected inventory or deselect
+        # already-passed tests, check whether this shard collected any new test
+        # or extra duplicate occurrence (even of a previously passing test)
+        # relative to the base full attempt.
+        if self.mode == "test-retry" and isinstance(self.retry_base_planned, list):
+            base_counts = {}
+            for nodeid in self.retry_base_planned:
+                base_counts[nodeid] = base_counts.get(nodeid, 0) + 1
+            seen_counts = {}
+            grew = False
+            for item in items:
+                file = item.nodeid.split("::")[0]
+                if not self.single_job and self._owner(item, file) != self.shard:
+                    continue
+                seen_counts[item.nodeid] = seen_counts.get(item.nodeid, 0) + 1
+                if seen_counts[item.nodeid] > base_counts.get(item.nodeid, 0):
+                    grew = True
+                    break
+            if grew:
+                self.retry_has_expected = False
+                self.records_expected = (
+                    bool(self.coverage_dir)
+                    and not self.single_job
+                    and self.shard == self.fallback
+                )
+                if not self.retry_skipped_files:
+                    self.retry_passed = set()
+                    self.mode = "full"
+                    self.retry_base_planned = None
+                else:
+                    # Keep passed IDs only for files already excluded in
+                    # pytest_ignore_collect so missing-test checks don't flag
+                    # them; run every collected item in non-excluded files.
+                    self.retry_passed = {
+                        nodeid
+                        for nodeid in self.retry_passed
+                        if nodeid.split("::")[0] in self.retry_skipped_files
+                    }
         if (
             self.records_expected
             and not self.collection_failed
@@ -288,13 +395,18 @@ class ShardPlugin:
         for item in items:
             file = item.nodeid.split("::")[0]
             self.totals[file] = self.totals.get(file, 0) + 1
-            owner = self._owner(item, file)
-            if owner == self.shard:
-                keep.append(item)
-                self.counts[file] = self.counts.get(file, 0) + 1
-            else:
+            if not self.single_job:
+                owner = self._owner(item, file)
+                if owner != self.shard:
+                    drop.append(item)
+                    self.elsewhere[owner] = self.elsewhere.get(owner, 0) + 1
+                    continue
+            if item.nodeid in self.retry_passed:
                 drop.append(item)
-                self.elsewhere[owner] = self.elsewhere.get(owner, 0) + 1
+                self.retry_skipped_tests += 1
+                continue
+            keep.append(item)
+            self.counts[file] = self.counts.get(file, 0) + 1
         if drop:
             self.dropped += len(drop)
             config.hook.pytest_deselected(items=drop)
@@ -302,6 +414,19 @@ class ShardPlugin:
         if not self.collection_failed:
             # An empty assignment is meaningful only when collection completed.
             self.planned = [item.nodeid for item in items]
+            if self.mode == "test-retry" and isinstance(self.retry_base_planned, list):
+                required_counts = {}
+                for nodeid in self.retry_base_planned:
+                    if nodeid not in self.retry_passed:
+                        required_counts[nodeid] = required_counts.get(nodeid, 0) + 1
+                kept_counts = {}
+                for nodeid in self.planned:
+                    kept_counts[nodeid] = kept_counts.get(nodeid, 0) + 1
+                self.retry_missing_outstanding = sorted(
+                    nodeid
+                    for nodeid, count in required_counts.items()
+                    if kept_counts.get(nodeid, 0) < count
+                )
 
     def pytest_collectreport(self, report):
         if report.failed:
@@ -331,6 +456,7 @@ class ShardPlugin:
                 COMMAND_ENV,
                 COVERAGE_DIR_ENV,
                 APPLIED_ENV,
+                RETRY_IN_ENV,
                 "CI_INFRA_TRACE_ID",
                 "CI_INFRA_COMMAND_SPAN_ID",
                 "CUDA_INJECTION64_PATH",
@@ -413,60 +539,90 @@ class ShardPlugin:
         )
         return None
 
+    def pytest_sessionstart(self, session):
+        if session.config.getoption("collectonly"):
+            return
+        # Write an unfinished header before collection so a crash/OOM during
+        # module import still leaves a retry-numbered record for #884 coverage.
+        self._start_record()
+
     def pytest_collection_finish(self, session):
         if session.config.getoption("collectonly"):
             self.coverage_dir = None
             return
-        # Before any test: a shard that dies leaves this, marked unfinished.
-        self._write_record(finished=False)
+        # Before any test: a shard that dies leaves this header + flushed tests.
+        self._start_record()
         # Looked up here: it registers after -p plugins are configured.
         self.reporter = session.config.pluginmanager.get_plugin("terminalreporter")
         if self.reporter is None:
             return
-        self._say(self._where())
-        if self.unplanned and self.shard == self.fallback:
+        if not self.single_job:
+            self._say(self._where())
+            if self.unplanned and self.shard == self.fallback:
+                self._say(
+                    f"runtime-shard: not in the plan, so run in shard {self.fallback + 1}: "
+                    + ", ".join(self.unplanned)
+                )
+        if self.mode == "test-retry" and (
+            self.retry_skipped_files or self.retry_skipped_tests
+        ):
             self._say(
-                f"runtime-shard: not in the plan, so run in shard {self.fallback + 1}: "
-                + ", ".join(self.unplanned)
+                "pytest-retry: skipped "
+                f"{_plural(len(self.retry_skipped_files), 'passed file')} and "
+                f"{_plural(self.retry_skipped_tests, 'passed test')} from earlier attempts"
             )
 
-    def _write_record(self, finished):
-        """One file per job per command, for the build's coverage check. A
-        failure here costs the check a record, never the job its tests.
-
-        Directories are 0777: a job writes as root into a checkout the agent
-        owns, and the agent must be able to delete them for the next job.
-        """
+    def _start_record(self):
+        """Write line 1 (`start` header) of the command's flushed JSONL record."""
         if not self.coverage_dir:
             return
         job_id = os.environ.get("BUILDKITE_JOB_ID", "no-job-id")
-        job_dir = os.path.join(self.coverage_dir, job_id)
-        record = {
-            "step": self.step_key,
-            "position": self.position,
-            "shard": self.shard,
-            # The build the record belongs to, so the coverage check can
-            # ignore records a stale job wrote; null off Buildkite.
-            "build_id": os.environ.get("BUILDKITE_BUILD_ID"),
-            "retry": int(os.environ.get("BUILDKITE_RETRY_COUNT") or 0),
+        self.record_path = pytest_retry.write_jsonl_start(
+            coverage_dir=self.coverage_dir,
+            job_id=job_id,
+            step=self.step_key,
+            position=self.position,
+            shard=self.shard,
+            retry=self.retry_count,
+            build_id=os.environ.get("BUILDKITE_BUILD_ID"),
+            mode=self.mode,
+            expected=self.expected,
+            planned=self.planned,
+        )
+        if self.record_path and self._prev_excepthook is None:
+            prev = sys.excepthook
+            self._prev_excepthook = prev
+            record_path = self.record_path
+
+            def _record_uncaught(exc_type, exc_value, exc_tb):
+                pytest_retry.append_jsonl_event(record_path, {"event": "hook_error"})
+                prev(exc_type, exc_value, exc_tb)
+
+            sys.excepthook = _record_uncaught
+
+    def _finish_record(self, finished, exitstatus=None, hook_error=False):
+        """Flush any unfinished phase records and append the `finish` trailer."""
+        for nodeid in sorted(self._phases):
+            pytest_retry.append_jsonl_event(
+                self.record_path,
+                {
+                    "event": "test",
+                    "nodeid": nodeid,
+                    "passed": False,
+                    "outcome": "error",
+                },
+            )
+        self._phases.clear()
+        payload = {
+            "event": "finish",
             "finished": finished,
             "finished_at": time.time(),
-            "expected": self.expected,
-            "planned": self.planned,
-            "ran": sorted(self.ran),
         }
-        try:
-            os.makedirs(job_dir, exist_ok=True)
-            os.chmod(self.coverage_dir, 0o777)
-            os.chmod(job_dir, 0o777)
-            path = os.path.join(job_dir, f"{self.position}.json")
-            # Written aside, then swapped in whole: a job killed mid-write
-            # keeps its earlier record. The .tmp name isn't an artifact.
-            with open(f"{path}.tmp", "w") as f:
-                json.dump(record, f)
-            os.replace(f"{path}.tmp", path)
-        except OSError as error:
-            print(f"runtime-shard: no coverage record: {error}")
+        if exitstatus is not None:
+            payload["exitstatus"] = int(exitstatus)
+        if hook_error:
+            payload["hook_error"] = True
+        pytest_retry.append_jsonl_event(self.record_path, payload)
 
     def _where(self):
         """Which of the command's tests run here, and where the rest run, so
@@ -495,6 +651,9 @@ class ShardPlugin:
 
     @pytest.hookimpl(tryfirst=True)  # before -v names the test
     def pytest_runtest_logstart(self, nodeid, location):
+        self._active_nodeid = nodeid
+        if self.single_job:
+            return
         file = nodeid.split("::")[0]
         if self.reporter is None or file == self.current:
             return
@@ -514,32 +673,125 @@ class ShardPlugin:
 
     @pytest.hookimpl(trylast=True)  # after -v prints FAILED or ERROR
     def pytest_runtest_logreport(self, report):
-        # Runtime subtests can report IDs that are absent from collection.
-        if not isinstance(report, getattr(pytest, "SubtestReport", ())):
+        # Runtime subtests can report IDs that are absent from collection, so
+        # exclude their IDs from coverage `ran`, but still mark the parent test
+        # failed so a failing subtest is never skipped on retry.
+        if isinstance(report, getattr(pytest, "SubtestReport", ())):
+            if report.failed and self._active_nodeid:
+                self._subtest_failed.add(self._active_nodeid)
+        else:
             self.ran.add(report.nodeid)
-        if self.reporter is not None and report.failed and not self.expanded:
+            phases = self._phases.setdefault(report.nodeid, {})
+            phases[report.when] = (
+                report.outcome,
+                hasattr(report, "wasxfail"),
+            )
+            if report.when == "teardown":
+                passed, outcome = _classify_phases(phases)
+                if report.nodeid in self._subtest_failed:
+                    passed, outcome = False, "failed"
+                    self._subtest_failed.discard(report.nodeid)
+                pytest_retry.append_jsonl_event(
+                    self.record_path,
+                    {
+                        "event": "test",
+                        "nodeid": report.nodeid,
+                        "passed": passed,
+                        "outcome": outcome,
+                    },
+                )
+                self._phases.pop(report.nodeid, None)
+        if (
+            not self.single_job
+            and self.reporter is not None
+            and report.failed
+            and not self.expanded
+        ):
             self.expanded = True
             self._say("^^^ +++")  # Buildkite: open this file's group
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_runtestloop(self, session):
         yield
-        if self.reporter is not None and self.current is not None:
+        pytest_retry.append_jsonl_event(self.record_path, {"event": "loop_done"})
+        if not self.single_job and self.reporter is not None and self.current is not None:
             # The failures and the summary get their own open group, not the
             # last file's.
             self._say(f"+++ :test_tube: {self.label}: results")
 
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_unconfigure(self, config):
+        outcome = yield
+        if outcome.excinfo is not None:
+            pytest_retry.append_jsonl_event(self.record_path, {"event": "hook_error"})
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
     def pytest_sessionfinish(self, session, exitstatus):
-        # Every test of the command went to other shards: nothing to run here
-        # is not a failure. A command that collects nothing at all still is.
-        if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED and self.dropped:
+        # Every test of the command went to other shards or already passed on an
+        # earlier attempt: nothing to run here is not a failure. A command that
+        # collects nothing at all, failed collection, or lost an outstanding
+        # unpassed test from the retry chain still fails.
+        if (
+            exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED
+            and self.dropped
+            and not self.collection_failed
+            and not self.retry_missing_outstanding
+        ):
             session.exitstatus = pytest.ExitCode.OK
+        if self.retry_missing_outstanding:
+            print(
+                "pytest-retry: outstanding unpassed test(s) disappeared from collection: "
+                + ", ".join(self.retry_missing_outstanding),
+                file=sys.stderr,
+            )
+            if session.exitstatus == pytest.ExitCode.OK:
+                session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        outcome = yield
+        hook_error = outcome.excinfo is not None
+        final_status = int(session.exitstatus)
+        if hook_error and final_status == int(pytest.ExitCode.OK):
+            final_status = int(pytest.ExitCode.INTERNAL_ERROR)
         # -x, --maxfail or a Ctrl-C stopped the run: tests here may not have run.
-        stopped = session.shouldstop or session.shouldfail or exitstatus in (
-            pytest.ExitCode.INTERRUPTED,
-            pytest.ExitCode.INTERNAL_ERROR,
+        stopped = (
+            hook_error
+            or session.shouldstop
+            or session.shouldfail
+            or final_status
+            in (
+                int(pytest.ExitCode.INTERRUPTED),
+                int(pytest.ExitCode.INTERNAL_ERROR),
+            )
         )
-        self._write_record(finished=not stopped)
+        self._finish_record(
+            finished=not stopped, exitstatus=final_status, hook_error=hook_error
+        )
+
+
+def _classify_phases(phases):
+    """Classify a completed test from its setup/call/teardown phase outcomes.
+
+    Returns:
+        (passed: bool, outcome: str). `passed` is True only when setup, call
+        and teardown all passed without xfail.
+    """
+    setup = phases.get("setup")
+    call = phases.get("call")
+    teardown = phases.get("teardown")
+    if (
+        setup == ("passed", False)
+        and call == ("passed", False)
+        and teardown == ("passed", False)
+    ):
+        return True, "passed"
+    if (setup and setup[0] == "failed") or (teardown and teardown[0] == "failed"):
+        return False, "error"
+    if call and call[0] == "failed":
+        return False, "failed"
+    if (setup and setup[1]) or (call and call[1]):
+        return False, "xfailed"
+    if (setup and setup[0] == "skipped") or (call and call[0] == "skipped"):
+        return False, "skipped"
+    return False, "failed"
 
 
 def _plural(count, noun):

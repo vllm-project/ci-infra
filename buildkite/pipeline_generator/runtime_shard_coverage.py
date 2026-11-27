@@ -19,7 +19,6 @@ known. Standard library only: it runs on a small CPU agent, with its source
 packed into the job environment at generation and decoded there.
 """
 
-import glob
 import json
 import os
 import re
@@ -27,10 +26,12 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+import pytest_retry
 
 STEPS_ENV = "RUNTIME_SHARD_COVERAGE_STEPS"
-ARTIFACTS = ".runtime-shard-coverage/*/*.json"
+ARTIFACTS = pytest_retry.ARTIFACTS_JSONL
 # Buildkite refuses an annotation over 1 MiB; the log keeps the whole list.
 MAX_IDS_INLINE = 5
 MAX_FILES_SHOWN = 30
@@ -38,20 +39,49 @@ MAX_COMMAND_CHARS = 100
 
 
 def latest_records(records: List[Dict[str, Any]]) -> Dict[Tuple, Dict[str, Any]]:
-    """Each shard's record per command: its latest attempt that finished, or
-    its latest attempt when none finished."""
+    """Each shard's record per command: its latest attempt (by retry number),
+    breaking same-retry ties by finished status then timestamp."""
     latest: Dict[Tuple, Dict[str, Any]] = {}
     for record in records:
         where = (record["step"], record["position"], record["shard"])
-        rank = (record["finished"], record["retry"], record["finished_at"])
+        rank = (record["retry"], record["finished"], record["finished_at"])
         best = latest.get(where)
         if best is None or rank > (
-            best["finished"],
             best["retry"],
+            best["finished"],
             best["finished_at"],
         ):
             latest[where] = record
     return latest
+
+
+def _effective_shard_record(
+    records: List[Dict[str, Any]],
+    step_key: str,
+    position: int,
+    shard: int,
+    record: Dict[str, Any],
+) -> Tuple[Set[str], Optional[List[str]]]:
+    """Return `(ran, planned)` for one shard, crediting earlier passes in an
+    intact retry chain on a `test-retry` attempt.
+
+    Only tests proven `passed` (setup, call, teardown) in earlier attempts of
+    the active chain back to a `full` run count; a broken chain fails closed.
+    """
+    if record.get("mode", "full") != "test-retry":
+        return set(record["ran"]), record.get("planned")
+    prior = pytest_retry.active_chain(
+        records, step_key, position, shard, before_retry=record["retry"]
+    )
+    if not prior or prior[0].get("mode", "full") != "full":
+        return set(record["ran"]), record.get("planned")
+    earlier_passed = pytest_retry.chain_passed(prior)
+    effective_ran = earlier_passed | set(record["ran"])
+    base_planned = prior[0].get("planned")
+    effective_planned = (
+        base_planned if isinstance(base_planned, list) else record.get("planned")
+    )
+    return effective_ran, effective_planned
 
 
 def _expected_from_attempts(records, step, position, shard):
@@ -124,9 +154,11 @@ def compare(
                 if record is None:
                     missing.append(shard)
                     continue
-                planned = record.get("planned")
-                ran.update(record["ran"])
-                for nodeid in set(record["ran"]):
+                shard_ran, planned = _effective_shard_record(
+                    records, step_key, position, shard, record
+                )
+                ran.update(shard_ran)
+                for nodeid in shard_ran:
                     shards_of.setdefault(nodeid, []).append(shard)
                 if not record["finished"]:
                     unfinished.append(shard)
@@ -361,43 +393,7 @@ def report(results: List[Dict[str, Any]]) -> Tuple[str, str]:
 
 
 def _read_records(folder: str) -> List[Dict[str, Any]]:
-    records = []
-    required = {
-        "step": str,
-        "position": int,
-        "shard": int,
-        "retry": int,
-        "finished": bool,
-        "finished_at": (int, float),
-        "ran": list,
-    }
-    pattern = os.path.join(folder, ARTIFACTS)
-    for path in glob.glob(pattern, recursive=True):
-        # A shard killed mid-write leaves one bad file; skipping it makes that
-        # shard's coverage unverified rather than stopping every step's check.
-        try:
-            with open(path) as f:
-                record = json.load(f)
-        except (OSError, ValueError) as error:
-            print(f"runtime-shard coverage: skipped unreadable {path}: {error}")
-            continue
-        valid = isinstance(record, dict) and all(
-            isinstance(record.get(key), kind) for key, kind in required.items()
-        )
-        if valid:
-            for key in ("expected", "planned", "ran"):
-                value = record.get(key)
-                if value is not None and (
-                    not isinstance(value, list)
-                    or any(not isinstance(nodeid, str) for nodeid in value)
-                ):
-                    valid = False
-                    break
-        if not valid:
-            print(f"runtime-shard coverage: skipped malformed {path}")
-            continue
-        records.append(record)
-    return records
+    return pytest_retry.read_records(folder)
 
 
 def _download_records(folder: str) -> Optional[str]:
@@ -499,9 +495,10 @@ def _relax_soft_failed_gaps(results: List[Dict[str, Any]]) -> None:
 def main() -> int:
     steps = json.loads(os.environ[STEPS_ENV])
     with tempfile.TemporaryDirectory() as folder:
-        # Every attempt, not only the latest, so latest_records() can pick the
-        # latest that finished. An env var, not the flag: an agent too old for
-        # it ignores the variable, where an unknown flag fails the download.
+        # Every attempt, not only the latest, so active retry chains and
+        # earlier owner inventories are available. An env var, not the flag:
+        # an agent too old for it ignores the variable, where an unknown flag
+        # fails the download.
         download_error = _download_records(folder)
         records = _read_records(folder)
     if download_error:
