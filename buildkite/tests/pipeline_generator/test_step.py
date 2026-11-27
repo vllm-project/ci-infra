@@ -204,6 +204,23 @@ def test_a100_steps_are_not_emitted_but_amd_mirrors_are():
     assert "amd-a100-test" in generated_keys
 
 
+def test_dgx_spark_steps_are_not_emitted_but_amd_mirrors_are():
+    step = Step(
+        label="Spark test",
+        group="GPU",
+        key="spark-test",
+        device="dgx-spark",
+        commands=["test"],
+        mirror={"amd": {"device": "mi300_2"}},
+    )
+
+    groups = buildkite_step.convert_group_step_to_buildkite_step(group_steps([step]))
+    generated_keys = [job.key for group in groups for job in group.steps]
+
+    assert "spark-test" not in generated_keys
+    assert "amd-spark-test" in generated_keys
+
+
 def test_selected_steps_reject_duplicate_generated_key():
     steps = [
         Step(label="Test", key="test", commands=["a"]),

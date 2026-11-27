@@ -1451,8 +1451,9 @@ def convert_group_step_to_buildkite_step(
             # mirror was requested; then emit the mirror but not the step.
             only_step_keys = global_config["only_step_keys"]
             # The A100 fleet is retired; retain declarations only for AMD mirrors.
+            # DGX Spark is off while its queue is unavailable; revert to re-enable.
             include_step = (
-                step.device != DeviceType.A100
+                step.device not in (DeviceType.A100, DeviceType.DGX_SPARK)
                 and runs_on(platform, step.device)
                 and (only_step_keys is None or step_key in only_step_keys)
             )
