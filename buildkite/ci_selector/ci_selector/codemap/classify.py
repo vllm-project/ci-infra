@@ -34,6 +34,7 @@ import tomllib
 from pathlib import Path
 
 import yaml
+from step_vendors import EXACT_MIRROR, expand_document
 
 from ..gitdiff import diff_files
 from ..handwritten import (
@@ -1952,17 +1953,40 @@ def _head_keys(entry: dict, name: str, own: bool, mirror: bool) -> set[str]:
     return out
 
 
+def _mirror_changed(before, after: dict) -> bool:
+    """Whether a changed entry's AMD mirror runs differently too. A legacy
+    mirror inherits whatever its step does not set, so it changes with the
+    step. An exact one (`_exact`, a `devices:` step's AMD job) inherits
+    nothing: it changed only when its own block did, as the generator's
+    amd.changed_step_keys has it."""
+
+    def amd_block(entry):
+        mirror = entry.get("mirror") if isinstance(entry, dict) else None
+        return mirror.get("amd") if isinstance(mirror, dict) else None
+
+    amd = amd_block(after)
+    if not isinstance(amd, dict) or not amd.get(EXACT_MIRROR):
+        return True
+    return amd_block(before) != amd
+
+
 def _changed_steps(state: RepoState, path: str, ctx, defining: set[str]):
     """(base step ids whose definition changed, head keys of those plus the
     added ones), or None to keep every step the file defines."""
     if ctx is None or ctx.status.get(path) != "M":
         return None
-    parsed = changed_step_entries(
-        _yaml_at(state, path, ctx.base), _yaml_at(state, path, ctx.head)
-    )
+    # `devices:` steps compiled into the step and `mirror.amd` entries the
+    # generator reads, so an edit lands on the jobs it changes.
+    try:
+        base = expand_document(_yaml_at(state, path, ctx.base))
+        head = expand_document(_yaml_at(state, path, ctx.head))
+    except ValueError:  # a `devices:` step that does not compile
+        return None
+    parsed = changed_step_entries(base, head)
     if parsed is None:
         return None
     changed, added, mirror_only = parsed
+    old = _step_entries(base) or {}
     steps = [s for p in state.pipelines for s in p.steps if s.step_id in defining]
     ids: set[str] = set()
     keys: set[str] = set()
@@ -1972,8 +1996,11 @@ def _changed_steps(state: RepoState, path: str, ctx, defining: set[str]):
         }
         if not parents:
             return None  # an entry we cannot place: keep the whole file
-        ids |= parents | {s.step_id for s in steps if s.mirror_of in parents}
-        keys |= _head_keys(entry, name, own=True, mirror=True)
+        mirror = _mirror_changed(old.get(name), entry)
+        ids |= parents
+        if mirror:
+            ids |= {s.step_id for s in steps if s.mirror_of in parents}
+        keys |= _head_keys(entry, name, own=True, mirror=mirror)
     for name, entry in mirror_only.items():
         parents = {
             s.step_id for s in steps if not s.mirror_hw and (s.key or s.label) == name

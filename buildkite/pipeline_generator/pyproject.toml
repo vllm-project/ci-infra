@@ -31,6 +31,9 @@ py-modules = [
     "runtime_shard_coverage",
     "unblock_jobs",
     "selector_gate",
+    "step_vendors",
+    "step_lint",
+    "steps_cli",
 ]
 
 [tool.setuptools.packages.find]

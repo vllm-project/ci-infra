@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from enum import Enum
+from typing import Dict, Optional
 
 
 class DeviceType(str, Enum):
@@ -99,3 +101,91 @@ class AgentQueue(str, Enum):
     DGX_SPARK = "dgx-spark"
     REDHAT_H100_FRANKFURT = "RedHat-H100-Frankfurt"
     AMD_ZEN5_CPU = "amd-zen5-cpu"
+
+
+# ---- the device registry -------------------------------------------------------
+#
+# What a test step in the `devices:` form (step_vendors.py) gets from the
+# hardware it names: the label's icon and tag, the key suffix of a second device,
+# the image it runs in and, for AMD, the GPU count of the pool. A step never
+# writes these. NON_AMD_DEVICES lists the NVIDIA and CPU devices; the AMD ones
+# come from amd.AMD_DEVICE_CONFIGS (amd.AMD_DEVICES), and step_vendors.DEVICES
+# joins the two.
+
+
+class Vendor(str, Enum):
+    NVIDIA = "nvidia"
+    AMD = "amd"
+    CPU = "cpu"
+
+
+# The image steps a job can depend on. A `devices:` step never names them:
+# its jobs get one from their vendor or device.
+IMAGE_BUILD_STEP = "image-build"
+CPU_IMAGE_BUILD_STEP = "image-build-cpu"
+ARM64_IMAGE_BUILD_STEP = "arm64-image-build"
+
+VENDOR_ICONS = {
+    Vendor.NVIDIA: ":nvidia:",
+    Vendor.AMD: ":amd:",
+    Vendor.CPU: ":computer:",
+}
+# Prepended to every key of the vendor's jobs.
+VENDOR_KEY_PREFIXES = {Vendor.AMD: "amd-"}
+
+
+@dataclass(frozen=True)
+class DeviceInfo:
+    vendor: Vendor
+    # The label's hardware tag: ":nvidia: (<tag>) <title>".
+    tag: str
+    # A second device of a vendor in one step is keyed "<key>-<key_tag>".
+    key_tag: str
+    queue: AgentQueue
+    # AMD: the GPUs of the pool's agents, which every job gets.
+    gpus: Optional[int] = None
+    # The image step its jobs depend on, when not their vendor's.
+    image: Optional[str] = None
+
+
+# The queue is buildkite_step.get_agent_queue()'s for the device (a test
+# checks they agree). To add hardware, add its DeviceType, its AgentQueue, its
+# get_agent_queue() branch and an entry here (or, for AMD, in
+# amd.AMD_DEVICE_CONFIGS).
+NON_AMD_DEVICES: Dict[str, DeviceInfo] = {
+    DeviceType.H100.value: DeviceInfo(
+        Vendor.NVIDIA, "H100", "h100", AgentQueue.MITHRIL_H100
+    ),
+    DeviceType.H200.value: DeviceInfo(Vendor.NVIDIA, "H200", "h200", AgentQueue.H200),
+    DeviceType.H200_18GB.value: DeviceInfo(
+        Vendor.NVIDIA, "H200 MIG 18GB", "h200", AgentQueue.H200_18GB
+    ),
+    DeviceType.H200_35GB.value: DeviceInfo(
+        Vendor.NVIDIA, "H200 MIG 35GB", "h200", AgentQueue.H200_35GB
+    ),
+    DeviceType.B200.value: DeviceInfo(Vendor.NVIDIA, "B200", "b200", AgentQueue.B200),
+    DeviceType.B200_K8S.value: DeviceInfo(
+        Vendor.NVIDIA, "B200", "b200", AgentQueue.B200_K8S
+    ),
+    DeviceType.A100.value: DeviceInfo(Vendor.NVIDIA, "A100", "a100", AgentQueue.A100),
+    DeviceType.L4.value: DeviceInfo(Vendor.NVIDIA, "L4", "l4", AgentQueue.L4_K8S),
+    DeviceType.GH200.value: DeviceInfo(
+        Vendor.NVIDIA, "GH200", "gh200", AgentQueue.GH200
+    ),
+    DeviceType.DGX_SPARK.value: DeviceInfo(
+        Vendor.NVIDIA,
+        "DGX Spark",
+        "dgx-spark",
+        AgentQueue.DGX_SPARK,
+        image=ARM64_IMAGE_BUILD_STEP,
+    ),
+    DeviceType.CPU.value: DeviceInfo(
+        Vendor.CPU, "CPU", "cpu", AgentQueue.CPU_PREMERGE_US_EAST_1
+    ),
+    DeviceType.CPU_SMALL.value: DeviceInfo(
+        Vendor.CPU, "CPU", "cpu", AgentQueue.SMALL_CPU_PREMERGE
+    ),
+    DeviceType.CPU_MEDIUM.value: DeviceInfo(
+        Vendor.CPU, "CPU", "cpu", AgentQueue.MEDIUM_CPU_PREMERGE
+    ),
+}

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+from step_vendors import EXACT_MIRROR, expand_steps
 
 from ...handwritten import (
     KNOWN_STEP_FIELDS,
@@ -82,7 +83,9 @@ def _parse_job_file(
     group_active = bool(group_depends_raw)
     group_depends = _as_list(group_depends_raw)
     steps: list[Step] = []
-    for raw in data["steps"]:
+    # `devices:` steps, compiled by the generator's own code into the step
+    # and `mirror.amd` dicts read below.
+    for raw in expand_steps(data["steps"], group_depends_raw):
         step = _parse_step(
             raw, path, repo, pipeline, group, group_depends, group_active, report
         )
@@ -93,7 +96,11 @@ def _parse_job_file(
         steps.append(step)
         mirror = raw.get("mirror") or {}
         for hw, overrides in mirror.items():
-            steps.append(_expand_mirror(step, hw, overrides or {}, report))
+            steps.append(
+                _expand_mirror(
+                    step, hw, overrides or {}, report, group_active=group_active
+                )
+            )
     return steps
 
 
@@ -157,10 +164,22 @@ def _parse_step(
     return step
 
 
-def _expand_mirror(parent: Step, hw: str, overrides: dict, report: LoadReport) -> Step:
+def _expand_mirror(
+    parent: Step,
+    hw: str,
+    overrides: dict,
+    report: LoadReport,
+    group_active: bool = False,
+) -> Step:
     """Copy of ci-infra's mirror derivation: deps are a union with the mirror's
     first, commands and working_dir override only when the mirror brings its own
-    commands, and the rest falls back to the parent."""
+    commands, and the rest falls back to the parent.
+
+    A block a `devices:` step compiled (`_exact`) is the whole job instead and
+    falls back to nothing; like a step, it gets the file's self-dependency and
+    working-dir default when the file's depends_on is set."""
+    if overrides.get(EXACT_MIRROR):
+        return _exact_mirror(parent, hw, overrides, report, group_active)
     deps = list(overrides.get("source_file_dependencies") or [])
     for dep in parent.source_file_dependencies or []:
         if dep not in deps:
@@ -210,6 +229,49 @@ def _expand_mirror(parent: Step, hw: str, overrides: dict, report: LoadReport) -
         mirror_label=overrides.get("label"),
     )
     unknown = {k: v for k, v in overrides.items() if k not in MIRROR_OVERRIDABLE}
+    if unknown:
+        report.record_unknown(unknown, variant.step_id)
+    return variant
+
+
+def _exact_mirror(
+    parent: Step, hw: str, job: dict, report: LoadReport, group_active: bool
+) -> Step:
+    deps = (
+        list(job["source_file_dependencies"])
+        if job.get("source_file_dependencies") is not None
+        else None
+    )
+    working_dir = job.get("working_dir")
+    if group_active:
+        deps = (deps or []) + [parent.source_file]
+        working_dir = working_dir or DEFAULT_WORKING_DIR
+    variant = Step(
+        pipeline=parent.pipeline,
+        source_file=parent.source_file,
+        label=f"{parent.label} ({hw})",
+        key=f"{parent.key or derive_step_key(parent.label)}-{hw}",
+        group=parent.group,
+        commands=list(job.get("commands") or []),
+        source_file_dependencies=deps,
+        device=job.get("device"),
+        num_devices=job.get("num_devices"),
+        num_nodes=job.get("num_nodes"),
+        working_dir=working_dir or "",
+        timeout_in_minutes=job.get("timeout_in_minutes"),
+        optional=bool(job.get("optional", False)),
+        soft_fail=bool(job.get("soft_fail", False)),
+        autorun_on_main=parent.autorun_on_main,
+        no_plugin=bool(job.get("no_plugin", False)),
+        dind=bool(job.get("dind", True)),
+        parallelism=job.get("parallelism"),
+        depends_on=_as_list(job.get("depends_on")) or list(MIRROR_DEFAULT_DEPENDS_ON),
+        env=dict(job.get("env") or {}),
+        mirror_hw=hw,
+        mirror_of=parent.step_id,
+        mirror_label=job.get("label"),
+    )
+    unknown = {k: v for k, v in job.items() if k not in MIRROR_OVERRIDABLE}
     if unknown:
         report.record_unknown(unknown, variant.step_id)
     return variant

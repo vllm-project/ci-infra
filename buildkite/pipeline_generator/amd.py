@@ -17,7 +17,7 @@ from typing import (
 
 import yaml
 
-from constants import AgentQueue, DeviceType, Platform
+from constants import AgentQueue, DeviceInfo, DeviceType, Platform, Vendor
 from global_config import get_global_config
 
 if TYPE_CHECKING:
@@ -181,49 +181,85 @@ class AmdDeviceConfig:
     queue: AgentQueue
     default_gpu_count: int
     arch: str
+    # The label's hardware tag (":amd: (<tag>) <title>") and the key suffix of
+    # a second AMD device in a `devices:` step ("amd-<key>-<key_tag>").
+    tag: str
+    key_tag: str
     uses_dra: bool = False
     # One queue serves every GPU count; the agent stacks behind it are told
     # apart by their gpu_size tag, so the step must target it explicitly.
     gpu_size_tag: bool = False
 
 
+def _pool(queue, gpus, arch, family, **kwargs) -> AmdDeviceConfig:
+    """A pool of one GPU family: tagged "MI300", keyed "mi300"."""
+    return AmdDeviceConfig(queue, gpus, arch, family.upper(), family, **kwargs)
+
+
+def _dpx(queue, arch, family, gpus=1, **kwargs) -> AmdDeviceConfig:
+    """A DRA pool of partitioned GPUs: tagged "MI300 DPX", keyed "mi300-dpx"."""
+    return AmdDeviceConfig(
+        queue,
+        gpus,
+        arch,
+        f"{family.upper()} DPX",
+        f"{family}-dpx",
+        uses_dra=True,
+        **kwargs,
+    )
+
+
+# Adding an AMD device: its DeviceType, its AgentQueue and an entry here. A
+# `devices:` step can name it from then on (step_vendors.DEVICES).
 AMD_DEVICE_CONFIGS = {
-    DeviceType.AMD_MI250_1.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 1, "gfx90a", gpu_size_tag=True
+    DeviceType.AMD_MI250_1.value: _pool(
+        AgentQueue.AMD_MI250, 1, "gfx90a", "mi250", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI250_2.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 2, "gfx90a", gpu_size_tag=True
+    DeviceType.AMD_MI250_2.value: _pool(
+        AgentQueue.AMD_MI250, 2, "gfx90a", "mi250", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI250_4.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 4, "gfx90a", gpu_size_tag=True
+    DeviceType.AMD_MI250_4.value: _pool(
+        AgentQueue.AMD_MI250, 4, "gfx90a", "mi250", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI250_8.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI250, 8, "gfx90a", gpu_size_tag=True
+    DeviceType.AMD_MI250_8.value: _pool(
+        AgentQueue.AMD_MI250, 8, "gfx90a", "mi250", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI300_1.value: AmdDeviceConfig(AgentQueue.AMD_MI300_1, 1, "gfx942"),
-    DeviceType.AMD_MI300_2.value: AmdDeviceConfig(AgentQueue.AMD_MI300_2, 2, "gfx942"),
-    DeviceType.AMD_MI300_4.value: AmdDeviceConfig(AgentQueue.AMD_MI300_4, 4, "gfx942"),
-    DeviceType.AMD_MI300_8.value: AmdDeviceConfig(AgentQueue.AMD_MI300_8, 8, "gfx942"),
-    DeviceType.AMD_MI300_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI300_DPX, 1, "gfx942", uses_dra=True, gpu_size_tag=True
+    DeviceType.AMD_MI300_1.value: _pool(AgentQueue.AMD_MI300_1, 1, "gfx942", "mi300"),
+    DeviceType.AMD_MI300_2.value: _pool(AgentQueue.AMD_MI300_2, 2, "gfx942", "mi300"),
+    DeviceType.AMD_MI300_4.value: _pool(AgentQueue.AMD_MI300_4, 4, "gfx942", "mi300"),
+    DeviceType.AMD_MI300_8.value: _pool(AgentQueue.AMD_MI300_8, 8, "gfx942", "mi300"),
+    DeviceType.AMD_MI300_DPX.value: _dpx(
+        AgentQueue.AMD_MI300_DPX, "gfx942", "mi300", gpu_size_tag=True
     ),
-    DeviceType.AMD_MI300_DPX_2.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI300_DPX, 2, "gfx942", uses_dra=True, gpu_size_tag=True
+    DeviceType.AMD_MI300_DPX_2.value: _dpx(
+        AgentQueue.AMD_MI300_DPX, "gfx942", "mi300", gpus=2, gpu_size_tag=True
     ),
-    DeviceType.AMD_MI300_DPX_4.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI300_DPX, 4, "gfx942", uses_dra=True, gpu_size_tag=True
+    DeviceType.AMD_MI300_DPX_4.value: _dpx(
+        AgentQueue.AMD_MI300_DPX, "gfx942", "mi300", gpus=4, gpu_size_tag=True
     ),
-    DeviceType.AMD_MI325_1.value: AmdDeviceConfig(AgentQueue.AMD_MI325_1, 1, "gfx942"),
-    DeviceType.AMD_MI325_2.value: AmdDeviceConfig(AgentQueue.AMD_MI325_2, 2, "gfx942"),
-    DeviceType.AMD_MI325_4.value: AmdDeviceConfig(AgentQueue.AMD_MI325_4, 4, "gfx942"),
-    DeviceType.AMD_MI325_8.value: AmdDeviceConfig(AgentQueue.AMD_MI325_8, 8, "gfx942"),
-    DeviceType.AMD_MI355_DPX.value: AmdDeviceConfig(
-        AgentQueue.AMD_MI355_DPX, 1, "gfx950", uses_dra=True
-    ),
-    DeviceType.AMD_MI355_1.value: AmdDeviceConfig(AgentQueue.AMD_MI355_1, 1, "gfx950"),
-    DeviceType.AMD_MI355_2.value: AmdDeviceConfig(AgentQueue.AMD_MI355_2, 2, "gfx950"),
-    DeviceType.AMD_MI355_4.value: AmdDeviceConfig(AgentQueue.AMD_MI355_4, 4, "gfx950"),
-    DeviceType.AMD_MI355_8.value: AmdDeviceConfig(AgentQueue.AMD_MI355_8, 8, "gfx950"),
+    DeviceType.AMD_MI325_1.value: _pool(AgentQueue.AMD_MI325_1, 1, "gfx942", "mi325"),
+    DeviceType.AMD_MI325_2.value: _pool(AgentQueue.AMD_MI325_2, 2, "gfx942", "mi325"),
+    DeviceType.AMD_MI325_4.value: _pool(AgentQueue.AMD_MI325_4, 4, "gfx942", "mi325"),
+    DeviceType.AMD_MI325_8.value: _pool(AgentQueue.AMD_MI325_8, 8, "gfx942", "mi325"),
+    DeviceType.AMD_MI355_DPX.value: _dpx(AgentQueue.AMD_MI355_DPX, "gfx950", "mi355"),
+    DeviceType.AMD_MI355_1.value: _pool(AgentQueue.AMD_MI355_1, 1, "gfx950", "mi355"),
+    DeviceType.AMD_MI355_2.value: _pool(AgentQueue.AMD_MI355_2, 2, "gfx950", "mi355"),
+    DeviceType.AMD_MI355_4.value: _pool(AgentQueue.AMD_MI355_4, 4, "gfx950", "mi355"),
+    DeviceType.AMD_MI355_8.value: _pool(AgentQueue.AMD_MI355_8, 8, "gfx950", "mi355"),
+}
+
+# The AMD half of the device registry (constants.NON_AMD_DEVICES): every job
+# runs in the AMD image, through the ROCm wrapper, on the pool's GPU count.
+AMD_DEVICES: Dict[str, DeviceInfo] = {
+    name: DeviceInfo(
+        Vendor.AMD,
+        config.tag,
+        config.key_tag,
+        config.queue,
+        gpus=config.default_gpu_count,
+        image=AMD_ARTIFACT_STEP,
+    )
+    for name, config in AMD_DEVICE_CONFIGS.items()
 }
 
 
@@ -287,16 +323,11 @@ _LABEL_HARDWARE_PREFIX = re.compile(r"^:[a-z0-9_+-]+: \([^)]*\) ")
 
 
 def get_amd_label_tag(device: Optional[str]) -> str:
-    """The hardware tag of an AMD GPU label: "<FAMILY> DPX" for any *_dpx*
-    device ("mi300_dpx" -> "MI300 DPX", "mi300_dpx_2" -> "MI300 DPX"), else the
-    pool's family ("mi300_1" -> "MI300"); empty for non-GPU devices."""
-    value = _device_value(device) or ""
-    if not value.startswith("mi"):
-        return ""
-    parts = value.split("_")
-    if "dpx" in parts:
-        return f"{parts[0].upper()} DPX"
-    return parts[0].upper()
+    """The hardware tag of an AMD GPU label, from the device registry
+    ("mi300_1" -> "MI300", "mi300_dpx" -> "MI300 DPX"); empty for non-GPU
+    devices."""
+    config = get_amd_device_config(device)
+    return config.tag if config else ""
 
 
 def get_amd_label(label: str, device: Optional[str]) -> str:
@@ -710,11 +741,18 @@ def changed_step_keys_in_file(
 def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]]:
     """Keys whose entry changed, plus `amd-<key>` if it has a `mirror.amd`
     block (only that for a mirror-only change). None if the edit can't be
-    pinned to steps."""
-    head = yaml.safe_load(head_text)
+    pinned to steps.
+
+    `devices:` steps are compared compiled (step_vendors.py), job by job: their
+    AMD job is a whole job of its own, so it changes only if its own fields
+    do."""
+    # Not at the top: step_vendors imports this module.
+    from step_vendors import expand_document
+
+    head = expand_document(yaml.safe_load(head_text))
     try:
-        base = yaml.safe_load(base_text)
-    except yaml.YAMLError:
+        base = expand_document(yaml.safe_load(base_text))
+    except (yaml.YAMLError, ValueError):
         # Main's copy is broken: don't fail the PR that fixes it.
         return None
     base_steps, head_steps = _steps_by_key(base), _steps_by_key(head)
@@ -731,7 +769,10 @@ def changed_step_keys(base_text: str, head_text: str) -> Optional[FrozenSet[str]
         if edited:
             changed.add(key)
         amd = _amd_block(entry)
-        if amd is not None and (edited or _amd_block(old) != amd):
+        inherits = amd is not None and not amd.get("_exact")
+        if amd is not None and (
+            (edited and inherits) or old is None or _amd_block(old) != amd
+        ):
             changed.add(f"amd-{key}")
     return frozenset(changed)
 

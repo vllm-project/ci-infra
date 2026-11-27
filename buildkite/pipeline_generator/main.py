@@ -1,8 +1,24 @@
+import sys
+
 import click
 from pipeline_generator import PipelineGenerator
+import steps_cli
 
 
-@click.command()
+class _Main(click.Command):
+    """`pipeline-generator [options]` generates the pipeline;
+    `pipeline-generator explain|lint ...` runs the test_areas tools
+    (steps_cli.py)."""
+
+    def main(self, args=None, **kwargs):
+        argv = sys.argv[1:] if args is None else list(args)
+        if argv and argv[0] in steps_cli.COMMANDS:
+            kwargs.setdefault("prog_name", "pipeline-generator")
+            return steps_cli.cli.main(args=argv, **kwargs)
+        return super().main(args=argv, **kwargs)
+
+
+@click.command(cls=_Main)
 @click.option(
     "--pipeline_config_path",
     type=click.Path(exists=True),

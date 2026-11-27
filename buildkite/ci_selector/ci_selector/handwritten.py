@@ -425,7 +425,7 @@ PYTEST_VALUE_FLAGS = {
 # volume mount, which is free to move on its own. A drift test pins the pair.
 CONTAINER_WORKSPACE = "/vllm-workspace"
 
-# step.py read_steps_from_job_dir assigns this as a bare literal, so there is
+# step.py steps_from_document assigns this as a bare literal, so there is
 # nothing to import. Applies only under a truthy group depends_on, and only for
 # the vllm-project/vllm repo. A drift test reads it out of the live source.
 DEFAULT_WORKING_DIR = f"{CONTAINER_WORKSPACE}/tests"
@@ -504,6 +504,7 @@ KNOWN_STEP_FIELDS = {
     # Set by the generator's loader, never written in yaml.
     "source_file",
     "source_file_declared",
+    "mirror_source_file_declared",
 }
 
 # mirror.<hw> fields the generator honors (ci-infra buildkite_step.py).
@@ -535,6 +536,10 @@ MIRROR_OVERRIDABLE = {
     # Only splits a mirror job into shards. Whether the job runs, and which
     # tests it runs, never read it, so selection needs nothing from it.
     "automatic_shard",
+    # Set on the `mirror.amd` a `devices:` step compiles to (the generator's
+    # step_vendors.py): the block is the whole AMD job, with no fallback to
+    # the step. Modelled by _expand_mirror.
+    "_exact",
 }
 
 # The env var the generator reads. Absent means "your rules"; present means
