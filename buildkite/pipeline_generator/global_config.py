@@ -137,6 +137,38 @@ def get_global_config():
     return config
 
 
+def is_pull_request(cfg: Optional[Dict] = None) -> bool:
+    """Whether the current build is for a pull request."""
+    cfg = cfg if cfg is not None else get_global_config()
+    pr = cfg.get("pull_request")
+    return bool(pr and pr != "false")
+
+
+def is_triggered_build() -> bool:
+    """Whether this build was triggered from another Buildkite build.
+
+    A PR job with buildkite-agent access can upload a trigger step targeting
+    branch ``main`` with an arbitrary commit; Buildkite marks those builds with
+    ``BUILDKITE_SOURCE=trigger_job`` and ``BUILDKITE_TRIGGERED_FROM_BUILD_ID``.
+    """
+    return os.getenv("BUILDKITE_SOURCE") == "trigger_job" or bool(
+        os.getenv("BUILDKITE_TRIGGERED_FROM_BUILD_ID")
+    )
+
+
+def is_trusted_main(cfg: Optional[Dict] = None) -> bool:
+    """Whether this is a trusted non-PR, non-triggered build of ``main``."""
+    cfg = cfg if cfg is not None else get_global_config()
+    if cfg.get("branch") != "main" or is_pull_request(cfg) or is_triggered_build():
+        return False
+    repo = os.getenv("BUILDKITE_REPO", "")
+    expected_repo = cfg.get("github_repo_name")
+    if repo and expected_repo:
+        if not re.search(rf"[/:]{re.escape(expected_repo)}(\.git)?$", repo):
+            return False
+    return True
+
+
 def _parse_only_step_keys(value: Optional[str]) -> Optional[FrozenSet[str]]:
     if value is None:
         return None

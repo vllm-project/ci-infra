@@ -120,7 +120,9 @@ resolve_ecr_cache_vars() {
     local MAIN_CACHE_ECR="936637512419.dkr.ecr.us-east-1.amazonaws.com/vllm-ci-postmerge-cache"
 
     if [[ "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
-        if [[ "$BUILDKITE_BRANCH" == "main" ]]; then
+        if [[ "$BUILDKITE_BRANCH" == "main" \
+              && "${BUILDKITE_SOURCE:-}" != "trigger_job" \
+              && -z "${BUILDKITE_TRIGGERED_FROM_BUILD_ID:-}" ]]; then
             local cache="${MAIN_CACHE_ECR}:latest"
         else
             local clean_branch=$(clean_docker_tag "$BUILDKITE_BRANCH")

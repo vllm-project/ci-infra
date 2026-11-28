@@ -34,7 +34,7 @@ from utils_lib.docker_utils import (
     get_ecr_cache_registry,
     get_torch_nightly_image,
 )
-from global_config import get_global_config
+from global_config import get_global_config, is_trusted_main
 from plugin.k8s_plugin import get_k8s_plugin
 from plugin.docker_plugin import DOCKER_CHECKOUT_MOUNT_PATH, get_docker_plugin
 from constants import AgentQueue, DeviceType
@@ -404,16 +404,17 @@ def _get_step_plugin(step: Step):
 
 
 def get_agent_queue(step: Step):
-    branch = get_global_config()["branch"]
+    global_config = get_global_config()
+    trusted_main = is_trusted_main(global_config)
     if step.device == DeviceType.AMD_CPU or step.device == DeviceType.AMD_CPU.value:
         return AgentQueue.AMD_CPU
     if step.label.startswith(":docker:"):
         if "arm64" in step.label:
-            if branch == "main":
+            if trusted_main:
                 return AgentQueue.ARM64_CPU_POSTMERGE
             else:
                 return AgentQueue.ARM64_CPU_PREMERGE
-        if branch == "main":
+        if trusted_main:
             return AgentQueue.CPU_POSTMERGE_US_EAST_1
         # On the us-east-1 warm-cache AMI the CUDA image reuses local layers
         # instead of pulling them cold (~16 min -> ~6 min on a cache hit).
@@ -487,11 +488,8 @@ def _get_variables_to_inject() -> Dict[str, str]:
     cache_from_tag, cache_to_tag = get_ecr_cache_registry()
     registries = global_config["registries"]
     repositories = global_config["repositories"]
-    repo = (
-        repositories["main"]
-        if global_config["branch"] == "main"
-        else repositories["premerge"]
-    )
+    trusted_main = is_trusted_main(global_config)
+    repo = repositories["main"] if trusted_main else repositories["premerge"]
 
     # Build target ($IMAGE_TAG) must match what the test steps pull (get_image()).
     # get_image() already switches to the dedicated -torch-nightly tag when
@@ -500,7 +498,7 @@ def _get_variables_to_inject() -> Dict[str, str]:
     image_tag = get_image()
     image_tag_latest = (
         f"{registries}/{repositories['main']}:latest"
-        if global_config["branch"] == "main" and global_config["torch_nightly"] != "1"
+        if trusted_main and global_config["torch_nightly"] != "1"
         else None
     )
 

@@ -43,6 +43,46 @@ def test_pull_request_step_does_not_mount_agent_for_tracing(fake_global_config):
 
 
 @pytest.mark.parametrize(
+    "step_kwargs",
+    [
+        {"label": "Custom PR Step", "mount_buildkite_agent": True},
+        {"label": "Benchmarks"},
+    ],
+)
+def test_pull_request_cannot_opt_into_mount_buildkite_agent(
+    fake_global_config, step_kwargs
+):
+    fake_global_config["branch"] = "my-pr"
+    fake_global_config["pull_request"] = "123"
+    step = Step(**step_kwargs)
+
+    plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
+
+    assert not plugin.get("mount_buildkite_agent", False)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"BUILDKITE_SOURCE": "trigger_job"},
+        {"BUILDKITE_TRIGGERED_FROM_BUILD_ID": "parent-build-123"},
+    ],
+)
+def test_triggered_main_build_cannot_mount_buildkite_agent(
+    fake_global_config, monkeypatch, env
+):
+    fake_global_config["branch"] = "main"
+    fake_global_config["pull_request"] = "false"
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    step = Step(label="Benchmarks", device="h200_35gb", mount_buildkite_agent=True)
+
+    plugin = docker_plugin.get_docker_plugin(step, "example/image:latest")
+
+    assert not plugin.get("mount_buildkite_agent", False)
+
+
+@pytest.mark.parametrize(
     "template",
     [
         k8s_plugin.nebius_h200_plugin_template,
