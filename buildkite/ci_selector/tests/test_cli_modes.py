@@ -133,3 +133,38 @@ def test_with_no_table_at_hand_the_latest_is_used(empty_coverage_dir, monkeypatc
     sentinel = object()
     monkeypatch.setattr(fetch_functions, "fetch_latest", lambda: sentinel)
     assert coverage_table(None) is sentinel
+
+
+@pytest.mark.parametrize("was_enabled", [True, False])
+@pytest.mark.parametrize("raises", [None, RuntimeError, SystemExit])
+def test_a_run_holds_the_cycle_collector_off_and_hands_it_back(
+    monkeypatch, was_enabled, raises
+):
+    """A run builds acyclic structures only, which a running collector keeps
+    rescanning and never frees. Left off afterwards, an in-process caller
+    would never collect a cycle again."""
+    import gc
+
+    from ci_selector import cli
+
+    during = []
+
+    def run(argv):
+        during.append(gc.isenabled())
+        if raises:
+            raise raises()
+        return 0
+
+    monkeypatch.setattr(cli, "_main", run)
+    original = gc.isenabled()
+    (gc.enable if was_enabled else gc.disable)()
+    try:
+        if raises:
+            with pytest.raises(raises):
+                cli.main([])
+        else:
+            assert cli.main([]) == 0
+        assert during == [False]
+        assert gc.isenabled() is was_enabled
+    finally:
+        (gc.enable if original else gc.disable)()
