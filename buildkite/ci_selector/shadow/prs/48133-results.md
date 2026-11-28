@@ -1,0 +1,199 @@
+<!-- ci-selector-shadow -->
+### CI selector (shadow): 61 test steps (99 jobs) instead of 50 (63 jobs)
+
+Shadow mode: this changes nothing about what CI runs. It shows what the evidence-based selector would pick for this PR, next to today's rules. [How it works](https://github.com/vllm-project/ci-infra/tree/main/buildkite/ci_selector).
+
+**Feedback welcome:** reply here if it would skip a step this change needs, or runs something unrelated.
+
+| steps (jobs) | Today's rules | Selector | Would skip | Would add |
+|---|---|---|---|---|
+| NVIDIA, CPU and others | 50 (63) | 61 (99) | 22 (29) | 33 (65) |
+| AMD mirrors | 46 (57) | 48 (78) | 21 (28) | 23 (49) |
+
+<details><summary>Selector would run (61)</summary>
+
+- `basic-models-test-other-cpu`
+- `basic-models-tests-other`
+- `cpu-kernel-tests` ×2
+- `cpu-language-generation-and-pooling-model-tests` ×3
+- `cpu-multi-modal-model-tests-n` ×4
+- `cpu-params-env-tokenizers-parser`
+- `cpu-spec-decode-tests`
+- `cudagraph`
+- `deepseek-v4-kernel-test-b200`
+- `deepseek-v4-kernel-test-h100`
+- `distributed-compile-rpc-tests-2-gpus`
+- `distributed-compile-unit-tests-2xh100`
+- `distributed-dp-tests-4-gpus`
+- `distributed-model-tests-2-gpus` ×3
+- `distributed-torchrun-shutdown-tests-2-gpus`
+- `e2e-core-1-gpu`
+- `e2e-core-large-memory`
+- `engine`
+- `entrypoints-integration-speech_to_text`
+- `extract-hidden-states-integration`
+- `extract-hidden-states-integration-2-gpus`
+- `fusion-and-compile-unit-tests-2xb200`
+- `fusion-e2e-config-sweep-h100`
+- `fusion-e2e-quick-h100`
+- `fusion-e2e-tp2-ar-rms-config-sweep-h100`
+- `fusion-e2e-tp2-asynctp-config-sweep-h100`
+- `fusion-e2e-tp2-b200`
+- `fusion-e2e-tp2-quick-h100`
+- `glm5next-unit-tests`
+- `kernels-attention-test` ×7
+- `kernels-b200` ×3
+- `kernels-core-operation-test` ×3
+- `kernels-flashmla-test-h100`
+- `kernels-mhc-test-b200`
+- `kernels-moe-test` ×5
+- `kernels-root-misc-test-b200`
+- `kimi-k3-unit-tests-b200`
+- `language-models-tests-extra-standard` ×2
+- `language-models-tests-granite-l4-compatibility`
+- `language-models-tests-hybrid` ×2
+- `language-models-tests-standard`
+- `lora` ×4
+- `model-executor`
+- `multi-modal-models-standard-4-other-whisper`
+- `multi-modal-processor-cpu` ×4
+- `pytorch-compilation-dynamic-shapes`
+- `pytorch-compilation-passes-unit-tests`
+- `pytorch-compilation-unit-tests`
+- `pytorch-compilation-unit-tests-h100`
+- `pytorch-fullgraph-cudagraph-l4-compatibility`
+- `pytorch-fullgraph-test`
+- `quantization` ×4
+- `quantized-models-test`
+- `qwen4-exp-unit-tests`
+- `qwen4-exp-unit-tests-cpu`
+- `spec-decode-draft-model` ×4
+- `v1-attention-b200` ×2
+- `v1-attention-h100-mi300` ×2
+- `v1-executor-worker`
+- `v1-sample`
+- `v1-spec-decode`
+</details>
+
+<details><summary>Would skip (today's rules run them) (22)</summary>
+
+- `ascend-npu-test`
+- `basic-correctness` ×2
+- `basic-correctness-cpu-offload`
+- `basic-correctness-cumem`
+- `basic-correctness-prefetch-offload`
+- `basic-correctness-sleep-mode`
+- `basic-models-tests-initialization`
+- `benchmarks-cli-test`
+- `elastic-ep-scaling-test`
+- `entrypoints-integration-api-server` ×4
+- `entrypoints-integration-api-server-generate`
+- `entrypoints-integration-api-server-openai-chat_completion`
+- `entrypoints-integration-api-server-openai-completion`
+- `entrypoints-integration-llm`
+- `entrypoints-integration-multimodal`
+- `entrypoints-integration-pooling`
+- `entrypoints-integration-responses-api`
+- `kernels-fla-ops-test-b200`
+- `multi-modal-models-standard-1-qwen2`
+- `multi-modal-models-standard-2-qwen3-gemma`
+- `multi-modal-models-standard-3-llava-qwen2-vl`
+- `multi-modal-processor` ×4
+</details>
+
+<details><summary>Would add (today's rules do not run them) (33)</summary>
+
+- `cpu-kernel-tests` ×2 (code map)
+- `cpu-multi-modal-model-tests-n` ×4 (code map)
+- `cpu-params-env-tokenizers-parser` (code map)
+- `cpu-spec-decode-tests` (code map)
+- `deepseek-v4-kernel-test-b200` (code map)
+- `deepseek-v4-kernel-test-h100` (code map)
+- `distributed-dp-tests-4-gpus` (code map)
+- `distributed-model-tests-2-gpus` ×3 (code map)
+- `distributed-torchrun-shutdown-tests-2-gpus` (code map)
+- `e2e-core-1-gpu` (code map)
+- `e2e-core-large-memory` (code map)
+- `extract-hidden-states-integration` (code map)
+- `extract-hidden-states-integration-2-gpus` (code map)
+- `glm5next-unit-tests` (code map)
+- `kernels-attention-test` ×7 (code map)
+- `kernels-b200` ×3 (code map)
+- `kernels-core-operation-test` ×3 (code map)
+- `kernels-flashmla-test-h100` (code map)
+- `kernels-moe-test` ×5 (code map)
+- `kimi-k3-unit-tests-b200` (code map)
+- `language-models-tests-extra-standard` ×2 (code map)
+- `lora` ×4 (code map)
+- `model-executor` (code map)
+- `quantization` ×4 (code map)
+- `quantized-models-test` (code map)
+- `qwen4-exp-unit-tests` (code map)
+- `qwen4-exp-unit-tests-cpu` (code map)
+- `spec-decode-draft-model` ×4 (code map)
+- `v1-attention-b200` ×2 (code map)
+- `v1-attention-h100-mi300` ×2 (code map)
+- `v1-executor-worker` (code map)
+- `v1-sample` (code map)
+- `v1-spec-decode` (code map)
+</details>
+
+<details><summary>AMD mirrors: would skip (21)</summary>
+
+- `basic-correctness` ×2
+- `basic-correctness-cpu-offload`
+- `basic-correctness-cumem`
+- `basic-correctness-prefetch-offload`
+- `basic-correctness-sleep-mode`
+- `basic-models-tests-initialization`
+- `benchmarks-cli-test`
+- `entrypoints-integration-api-server` ×4
+- `entrypoints-integration-api-server-generate`
+- `entrypoints-integration-api-server-openai-chat_completion`
+- `entrypoints-integration-api-server-openai-completion`
+- `entrypoints-integration-llm`
+- `entrypoints-integration-multimodal`
+- `entrypoints-integration-pooling`
+- `entrypoints-integration-responses-api`
+- `kernels-fla-ops-test-b200`
+- `multi-modal-models-standard-1-qwen2`
+- `multi-modal-models-standard-2-qwen3-gemma`
+- `multi-modal-models-standard-3-llava-qwen2-vl`
+- `multi-modal-processor` ×4
+- `platform-tests`
+</details>
+
+<details><summary>AMD mirrors: would add (23)</summary>
+
+- `deepseek-v4-kernel-test-h100` (code map)
+- `distributed-model-tests-2-gpus` ×3 (code map)
+- `e2e-core-1-gpu` (code map)
+- `e2e-core-large-memory` (code map)
+- `extract-hidden-states-integration` (code map)
+- `extract-hidden-states-integration-2-gpus` (code map)
+- `glm5next-unit-tests` (code map)
+- `kernels-attention-test` ×7 (code map)
+- `kernels-core-operation-test` ×3 (code map)
+- `kernels-moe-test` ×5 (code map)
+- `kimi-k3-unit-tests-b200` (code map)
+- `language-models-tests-extra-standard` ×2 (code map)
+- `lora` ×4 (code map)
+- `model-executor` (code map)
+- `quantization` ×4 (code map)
+- `quantized-models-test` (code map)
+- `qwen4-exp-unit-tests` (code map)
+- `spec-decode-draft-model` ×4 (code map)
+- `v1-attention-b200` ×2 (code map)
+- `v1-attention-h100-mi300` ×2 (code map)
+- `v1-executor-worker` (code map)
+- `v1-sample` (code map)
+- `v1-spec-decode` (code map)
+</details>
+
+#### CI results (2026-09-30 10:52 UTC)
+
+113 passed, 0 failed, 0 pending.
+
+No failures to judge.
+
+<sub>3 changed files · base `d71f662606` · head `d5ee309314` · Python record: not used (/tmp/ci-infra-selector/buildkite/ci_selector/coverage-data/table.json.gz is table version 5, expected 7; re-merge it from the raw recordings) · kernel record: table d882bddbea (build 91957), map d882bddbea · not counted: 10 build steps, 5 A100 steps the generator no longer emits, 25 optional steps the selector would also run</sub>
