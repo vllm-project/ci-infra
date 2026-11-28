@@ -31,6 +31,7 @@ py-modules = [
     "runtime_shard_coverage",
     "unblock_jobs",
     "selector_gate",
+    "retry_staging",
 ]
 
 [tool.setuptools.packages.find]
