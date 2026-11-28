@@ -618,11 +618,12 @@ class TestStampShapeIsPinned:
         """Without its listed fields, the stamp must hash to the shape pinned
         when that version was current, so a field added since is never read
         from an older row as its default by accident."""
-        pinned = {6: "d2817305f3714d26", 7: "9d3fc3a03453ab23"}
+        pinned = {6: "d2817305f3714d26", 7: "9d3fc3a03453ab23", 8: "6939ef6f6d4654dd"}
         for version, missing in READABLE_OLDER.items():
             assert self.shape(missing) == pinned[version], version
 
-    @pytest.mark.parametrize("version", sorted(READABLE_OLDER))
+    # v8 lacks no stamp field, only the line encoding; test_table covers it.
+    @pytest.mark.parametrize("version", [v for v, m in READABLE_OLDER.items() if m])
     def test_an_older_table_loads_and_its_rows_verify(self, tmp_path, version):
         """An older table is the current one minus the fields its version
         lacked, signed without them, and it reads those fields as no data."""

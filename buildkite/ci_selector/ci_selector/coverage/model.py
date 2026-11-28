@@ -26,6 +26,7 @@ import subprocess
 import types
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
+from functools import cache
 from inspect import CO_OPTIMIZED
 from pathlib import Path
 
@@ -69,11 +70,11 @@ ADD_MAX_SHARE_ENV = "CI_SELECTOR_ADD_MAX_SHARE"
 # above is skipped and every name is accepted.
 MIN_ROWS_FOR_BREADTH = 20
 
-# Bumped whenever the stamp's shape changes. `load` refuses a version it does
-# not know, which is the only thing stopping an older table from reading
-# healthier than it was recorded: a missing field takes its default, and every
-# default here is the healthy value.
-TABLE_VERSION = 8
+# Bumped whenever the stamp's shape or a row's encoding changes. `load` refuses
+# a version it does not know, which is the only thing stopping an older table
+# from reading healthier than it was recorded: a missing field takes its
+# default, and every default here is the healthy value.
+TABLE_VERSION = 9
 
 # Fingerprint of `Stamp`'s fields, so remembering to bump the version above is a
 # mechanism and not a discipline. A test recomputes it and fails when the two
@@ -90,6 +91,9 @@ STAMP_SHAPE = "6939ef6f6d4654dd"
 # missing fields default to "no data"; otherwise leave it out.
 # Guard: test_model_and_build pins each entry to the shape that version had.
 READABLE_OLDER: dict[int, frozenset[str]] = {
+    # Same stamp. Lines are [first, last] lists, which `_verify` reads as the
+    # comma-joined numbers v8 signed.
+    8: frozenset(),
     # No lines: `lines_recorded` defaults to False, so every function is read
     # at function grain, as before.
     7: frozenset({"lines_recorded", "n_lines"}),
@@ -553,15 +557,16 @@ class Row:
     # recording commit. Stored rather than derived at load, because deriving it
     # needs the repo at that commit and `load` has no git.
     import_time: dict[str, frozenset[str]] = field(default_factory=dict)
-    # Repo path -> the line numbers that ran, at the recording commit.
-    lines: dict[str, frozenset[int]] = field(default_factory=dict)
+    # Repo path -> the lines that ran at the recording commit, as `runs_text`
+    # writes them. Read only for the files a diff asks about.
+    lines: dict[str, str] = field(default_factory=dict)
 
     def ran_any_line(self, path: str, lines: frozenset[int]) -> bool | None:
         """Whether the step ran any of `lines` in `path`, or None when the row
         cannot say: no line record, or none for that file."""
         if not self.stamp.lines_recorded or path not in self.lines:
             return None
-        return not self.lines[path].isdisjoint(lines)
+        return not read_runs(self.lines[path]).isdisjoint(lines)
 
     def contains(self, path: str, name: str) -> bool:
         """Entered this frame at all, import included. What the drop side reads
@@ -583,12 +588,37 @@ class Row:
         return self.contains(path, name) and name not in self.import_time.get(path, ())
 
 
+def runs_text(lines) -> str:
+    """Line numbers as runs: {0, 1, 2, 3, 7} -> "0-3,7"."""
+    runs: list[list[int]] = []
+    for n in sorted(lines):
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
+@cache
+def read_runs(text: str) -> frozenset[int]:
+    """The line numbers in a `runs_text`. Cached: a diff asks every row about
+    the same few files, and rows that ran a file alike share its text."""
+    numbers: set[int] = set()
+    for run in filter(None, text.split(",")):
+        first, _, last = run.partition("-")
+        lo, hi = int(first), int(last or first)
+        if hi < lo:
+            raise ValueError(f"bad line run {run!r}")
+        numbers.update(range(lo, hi + 1))
+    return frozenset(numbers)
+
+
 def digest_of(
     functions: dict[str, frozenset[str]],
     stamp: Stamp | None = None,
     import_time: dict[str, frozenset[str]] | None = None,
     omit: frozenset[str] = frozenset(),
-    lines: dict[str, frozenset[int]] | None = None,
+    lines: dict[str, str] | None = None,
 ) -> str:
     """Sign the functions AND the stamp that judges them. Signing only the
     functions left every field droppability turns on unsigned, so deleting a
@@ -616,13 +646,14 @@ def digest_of(
                 h.update(name.encode())
                 h.update(b"\0")
             h.update(b"\1")
-    # Lines decide drops as surely as names do, so they are signed the same.
+    # Lines decide drops as surely as names do, so they are signed too: the
+    # text as stored, so verifying a row never decodes it.
     if lines:
         h.update(b"\3")
         for path in sorted(lines):
             h.update(path.encode())
             h.update(b"\0")
-            h.update(",".join(map(str, sorted(lines[path]))).encode())
+            h.update(lines[path].encode())
             h.update(b"\1")
     if stamp is not None:
         fields = {

@@ -353,8 +353,11 @@ def _verify(
         stamp = Stamp(**blob["stamp"])
         functions = {p: frozenset(n) for p, n in blob["functions"].items()}
         import_time = {p: frozenset(n) for p, n in blob["import_time"].items()}
+        # Run text. A v8 row holds [first, last] lists, and its numbers
+        # comma-joined, which is what v8 signed, are run text too.
         lines = {
-            p: frozenset(expand_ranges(r)) for p, r in blob.get("lines", {}).items()
+            p: r if isinstance(r, str) else ",".join(map(str, expand_ranges(r)))
+            for p, r in blob.get("lines", {}).items()
         }
     except (KeyError, TypeError, ValueError) as exc:
         return None, f"unreadable row: {exc}"
@@ -374,8 +377,6 @@ def _verify(
         for path, names in import_time.items()
     ):
         return None, "import-time names absent from the row's functions"
-    if sum(len(v) for v in lines.values()) != stamp.n_lines:
-        return None, f"line count != stamp {stamp.n_lines}"
     if not lines.keys() <= functions.keys():
         return None, "lines for a file the row never entered"
     # Not `if stamp.digest and ...`: an empty digest used to skip the check and
@@ -393,18 +394,6 @@ def _verify(
         import_time=import_time,
         lines=lines,
     ), ""
-
-
-def compress_ranges(lines) -> list[list[int]]:
-    """Sorted line numbers as [first, last] runs: executed lines cluster, and
-    a table of bare numbers is several times the size."""
-    out: list[list[int]] = []
-    for n in sorted(lines):
-        if out and n == out[-1][1] + 1:
-            out[-1][1] = n
-        else:
-            out.append([n, n])
-    return out
 
 
 def expand_ranges(ranges) -> list[int]:
