@@ -10,13 +10,14 @@ not just the absence of a crash.
 
 from __future__ import annotations
 
+import dataclasses
 import gzip
 import json
 from pathlib import Path
 
 import pytest
 from ci_selector.coverage.changed_funcs import Attribution, FileQuery, Query
-from ci_selector.coverage.model import Stamp, digest_of
+from ci_selector.coverage.model import Stamp, digest_of, read_runs, runs_text
 from ci_selector.coverage.phase import PhaseMode
 from ci_selector.coverage.table import Evidence, apply, load
 from ci_selector.scripts.build import merge_build, write_table
@@ -69,6 +70,81 @@ def table_path(tmp_path: Path, tmp_repo: Repo) -> Path:
     out = tmp_path / "table.json"
     write_table(merge_build(build.finish(), tmp_repo.root), out)
     return out
+
+
+@pytest.fixture
+def lines_table_path(tmp_path: Path, tmp_repo: Repo) -> Path:
+    build = Build(tmp_path / "sweep" / "b1", "1", tmp_repo.head())
+    process_file(
+        build.job("j0", step_key="runs-it") / "fn.a.txt",
+        [("mod.py", "plain")],
+        ran_lines=[("mod.py", n) for n in (0, 1, 2, 3, 7)],
+    )
+    out = tmp_path / "table.json"
+    write_table(merge_build(build.finish(), tmp_repo.root), out)
+    return out
+
+
+class TestLineRuns:
+    """Each file's lines are one signed run text, decoded only when a diff
+    asks about that file."""
+
+    def test_each_file_is_one_run_text_that_answers(self, lines_table_path: Path):
+        blob = json.loads(lines_table_path.read_text())["rows"]["runs-it"]
+        assert blob["lines"] == {"vllm/mod.py": "0-3,7"}
+        row = load(lines_table_path).row("runs-it")
+        assert row.ran_any_line("vllm/mod.py", frozenset({7})) is True
+        assert row.ran_any_line("vllm/mod.py", frozenset({5})) is False
+
+    def test_an_edited_run_is_rejected(self, lines_table_path: Path):
+        # Dropping a line is the dangerous direction: it reads as a step that
+        # never reached the change.
+        payload = json.loads(lines_table_path.read_text())
+        payload["rows"]["runs-it"]["lines"]["vllm/mod.py"] = "0-3"
+        lines_table_path.write_text(json.dumps(payload))
+        assert load(lines_table_path).rejected == {"runs-it": "digest mismatch"}
+
+    def test_run_text_round_trips_and_refuses_a_backwards_run(self):
+        # Never written, so only a writer bug gets here; `decide` turns the
+        # error into the map's selection.
+        assert read_runs(runs_text({9, 0, 1, 2, 3, 7, 10})) == {0, 1, 2, 3, 7, 9, 10}
+        with pytest.raises(ValueError):
+            read_runs("7-0")
+
+    def test_a_v8_table_still_loads_and_answers(self, tmp_path: Path):
+        """The reader ships before the first v9 table is published. The digest
+        was written by ci-infra 6798f40a; recomputing it here would only test
+        this code against itself."""
+        stamp = Stamp(
+            jobs=["j"],
+            interpreters=["3.14.0"],
+            processes=1,
+            clean_exits=1,
+            n_files=1,
+            n_functions=2,
+            n_import_time=1,
+            lines_recorded=True,
+            n_lines=5,
+        )
+        blob = {
+            "keyed": True,
+            "stamp": {
+                **dataclasses.asdict(stamp),
+                "digest": "876e0b225f7ff691aec63e9a6fa24737"
+                "c60c38a7d72555eb9d5e60f7df9e593c",
+            },
+            "functions": {"vllm/a.py": ["<module>", "f"]},
+            "import_time": {"vllm/a.py": ["<module>"]},
+            "lines": {"vllm/a.py": [[0, 3], [7, 7]]},
+        }
+        path = tmp_path / "t.json"
+        path.write_text(json.dumps({"version": 8, "rows": {"s": blob}}))
+        row = load(path).row("s")
+        assert row.ran_any_line("vllm/a.py", frozenset({7})) is True
+        assert row.ran_any_line("vllm/a.py", frozenset({5})) is False
+        blob["lines"]["vllm/a.py"] = [[0, 3]]
+        path.write_text(json.dumps({"version": 8, "rows": {"s": blob}}))
+        assert load(path).rejected == {"s": "digest mismatch"}
 
 
 class TestReading:

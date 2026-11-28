@@ -28,7 +28,6 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from ..coverage.table import compress_ranges
 from ..coverage.joblog import (
     PLUGIN_MARKER,
     PYTEST_SOURCE,
@@ -48,7 +47,9 @@ from ..coverage.model import (
     Stamp,
     digest_of,
     read_process,
+    read_runs,
     row_key,
+    runs_text,
 )
 
 # Build env worth keeping on a recorded row, by name. Wholesale capture is not
@@ -448,14 +449,15 @@ def merge_build(
         if not stamp.lines_recorded:
             lines = {}
         stamp.n_lines = sum(len(v) for v in lines.values())
-        stamp.digest = digest_of(functions, stamp, import_time, lines=lines)
+        runs = {p: runs_text(n) for p, n in lines.items()}
+        stamp.digest = digest_of(functions, stamp, import_time, lines=runs)
         rows[key] = Row(
             key=key,
             keyed=keyed_flag[key],
             functions=functions,
             stamp=stamp,
             import_time=import_time,
-            lines=lines,
+            lines=runs,
         )
     print(census.summary())
     if census.delivery:
@@ -568,8 +570,8 @@ def union_rows(left: Row, right: Row) -> Row:
     lines: dict[str, frozenset[int]] = {}
     if lines_recorded:
         for path in left.lines.keys() | right.lines.keys():
-            lines[path] = left.lines.get(path, frozenset()) | right.lines.get(
-                path, frozenset()
+            lines[path] = read_runs(left.lines.get(path, "")) | read_runs(
+                right.lines.get(path, "")
             )
     stamp = Stamp(
         jobs=sorted(set(a.jobs) | set(b.jobs)),
@@ -615,14 +617,15 @@ def union_rows(left: Row, right: Row) -> Row:
     stamp.n_functions = sum(len(v) for v in functions.values())
     stamp.n_import_time = sum(len(v) for v in import_time.values())
     stamp.n_lines = sum(len(v) for v in lines.values())
-    stamp.digest = digest_of(functions, stamp, import_time, lines=lines)
+    runs = {p: runs_text(n) for p, n in lines.items()}
+    stamp.digest = digest_of(functions, stamp, import_time, lines=runs)
     return Row(
         key=left.key,
         keyed=left.keyed or right.keyed,
         functions=functions,
         stamp=stamp,
         import_time=import_time,
-        lines=lines,
+        lines=runs,
     )
 
 
@@ -684,7 +687,7 @@ def write_table(rows: dict[str, Row], out: Path) -> None:
                 "import_time": {
                     p: sorted(n) for p, n in sorted(row.import_time.items())
                 },
-                "lines": {p: compress_ranges(n) for p, n in sorted(row.lines.items())},
+                "lines": dict(sorted(row.lines.items())),
             }
             for key, row in sorted(rows.items())
         },
